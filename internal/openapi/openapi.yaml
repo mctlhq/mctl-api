@@ -4226,6 +4226,284 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/v1/agents/dev-loop/{workflow_id}/owner-actions:
+    post:
+      summary: Request changes, defer or request cancel on a DevLoop
+      description: |
+        mctl-api#900. Owner actions are not approval decisions: approve and
+        deny remain the only `aar_` decisions, and none of these three
+        decides, denies, consumes or expires a grant. `request_changes` and
+        `defer` are durable records on the DevLoop's pending grant.
+        `request_cancel` signals abandon pinned to the described run and
+        reports `cancellation_pending`, `cancelled`,
+        `cancellation_effects_unknown` or `already_finished`; it stops future
+        work and never rolls anything back. The body carries no free text.
+        A `binding` follows the approve route's stale-card rules; a cancel
+        on a DevLoop with no grant yet is bound to the run (optional
+        `expected_run_id`) instead. Idempotent per principal and
+        `idempotency_key`. **Direct human admin required**: a service
+        principal, a relayed request or a surface token is refused with
+        `owner_action_forbidden`.
+      tags: [Agent Registry]
+      parameters:
+        - name: workflow_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: dev-loop-mctlhq-seerrsense-73
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [action, idempotency_key]
+              properties:
+                action:
+                  type: string
+                  enum: [request_changes, defer, request_cancel]
+                idempotency_key:
+                  type: string
+                  maxLength: 128
+                binding:
+                  type: object
+                  additionalProperties: false
+                  required: [approval_ref, context_digest, content_digest]
+                  properties:
+                    approval_ref:
+                      type: string
+                    context_digest:
+                      type: string
+                    content_digest:
+                      type: string
+                expected_run_id:
+                  type: string
+                  description: request_cancel only. The run the card was rendered for.
+                reason_code:
+                  type: string
+                  pattern: '^[a-z0-9._:-]{1,64}$'
+      responses:
+        '200':
+          description: The owner action, new or replayed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, workflow_id, action, state, outcome, replayed]
+                properties:
+                  id:
+                    type: string
+                    description: The owner action id (oa_...).
+                  workflow_id:
+                    type: string
+                  run_id:
+                    type: string
+                    description: The Temporal run a cancel is bound to.
+                  execution_id:
+                    type: string
+                  approval_ref:
+                    type: string
+                    description: The aar_ grant observed. Never decided by an owner action.
+                  action:
+                    type: string
+                    enum: [request_changes, defer, request_cancel]
+                  reason_code:
+                    type: string
+                  state:
+                    type: string
+                    enum: [requested, recorded, signalled, finished]
+                  outcome:
+                    type: string
+                    description: changes_requested, deferred, cancellation_pending, cancelled, cancellation_effects_unknown or already_finished; empty while a cancel is requested and not yet signalled.
+                  replayed:
+                    type: boolean
+                  created_at:
+                    type: string
+                    format: date-time
+                  updated_at:
+                    type: string
+                    format: date-time
+        '400':
+          description: Malformed body, an unknown or free-text field, or expected_run_id on an action other than request_cancel
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Not a direct human admin (owner_action_forbidden)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No DevLoopWorkflow under this workflow_id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: approval_context_changed, approval_grant_missing, a closed grant state, owner_action_idempotency_conflict, execution_ambiguous or cancellation_run_changed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: approval_binding_missing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: Temporal error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Temporal client or work-item store not configured or unreachable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    get:
+      summary: List a DevLoop's owner actions
+      description: mctl-api#900. Oldest first. **Admin access required.**
+      tags: [Agent Registry]
+      parameters:
+        - name: workflow_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The owner actions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [workflow_id, owner_actions]
+                properties:
+                  workflow_id:
+                    type: string
+                  owner_actions:
+                    type: array
+                    items:
+                      type: object
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Temporal client or work-item store not configured or unreachable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/agents/dev-loop/{workflow_id}/owner-actions/{id}:
+    get:
+      summary: Read one owner action
+      description: |
+        mctl-api#900. For a cancel whose abandon signal was delivered this
+        re-observes the run and reports the current outcome
+        (`cancellation_pending` may become `cancelled` or
+        `cancellation_effects_unknown`). It never sends a signal.
+        **Admin access required.**
+      tags: [Agent Registry]
+      parameters:
+        - name: workflow_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The owner action
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, workflow_id, action, state, outcome, replayed]
+                properties:
+                  id:
+                    type: string
+                    description: The owner action id (oa_...).
+                  workflow_id:
+                    type: string
+                  run_id:
+                    type: string
+                    description: The Temporal run a cancel is bound to.
+                  execution_id:
+                    type: string
+                  approval_ref:
+                    type: string
+                    description: The aar_ grant observed. Never decided by an owner action.
+                  action:
+                    type: string
+                    enum: [request_changes, defer, request_cancel]
+                  reason_code:
+                    type: string
+                  state:
+                    type: string
+                    enum: [requested, recorded, signalled, finished]
+                  outcome:
+                    type: string
+                    description: changes_requested, deferred, cancellation_pending, cancelled, cancellation_effects_unknown or already_finished; empty while a cancel is requested and not yet signalled.
+                  replayed:
+                    type: boolean
+                  created_at:
+                    type: string
+                    format: date-time
+                  updated_at:
+                    type: string
+                    format: date-time
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such owner action for this workflow
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Temporal client or work-item store not configured or unreachable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/v1/agents/dev-loop/{workflow_id}/abandon:
     post:
       summary: Gracefully end a DevLoopWorkflow

@@ -604,6 +604,46 @@ const (
 	devLoopCodeExecutionAmbiguous = "execution_ambiguous"
 )
 
+// executionAmbiguousError is resolveDevLoopGrant finding more than one open
+// work-item execution for a workflow.
+type executionAmbiguousError struct{ count int }
+
+func (e *executionAmbiguousError) Error() string {
+	return fmt.Sprintf("%d open work-item executions are attached", e.count)
+}
+
+// resolveDevLoopGrant is the read-only half of decideDevLoopApproval: the
+// run's one open we_ execution and that execution's newest
+// mctl-agents-approve grant, in any state. The execution is nil when none is
+// attached, the grant nil when the execution has none. The execution is
+// returned beside an error from the grant read. A store that cannot be read
+// is an error, never "no grant"; several open executions are an
+// *executionAmbiguousError. The caller has checked h.opts.WorkItems.
+func (h *Handlers) resolveDevLoopGrant(ctx context.Context, workflowID string) (*workitems.Execution, *workitems.ActionApprovalRequest, error) {
+	execs, err := h.opts.WorkItems.OpenExecutionsOfEngineRun(ctx, workitems.EngineTemporal, workflowID)
+	switch {
+	case err != nil:
+		return nil, nil, err
+	case len(execs) == 0:
+		return nil, nil, nil
+	case len(execs) > 1:
+		return nil, nil, &executionAmbiguousError{count: len(execs)}
+	}
+	exec := execs[0]
+	// The newest grant of this execution decides, whatever its state: an
+	// older live grant must not outrank a newer recorded denial.
+	list, err := h.opts.WorkItems.ActionApprovals(ctx, workitems.ActionApprovalFilter{
+		ExecutionID: exec.ID, ActionKind: devLoopApprovalKind, Limit: 1,
+	})
+	if err != nil {
+		return &exec, nil, err
+	}
+	if len(list) == 0 {
+		return &exec, nil, nil
+	}
+	return &exec, &list[0], nil
+}
+
 // decideDevLoopApproval resolves workflowID to the run's one open we_
 // execution (engine temporal, engine_ref the workflow id or, for a run
 // dispatched from an execution request, "<workflow_id>#<request_id>"),
@@ -663,30 +703,23 @@ func (h *Handlers) decideDevLoopApproval(w http.ResponseWriter, r *http.Request,
 		return "", true
 	}
 	ctx := r.Context()
-	execs, err := h.opts.WorkItems.OpenExecutionsOfEngineRun(ctx, workitems.EngineTemporal, workflowID)
+	exec, grant, err := h.resolveDevLoopGrant(ctx, workflowID)
+	if exec != nil {
+		auditParams["execution_id"] = exec.ID
+	}
+	var ambiguous *executionAmbiguousError
 	switch {
+	case errors.As(err, &ambiguous):
+		return refuse(http.StatusConflict, devLoopCodeExecutionAmbiguous,
+			fmt.Sprintf("%d open work-item executions are attached for this workflow; resolve them before approving", ambiguous.count))
 	case err != nil:
 		return unavailable(err)
-	case len(execs) == 0:
+	case exec == nil:
 		return noGrant("no open work-item execution is attached for this workflow")
-	case len(execs) > 1:
-		return refuse(http.StatusConflict, devLoopCodeExecutionAmbiguous,
-			fmt.Sprintf("%d open work-item executions are attached for this workflow; resolve them before approving", len(execs)))
-	}
-	exec := execs[0]
-	auditParams["execution_id"] = exec.ID
-	// The newest grant of this execution decides, whatever its state: an
-	// older live grant must not outrank a newer recorded denial.
-	list, err := h.opts.WorkItems.ActionApprovals(ctx, workitems.ActionApprovalFilter{
-		ExecutionID: exec.ID, ActionKind: devLoopApprovalKind, Limit: 1,
-	})
-	if err != nil {
-		return unavailable(err)
-	}
-	if len(list) == 0 {
+	case grant == nil:
 		return noGrant("no " + devLoopApprovalKind + " approval for execution " + exec.ID)
 	}
-	newest := list[0]
+	newest := *grant
 	// A bound decision decides the named grant and never the newest one: a
 	// card for a superseded grant must not approve its successor.
 	if bind != nil && bind.ApprovalRef != newest.ID {
@@ -753,7 +786,108 @@ type abandonDevLoopRequest struct {
 const (
 	devLoopOutcomeSignalled       = "signalled"
 	devLoopOutcomeAlreadyFinished = "already_finished"
+	// devLoopOutcomeRunChanged is abandonDevLoopRun's own marker for a run
+	// that ended and was replaced before the signal; it always comes with a
+	// Fail, and is never an answer of the abandon route.
+	devLoopOutcomeRunChanged = "run_changed"
 )
+
+// abandonFailure is a refusal of abandonDevLoopRun: the HTTP status, the
+// audit message and the client message the abandon route has always used for
+// it, plus the underlying error when there is one.
+type abandonFailure struct {
+	Status int
+	Audit  string
+	Client string
+	Err    error
+}
+
+// abandonResult is what abandonDevLoopRun observed and did. Exactly one of
+// Fail (nothing was decided) or Outcome (signalled / already_finished, with
+// Exec the execution it applies to) is set.
+type abandonResult struct {
+	Outcome string
+	Exec    *temporalclient.DevLoopExecution
+	Fail    *abandonFailure
+}
+
+// describeDevLoopRun describes workflowID, or returns the failure to report.
+// notFoundAudit is the audit message for a NotFound: on a second look the
+// execution was observed moments ago, so "workflow not found" would
+// misreport what happened.
+func (h *Handlers) describeDevLoopRun(ctx context.Context, workflowID, notFoundAudit string) (*temporalclient.DevLoopExecution, *abandonFailure) {
+	dctx, cancel := context.WithTimeout(ctx, devLoopDescribeTimeout)
+	defer cancel()
+	exec, err := h.opts.TemporalClient.DescribeDevLoopExecution(dctx, workflowID)
+	switch {
+	case temporalclient.IsNotFound(err):
+		return nil, &abandonFailure{Status: http.StatusNotFound, Audit: notFoundAudit, Client: "workflow not found: " + workflowID, Err: err}
+	case err != nil:
+		return nil, &abandonFailure{Status: http.StatusBadGateway, Audit: "describe failed: " + err.Error(),
+			Client: "failed to describe workflow: " + err.Error(), Err: err}
+	case exec.Status == devLoopStatusUnknown:
+		// Neither running nor finished as far as anyone can tell: not a
+		// state to signal into, and not one to report as finished.
+		return nil, &abandonFailure{Status: http.StatusBadGateway, Audit: "describe returned an unknown status",
+			Client: "workflow " + workflowID + " has an execution status this server could not determine"}
+	}
+	return exec, nil
+}
+
+// abandonDevLoopRun is the signal path shared by AbandonDevLoopWorkflow and
+// the owner request_cancel action: describe, signal abandon pinned to the
+// described run, and on NotFound look again rather than guess. It writes no
+// response. first, when set, is an execution the caller described just now
+// and the describe is skipped. It never starts, restarts or terminates a
+// workflow.
+func (h *Handlers) abandonDevLoopRun(ctx context.Context, workflowID string, payload map[string]string, first *temporalclient.DevLoopExecution) abandonResult {
+	exec := first
+	if exec == nil {
+		var fail *abandonFailure
+		if exec, fail = h.describeDevLoopRun(ctx, workflowID, "workflow not found"); fail != nil {
+			return abandonResult{Fail: fail}
+		}
+	}
+	if exec.Status != devLoopStatusRunning {
+		return abandonResult{Outcome: devLoopOutcomeAlreadyFinished, Exec: exec}
+	}
+	// The signal has no deadline of its own: it is bounded only by the
+	// request context, as SignalApprove is in ApproveDevLoopWorkflow. Change
+	// both together if a deadline is ever added.
+	if err := h.opts.TemporalClient.SignalAbandon(ctx, workflowID, exec.RunID, payload); err != nil {
+		if !temporalclient.IsNotFound(err) {
+			return abandonResult{Fail: &abandonFailure{Status: http.StatusBadGateway, Audit: "signal failed: " + err.Error(),
+				Client: "failed to signal abandon: " + err.Error(), Err: err}}
+		}
+		// Temporal answers NotFound for the described run once it has
+		// completed, whether or not a new run has started since. Look again
+		// instead of guessing.
+		after, fail := h.describeDevLoopRun(ctx, workflowID, "execution vanished between describe and signal")
+		if fail != nil {
+			return abandonResult{Fail: fail}
+		}
+		if after.Status == devLoopStatusRunning {
+			if after.RunID != exec.RunID {
+				// A DevLoopWorkflow continue-as-new also lands here: the
+				// described run closes as ContinuedAsNew, its successor is
+				// Running under the same workflow id, and this second describe
+				// sees the successor. The 409 is the intended answer, not
+				// evidence of an unexpected restart; the caller only has to
+				// re-issue the request.
+				// The described run ended and a new one took the id. It was
+				// not the run anyone looked at, so it is not abandoned here.
+				return abandonResult{Outcome: devLoopOutcomeRunChanged, Exec: after, Fail: &abandonFailure{Status: http.StatusConflict,
+					Audit: "described run " + exec.RunID + " ended; new run " + after.RunID + " not signalled",
+					Client: "run " + exec.RunID + " ended before the signal and a new run " + after.RunID +
+						" is running under the same workflow id; it was not abandoned. Re-issue the request to abandon it."}}
+			}
+			return abandonResult{Fail: &abandonFailure{Status: http.StatusBadGateway, Audit: "signal answered not found for a running execution",
+				Client: "failed to signal abandon: " + err.Error(), Err: err}}
+		}
+		return abandonResult{Outcome: devLoopOutcomeAlreadyFinished, Exec: after}
+	}
+	return abandonResult{Outcome: devLoopOutcomeSignalled, Exec: exec}
+}
 
 // AbandonDevLoopWorkflow handles POST /api/v1/agents/dev-loop/{workflow_id}/abandon
 // (mctl-api#392) — the MCP-reachable form of mctl-agents#420's
@@ -810,7 +944,9 @@ func (h *Handlers) AbandonDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 	}
 
 	auditParams := map[string]string{"abandoned_by": user.ID, "reason": reason}
-	fail := func(code int, message, clientMessage string) {
+	payload := map[string]string{"reason": reason, "abandoned_by": user.ID}
+	res := h.abandonDevLoopRun(r.Context(), workflowID, payload, nil)
+	if res.Fail != nil {
 		h.logAudit(r, audit.Entry{
 			UserID:       user.ID,
 			Operation:    "dev-loop-abandon",
@@ -818,11 +954,13 @@ func (h *Handlers) AbandonDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 			WorkflowName: workflowID,
 			Status:       "failed",
 			RiskLevel:    string(operations.RiskMedium),
-			Message:      message,
+			Message:      res.Fail.Audit,
 		})
-		writeError(w, code, clientMessage)
+		writeError(w, res.Fail.Status, res.Fail.Client)
+		return
 	}
-	finished := func(exec *temporalclient.DevLoopExecution) {
+	exec := res.Exec
+	if res.Outcome == devLoopOutcomeAlreadyFinished {
 		h.logAudit(r, audit.Entry{
 			UserID:       user.ID,
 			Operation:    "dev-loop-abandon",
@@ -839,77 +977,6 @@ func (h *Handlers) AbandonDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 			"outcome":     devLoopOutcomeAlreadyFinished,
 			"message":     "The DevLoopWorkflow already finished; nothing was signalled.",
 		})
-	}
-	// describe answers with the execution, or writes the error response
-	// itself and returns nil. notFoundAudit is the audit message for a
-	// NotFound: on the second look the execution was observed moments ago,
-	// so "workflow not found" would misreport what happened.
-	describe := func(notFoundAudit string) *temporalclient.DevLoopExecution {
-		dctx, cancel := context.WithTimeout(r.Context(), devLoopDescribeTimeout)
-		defer cancel()
-		exec, err := h.opts.TemporalClient.DescribeDevLoopExecution(dctx, workflowID)
-		switch {
-		case temporalclient.IsNotFound(err):
-			fail(http.StatusNotFound, notFoundAudit, "workflow not found: "+workflowID)
-			return nil
-		case err != nil:
-			fail(http.StatusBadGateway, "describe failed: "+err.Error(), "failed to describe workflow: "+err.Error())
-			return nil
-		case exec.Status == devLoopStatusUnknown:
-			// Neither running nor finished as far as anyone can tell: not a
-			// state to signal into, and not one to report as finished.
-			fail(http.StatusBadGateway, "describe returned an unknown status",
-				"workflow "+workflowID+" has an execution status this server could not determine")
-			return nil
-		}
-		return exec
-	}
-
-	exec := describe("workflow not found")
-	if exec == nil {
-		return
-	}
-	if exec.Status != devLoopStatusRunning {
-		finished(exec)
-		return
-	}
-
-	payload := map[string]string{"reason": reason, "abandoned_by": user.ID}
-	// The signal has no deadline of its own: it is bounded only by the
-	// request context, as SignalApprove is in ApproveDevLoopWorkflow. Change
-	// both together if a deadline is ever added.
-	if err := h.opts.TemporalClient.SignalAbandon(r.Context(), workflowID, exec.RunID, payload); err != nil {
-		if !temporalclient.IsNotFound(err) {
-			fail(http.StatusBadGateway, "signal failed: "+err.Error(), "failed to signal abandon: "+err.Error())
-			return
-		}
-		// Temporal answers NotFound for the described run once it has
-		// completed, whether or not a new run has started since. Look again
-		// instead of guessing.
-		after := describe("execution vanished between describe and signal")
-		if after == nil {
-			return
-		}
-		if after.Status == devLoopStatusRunning {
-			if after.RunID != exec.RunID {
-				// A DevLoopWorkflow continue-as-new also lands here: the
-				// described run closes as ContinuedAsNew, its successor is
-				// Running under the same workflow id, and this second describe
-				// sees the successor. The 409 is the intended answer, not
-				// evidence of an unexpected restart; the caller only has to
-				// re-issue the request.
-				// The described run ended and a new one took the id. It was
-				// not the run anyone looked at, so it is not abandoned here.
-				fail(http.StatusConflict, "described run "+exec.RunID+" ended; new run "+after.RunID+" not signalled",
-					"run "+exec.RunID+" ended before the signal and a new run "+after.RunID+
-						" is running under the same workflow id; it was not abandoned. Re-issue the request to abandon it.")
-				return
-			}
-			fail(http.StatusBadGateway, "signal answered not found for a running execution",
-				"failed to signal abandon: "+err.Error())
-			return
-		}
-		finished(after)
 		return
 	}
 

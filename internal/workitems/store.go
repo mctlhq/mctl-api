@@ -250,6 +250,10 @@ func NewStore(ctx context.Context, connStr string, opts ...StoreOption) (*Store,
 		pgshared.Release(pool)
 		return nil, fmt.Errorf("workitems: create agent run token schema: %w", err)
 	}
+	if _, err := pool.Exec(ctx, ownerActionSchema); err != nil {
+		pgshared.Release(pool)
+		return nil, fmt.Errorf("workitems: create owner action schema: %w", err)
+	}
 	slog.Info("work-items store initialized")
 	st := &Store{pool: pool, now: func() time.Time { return time.Now().UTC() }}
 	for _, o := range opts {

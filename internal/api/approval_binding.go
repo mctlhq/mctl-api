@@ -107,6 +107,10 @@ func init() { prometheus.MustRegister(approvalBindingAbsentTotal) }
 const (
 	bindingRouteActionApproval = "action_approval"
 	bindingRouteDevLoop        = "dev_loop"
+	// bindingRouteDevLoopOwnerAction is request_changes, defer and
+	// request_cancel (mctl-api#900); like the DevLoop route its id is the
+	// workflow's.
+	bindingRouteDevLoopOwnerAction = "dev_loop_owner_action"
 )
 
 // bindingGate applies the shape rule and the server mode. It returns the
@@ -118,7 +122,7 @@ func (h *Handlers) bindingGate(r *http.Request, user *auth.User, route, id strin
 	}
 	// On the DevLoop route the id is the workflow's, not an aar_.
 	idKey := "approval_id"
-	if route == bindingRouteDevLoop {
+	if route == bindingRouteDevLoop || route == bindingRouteDevLoopOwnerAction {
 		idKey = "workflow_id"
 	}
 	switch h.approvalBindingMode() {

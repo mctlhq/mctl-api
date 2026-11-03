@@ -758,6 +758,7 @@ func NewRouter(opts Options) http.Handler {
 				r.Post("/agents/dev-loop/{workflow_id}/approve", h.ApproveDevLoopWorkflow)
 				// Ends a DevLoop gracefully (mctl-api#392).
 				r.Post("/agents/dev-loop/{workflow_id}/abandon", h.AbandonDevLoopWorkflow)
+				r.Post("/agents/dev-loop/{workflow_id}/owner-actions", h.RequestDevLoopOwnerAction)
 				// Signals the owning DevLoopWorkflow (mctl-api#261).
 				r.Post("/human-input/{request_id}/response", h.RespondHumanInput)
 				// Starts a mctl-gitops workflow, not a platform workflow, and
@@ -951,6 +952,8 @@ func NewRouter(opts Options) http.Handler {
 			// which would eat the 20/min write budget shared with
 			// /operations/{name}/execute and starve real writes.
 			r.Get("/agents/dev-loop/{workflow_id}", h.GetDevLoopWorkflow)
+			r.Get("/agents/dev-loop/{workflow_id}/owner-actions", h.ListDevLoopOwnerActions)
+			r.Get("/agents/dev-loop/{workflow_id}/owner-actions/{id}", h.GetDevLoopOwnerAction)
 
 			// Who the API resolved the caller to (mctl-api#376 D3):
 			// side-effect-free, outside the write group like the dev-loop

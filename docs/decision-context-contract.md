@@ -145,6 +145,80 @@ decision-age bound, never later than `expires_at`. Both are checked when the
 approval is spent. Set `ACTION_APPROVAL_MAX_DECISION_AGE=168h` to keep the
 previous 7-day horizon.
 
+## Owner actions (mctl-api#900)
+
+Approve and deny are the only decisions of an `aar_` grant. Request changes,
+defer and request cancel are owner actions: durable records on
+`POST /api/v1/agents/dev-loop/{workflow_id}/owner-actions`
+(`oa_` ids, `dev_loop_owner_actions`). None of them decides, denies, consumes,
+expires or supersedes a grant, and a human-input response is information only:
+it never creates an owner action and never signals abandon.
+
+Who: a direct human admin only. A service principal, a relayed request, a
+surface token or a non-admin gets 403 `owner_action_forbidden`; the check runs
+before any grant or run lookup.
+
+Body: `action`, `idempotency_key` (at most 128 bytes), optional `binding`,
+optional `reason_code` (`^[a-z0-9._:-]{1,64}$`) and, for `request_cancel`
+only, `expected_run_id`. There is no free-text field; unknown fields are
+refused. The record, the abandon signal payload and the audit entry hold ids,
+digests, codes and states only.
+
+| Action | Needs | Records | Outcome |
+|---|---|---|---|
+| `request_changes` | newest grant `pending` | row `recorded` | `changes_requested` |
+| `defer` | newest grant `pending` | row `recorded` | `deferred` |
+| `request_cancel` | a running or finished DevLoop | row, abandon signal pinned to the described run | see below |
+
+Binding (the route label is `dev_loop_owner_action`):
+
+| Action | Grant exists | Binding absent, enforce | Binding absent, observe |
+|---|---|---|---|
+| `request_changes`, `defer` | yes | 422 `approval_binding_missing` | accepted, `approval.binding_absent` audited |
+| `request_changes`, `defer` | no | 409 `approval_grant_missing` | 409 `approval_grant_missing` |
+| `request_cancel` | yes | 422 `approval_binding_missing` | accepted, `approval.binding_absent` audited |
+| `request_cancel` | no | accepted, run-bound | accepted, run-bound |
+
+A binding that names another `aar_` or a differing digest is 409
+`approval_context_changed` with `details.current_approval_ref`; nothing is
+recorded or signalled. A cancel carrying a binding while no grant exists is
+409 `approval_grant_missing`. A cancel before any grant exists (for example
+during investigation) needs no `aar_` binding: it is bound to the Temporal run
+the server describes, and `expected_run_id` (the run the card was rendered
+for) that differs from it is 409 `cancellation_run_changed`. The exception
+belongs to `request_cancel` alone.
+
+Cancel outcomes (`request_cancel`):
+
+| Situation | State | Outcome |
+|---|---|---|
+| signal delivered, grant pending or absent | `signalled` | `cancellation_pending` |
+| signal delivered, grant approved, in flight, consumed or executed | `signalled` | `cancellation_effects_unknown` |
+| already finished, abandoned, did not reach implement | `finished` | `cancelled` |
+| already finished, abandoned, reached implement or result unreadable | `finished` | `cancellation_effects_unknown` |
+| already finished without an abandon result | `finished` | `already_finished` |
+| signal transport failure | `requested` | none (502/503; replay with the same key retries the stored run) |
+| run ended and a new run took the id | `requested` | none (409 `cancellation_run_changed`; the new run is not signalled) |
+
+`GET .../owner-actions/{id}` re-observes a `signalled` cancel and records
+`cancelled` or `cancellation_effects_unknown` once the run has finished; it
+never signals. Cancel stops future work. It is not rollback: branches, PRs
+and merges already produced stay as they are.
+
+Idempotency: the same principal and key with the same content returns the
+original with `replayed: true`; different content is 409
+`owner_action_idempotency_conflict`. A second cancel of a run that already has
+one, and a second `request_changes` or `defer` on the same grant, return the
+existing record.
+
+Grant after cancellation: cancel does not approve, deny, consume, expire or
+supersede the grant, and this slice adds no grant terminal state. A grant may
+stay `pending` until its `expires_at` after its DevLoop was cancelled or
+finished. An owner-triage consumer (mctlhq/mctl-agents#907) must not present
+an actionable Approve control merely because such a grant is still `pending`
+while the bound DevLoop run is terminal or has a recorded owner cancel
+(an `abandoned: ` result or a `request_cancel` owner action).
+
 ## Mapping to mctl-api#182
 
 | ID | Finding | Where it is handled |
