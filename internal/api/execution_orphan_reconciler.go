@@ -38,29 +38,39 @@ func ReconcileOrphanedExecutions(ctx context.Context, store *workitems.Store, tc
 	if store == nil || tc == nil {
 		return 0
 	}
-	execs, err := store.OpenExecutionsWithQueuedRequests(ctx, workitems.EngineTemporal, now.Add(-orphanMinAge), orphanBatch)
-	if err != nil {
-		slog.Warn("orphan reconcile: list candidates failed", "error", err)
-		return 0
-	}
 	actor := workitems.Mutation{Actor: principalOf(auth.NewServiceUser())}
 	closed := 0
-	for _, e := range execs {
-		status, ok := orphanEngineStatus(ctx, tc, e)
-		if !ok {
-			continue
-		}
-		_, did, err := store.CloseOrphanedExecution(ctx, workitems.OrphanCloseInput{
-			Mutation: actor, ExecutionID: e.ID, ExpectedPhase: e.Phase, EngineStatus: status,
-		})
+	var cursor *workitems.Execution
+	// Page with a keyset cursor so executions that cannot be closed (still
+	// running, unreadable) do not starve the ones behind them.
+	for ctx.Err() == nil {
+		execs, err := store.OpenExecutionsWithQueuedRequests(ctx, workitems.EngineTemporal, now.Add(-orphanMinAge), orphanBatch, cursor)
 		if err != nil {
-			slog.Warn("orphan reconcile: close failed", "execution_id", e.ID, "error", err)
-			continue
+			slog.Warn("orphan reconcile: list candidates failed", "error", err)
+			return closed
 		}
-		if did {
-			closed++
-			slog.Info("orphan reconcile: closed execution", "execution_id", e.ID, "engine_ref", e.EngineRef, "engine_status", status)
+		for i := range execs {
+			e := &execs[i]
+			status, ok := orphanEngineStatus(ctx, tc, *e)
+			if !ok {
+				continue
+			}
+			_, did, err := store.CloseOrphanedExecution(ctx, workitems.OrphanCloseInput{
+				Mutation: actor, ExecutionID: e.ID, ExpectedPhase: e.Phase, EngineStatus: status,
+			})
+			if err != nil {
+				slog.Warn("orphan reconcile: close failed", "execution_id", e.ID, "error", err)
+				continue
+			}
+			if did {
+				closed++
+				slog.Info("orphan reconcile: closed execution", "execution_id", e.ID, "engine_ref", e.EngineRef, "engine_status", status)
+			}
 		}
+		if len(execs) < orphanBatch {
+			break
+		}
+		cursor = &execs[len(execs)-1]
 	}
 	return closed
 }

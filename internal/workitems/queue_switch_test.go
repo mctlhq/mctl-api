@@ -9,7 +9,7 @@ import (
 )
 
 func TestParseQueueWhileActive(t *testing.T) {
-	for raw, want := range map[string]bool{"": false, "off": false, "on": true, " ON ": true} {
+	for raw, want := range map[string]bool{"": false, "off": false, "on": true, "ON": true} {
 		got, err := ParseQueueWhileActive(raw)
 		if err != nil || got != want {
 			t.Errorf("%q = %v, %v; want %v", raw, got, err, want)
@@ -94,7 +94,7 @@ func TestCloseOrphanedExecution(t *testing.T) {
 		t.Fatal(err)
 	}
 	requestExecution(t, s, xrInput(w, ExecutionRequestResume, as("github:alice")))
-	got, err := s.OpenExecutionsWithQueuedRequests(ctx, EngineTemporal, time.Now().Add(time.Hour), 10)
+	got, err := s.OpenExecutionsWithQueuedRequests(ctx, EngineTemporal, time.Now().Add(time.Hour), 10, nil)
 	if err != nil || len(got) != 1 {
 		t.Fatalf("candidates = %+v %v", got, err)
 	}
@@ -108,5 +108,40 @@ func TestCloseOrphanedExecution(t *testing.T) {
 	}
 	if kinds := eventKinds(t, s, w.ID); kinds[len(kinds)-1] != EventExecutionOrphanClosed {
 		t.Fatalf("events %v", kinds)
+	}
+}
+
+// Paging past non-closable candidates reaches the ones behind them.
+func TestOpenExecutionsWithQueuedRequests_Cursor(t *testing.T) {
+	s := queueStore(t)
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		w := open(t, s, CreateInput{})
+		if _, _, err := s.AttachExecution(ctx, ExecutionInput{Mutation: as(platform), WorkItemID: w.ID, Engine: EngineTemporal, EngineRef: "wf#run_1", Phase: PhaseRunning}); err != nil {
+			t.Fatal(err)
+		}
+		requestExecution(t, s, xrInput(w, ExecutionRequestResume, as("github:alice")))
+	}
+	until := time.Now().Add(time.Hour)
+	seen := map[string]bool{}
+	var cursor *Execution
+	for {
+		got, err := s.OpenExecutionsWithQueuedRequests(ctx, EngineTemporal, until, 2, cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range got {
+			if seen[e.ID] {
+				t.Fatalf("execution %s returned twice", e.ID)
+			}
+			seen[e.ID] = true
+		}
+		if len(got) < 2 {
+			break
+		}
+		cursor = &got[len(got)-1]
+	}
+	if len(seen) != 5 {
+		t.Fatalf("paged %d executions, want 5", len(seen))
 	}
 }

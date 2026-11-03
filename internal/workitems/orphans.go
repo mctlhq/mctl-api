@@ -15,13 +15,20 @@ const EventExecutionOrphanClosed = "execution_orphan_closed"
 
 // OpenExecutionsWithQueuedRequests lists open executions of one engine that
 // have an open (pending or claimed) request and started at or before
-// olderThan, oldest first, at most limit.
-func (s *Store) OpenExecutionsWithQueuedRequests(ctx context.Context, engine string, olderThan time.Time, limit int) ([]Execution, error) {
+// olderThan, oldest first, at most limit. A non-nil after resumes strictly
+// after that execution in (started_at, id) order, so callers can page past
+// executions they could not close.
+func (s *Store) OpenExecutionsWithQueuedRequests(ctx context.Context, engine string, olderThan time.Time, limit int, after *Execution) ([]Execution, error) {
+	cursorTime, cursorID := time.Time{}, ""
+	if after != nil {
+		cursorTime, cursorID = after.StartedAt, after.ID
+	}
 	rows, err := s.pool.Query(ctx, `SELECT `+executionColumns+` FROM work_item_executions
 		WHERE engine=$1 AND phase IN `+openPhasesSQL+` AND started_at <= $2
 		  AND EXISTS (SELECT 1 FROM work_item_execution_requests r
 			WHERE r.work_item_id = work_item_executions.work_item_id AND r.state IN ('pending','claimed'))
-		ORDER BY started_at, id LIMIT $3`, engine, olderThan, limit)
+		  AND ($4::text = '' OR (started_at, id) > ($5::timestamptz, $4::text))
+		ORDER BY started_at, id LIMIT $3`, engine, olderThan, limit, cursorID, cursorTime)
 	if err != nil {
 		return nil, fmt.Errorf("workitems: open executions with queued requests: %w", err)
 	}
@@ -54,7 +61,7 @@ type OrphanCloseInput struct {
 // compare-and-set on its phase. closed=false means another writer moved the
 // execution first (or it is terminal); nothing is changed then.
 func (s *Store) CloseOrphanedExecution(ctx context.Context, in OrphanCloseInput) (*Execution, bool, error) {
-	if err := in.Mutation.validate(); err != nil {
+	if err := in.validate(); err != nil {
 		return nil, false, err
 	}
 	if in.ExecutionID == "" || in.ExpectedPhase == "" || IsTerminalPhase(in.ExpectedPhase) {
