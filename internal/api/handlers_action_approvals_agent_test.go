@@ -327,8 +327,8 @@ func TestAgentApprovals_ThroughTheScopeGate(t *testing.T) {
 	}
 	// execute is outside every other scope: the same execution-bound token
 	// minted with the investigate scope is refused at the gate.
-	inv := auth.NewAgentUser("implementer", auth.AgentRun{
-		Agent: "implementer", ExecutionID: e.tenant + "-exec", WorkItemID: agentTestWorkItem, RunID: "art_run_a", Scope: auth.AgentScopeInvestigate,
+	inv := auth.NewAgentUser("issue-investigator", auth.AgentRun{
+		Agent: "issue-investigator", ExecutionID: e.tenant + "-exec", WorkItemID: agentTestWorkItem, RunID: "art_run_a", Scope: auth.AgentScopeInvestigate,
 	})
 	if res := e.markExecuted(inv, id, executeBody(a["target"].(string), executeArtifactHash)); res.code != http.StatusForbidden || code(res) != mctlmcp.AgentScopeCodeDenied {
 		t.Errorf("investigate-scope execute = %d %s", res.code, res.raw)

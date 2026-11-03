@@ -316,6 +316,9 @@ func TestImplementScope_Routes(t *testing.T) {
 	if s.BoundTenant || !s.ReadAllTenants {
 		t.Error("implement scope reads every tenant and is not tenant-bound")
 	}
+	if !s.Tool("mctl_list_services") || s.Tool("mctl_deploy_service") || s.Tool("mctl_resolve_incident") {
+		t.Error("implement scope must admit read tools and no write or governed tool")
+	}
 	for _, c := range []struct {
 		method, path, workItem string
 		want                   bool

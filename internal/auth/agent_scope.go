@@ -65,9 +65,12 @@ type AgentScope struct {
 	// minted for.
 	Agents []string
 	// ReadAllTenants lets HasTenantAccess admit every tenant. It is safe
-	// only because Routes admits nothing but reads and writes bound to the
-	// run's own work item and execution: the tenant check is not where a
-	// scoped run's writes are stopped, the route list is.
+	// only because every write a scope admits is bound to the run's own
+	// work item and execution: the tenant check is not where a scoped run's
+	// writes are stopped. The binding lives either in the route list
+	// (BindWorkItem / BindExecution) or, for the action-approval writes of
+	// the implement scope, in the handlers (boundAgentExecution,
+	// isAgentOwnApproval). A route list alone is not the whole binding.
 	ReadAllTenants bool
 	// BoundTenant means a token with this scope is minted for exactly one
 	// tenant and every check compares against it. Mutually exclusive with
