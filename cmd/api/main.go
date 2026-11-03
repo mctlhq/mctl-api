@@ -1012,6 +1012,9 @@ func main() {
 	}
 
 	executor := operations.NewExecutor()
+	// validate has already refused an unparsable value.
+	submitCreatesExecution, _ := operations.ParseSubmitCreatesExecution(cfg.SubmitCreatesExecutionRaw)
+	executor.SetSubmitCreatesExecution(submitCreatesExecution)
 
 	// MCP server for SSE transport (embedded in this process).
 	// Tools make REST calls back to this server using the caller's token (forwarded via context).
@@ -1075,9 +1078,11 @@ func main() {
 		}
 		b, bErr := k8s.NewAgentRunBinder(aud, envOr("AGENT_RUN_EXCHANGE_NAMESPACE", "argo-workflows"), sas,
 			map[string]k8s.AgentRunTemplate{
-				// The directive poller and manual triggers submit investigate
-				// without an execution; those runs get a token bound to no
-				// work item.
+				// mctl-api no longer submits investigate without an execution
+				// (mctl-agents#717 S3: the submitter creates it). The flag stays
+				// for runs already in flight and for a workflow submitted
+				// straight to Argo; those get a token bound to no work item.
+				// Drop it once mctl-agents stops accepting such runs.
 				"mctl-agents-investigate": {Agent: "issue-investigator", Scope: auth.AgentScopeInvestigate, AllowWithoutExecution: true},
 				// An implement run is execution-bound: its approvals are one
 				// execution's (mctl-agents#717 S4), so a run submitted
@@ -1246,6 +1251,8 @@ func main() {
 		TemporalClient:                 devLoopClient,
 		HumanInputLedger:               humanInputLedger,
 		WorkItems:                      workItemsStore,
+		IssueWorkItemTenant:            os.Getenv("ISSUE_WORK_ITEM_TENANT"),
+		SubmitCreatesExecution:         submitCreatesExecution,
 		AgentRunBinder:                 agentRunBinder,
 		SurfaceIdentities:              surfaceIDs,
 		TenantResolver:                 gitReader,
@@ -1594,6 +1601,9 @@ type config struct {
 	// whether the service principal may still relay a free-text approver on
 	// mctl-agents-approve. Empty means on; validated at startup.
 	LegacyApproverRaw string
+	// SubmitCreatesExecutionRaw is MCTL_SUBMIT_CREATES_EXECUTION (mctl-agents#717
+	// S3): on or off, empty is off; validated at startup.
+	SubmitCreatesExecutionRaw string
 	// ApprovalMaxDecisionAgeRaw is ACTION_APPROVAL_MAX_DECISION_AGE
 	// (mctl-api#700): a Go duration; empty is 24h.
 	ApprovalMaxDecisionAgeRaw string
@@ -1750,6 +1760,7 @@ func loadConfig() config {
 		AgentReceiptMaxAgeRaw:          os.Getenv("MCTL_AGENT_RECEIPT_MAX_AGE"),
 		WorkItemsConfigured:            workItemsStoreConfigured(),
 		LegacyApproverRaw:              os.Getenv("MCTL_AGENTS_APPROVE_LEGACY_APPROVER"),
+		SubmitCreatesExecutionRaw:      os.Getenv(operations.SubmitCreatesExecutionEnv),
 		ApprovalMaxDecisionAgeRaw:      os.Getenv("ACTION_APPROVAL_MAX_DECISION_AGE"),
 		ApprovalStrictPolicyRaw:        os.Getenv("ACTION_APPROVAL_REQUIRE_REGISTERED_POLICY"),
 		AdminPrincipalsRaw:             os.Getenv("ADMIN_PRINCIPALS"),
@@ -2001,6 +2012,9 @@ func (c config) validate() error {
 		return err
 	}
 	if _, err := parseLegacyApprover(c.LegacyApproverRaw); err != nil {
+		return err
+	}
+	if _, err := operations.ParseSubmitCreatesExecution(c.SubmitCreatesExecutionRaw); err != nil {
 		return err
 	}
 	if _, err := parseApprovalMaxDecisionAge(c.ApprovalMaxDecisionAgeRaw); err != nil {
