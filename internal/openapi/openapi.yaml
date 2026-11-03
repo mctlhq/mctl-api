@@ -2969,6 +2969,10 @@ paths:
         | `preview-delete` | Remove preview environment | low |
 
         **Issue investigator runs carry their execution (mctlhq/mctl-agents#717).**
+        Only with `MCTL_SUBMIT_CREATES_EXECUTION=on`, which is off by default
+        and stays off until the mctl-agents DevLoop continuation carries its
+        own execution; flipping it on is a separate gitops step. With it off
+        a submit is handled exactly as before. With it on,
         `mctl-agents-investigate` is never submitted without an `execution_id`.
         When the request names none, the server first opens (or joins, per
         `external_key` = the canonical issue URL) the issue's work item in the

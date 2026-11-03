@@ -892,15 +892,17 @@ var builtinOperations = []Operation{
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/"},
 		Parameters: append([]ParameterDef{
 			{Name: "issue_url", Type: "string", Required: true, Description: "Full GitHub issue URL under the mctlhq org, e.g. https://github.com/mctlhq/mctl-telegram/issues/123", Pattern: `^https://github\.com/mctlhq/[A-Za-z0-9_.-]+/issues/[0-9]+$`},
-			// Resume identifiers (mctlhq/mctl-agents#267). Optional and opaque to
-			// mctl-api: nothing here resolves them, mints them, or defaults them.
-			// Declared so StripUndeclared stops dropping them on the way to Argo;
+			// Resume identifiers (mctlhq/mctl-agents#267). Optional. With
+			// MCTL_SUBMIT_CREATES_EXECUTION=on (off by default, mctl-agents#717
+			// S3) the execute handler resolves or mints them for a submit that
+			// names no execution_id; with it off they are opaque to mctl-api and
+			// nothing resolves, mints or defaults them. Declared so StripUndeclared stops dropping them on the way to Argo;
 			// the CWFT half is mctlhq/mctl-gitops#1279.
 			{Name: "work_item_id", Type: "string", Required: false,
-				Description: "Optional. Canonical WorkItem id to resume from (docs/work-context-contract.md, e.g. wi_<uuid>). Omit and mctl-api opens or joins the issue's work item itself.",
+				Description: "Optional. Canonical WorkItem id to resume from (docs/work-context-contract.md, e.g. wi_<uuid>). With MCTL_SUBMIT_CREATES_EXECUTION=on, omitting it makes mctl-api open or join the issue's work item itself; with it off (default), omit for a cold run.",
 				Pattern:     `^[A-Za-z0-9_-]{1,64}$`},
 			{Name: "execution_id", Type: "string", Required: false,
-				Description: "Optional. WorkItemExecution id this run is attributed to (e.g. we_<uuid>). Omit and mctl-api creates the execution before submitting; a run is never submitted without one (mctl-agents#717).",
+				Description: "Optional. WorkItemExecution id this run is attributed to (e.g. we_<uuid>). With MCTL_SUBMIT_CREATES_EXECUTION=on, omitting it makes mctl-api create the execution before submitting and a run is never submitted without one (mctl-agents#717); with it off (default), omit for a cold run.",
 				Pattern:     `^[A-Za-z0-9_-]{1,64}$`},
 			// Release pin (mctlhq/mctl-api#372): the DevLoop resolves the released
 			// issue-investigator and sends it; cwft-mctl-agents-investigate declares

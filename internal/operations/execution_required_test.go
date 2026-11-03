@@ -15,6 +15,7 @@ import (
 // Executor.Submit is the choke point every caller shares: it refuses an
 // investigate run without an execution_id before it touches the cluster.
 func TestSubmit_InvestigateWithoutExecutionIsRefused(t *testing.T) {
+	t.Setenv(SubmitCreatesExecutionEnv, "on")
 	op, ok := NewRegistry().Get(InvestigateOperation)
 	if !ok {
 		t.Fatal("investigate operation missing")
@@ -53,6 +54,7 @@ func TestWorkflowRequestIDFrom_AcceptsOnlyGeneratedShape(t *testing.T) {
 // The workflow is named after the request id the caller recorded its
 // execution under, and the execution_id reaches the workflow's arguments.
 func TestSubmit_NamesWorkflowAfterPresetRequestID(t *testing.T) {
+	t.Setenv(SubmitCreatesExecutionEnv, "on")
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{workflowGVR: "WorkflowList"})
 	e := &Executor{dynamicClient: dyn}
@@ -80,5 +82,31 @@ func TestSubmit_NamesWorkflowAfterPresetRequestID(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("execution_id not in workflow arguments: %v", params)
+	}
+}
+
+// Switch off (default): the backstop does not exist, id-less submits are as before.
+func TestSubmit_SwitchOffDoesNotRefuse(t *testing.T) {
+	op, _ := NewRegistry().Get(InvestigateOperation)
+	for _, v := range []string{"", "off"} {
+		t.Setenv(SubmitCreatesExecutionEnv, v)
+		_, err := (&Executor{}).Submit(context.Background(), op,
+			map[string]string{"issue_url": "https://github.com/mctlhq/mctl-api/issues/1"}, "u", "platform")
+		if err == nil || errors.Is(err, ErrExecutionRequired) {
+			t.Errorf("value %q: err = %v, want the missing-client failure, not a refusal", v, err)
+		}
+	}
+}
+
+func TestSubmitCreatesExecution_ParsesStrictly(t *testing.T) {
+	for v, want := range map[string]bool{"": false, "off": false, "OFF": false, "on": true, " On ": true} {
+		t.Setenv(SubmitCreatesExecutionEnv, v)
+		if got, err := SubmitCreatesExecution(); err != nil || got != want {
+			t.Errorf("%q = %v, %v; want %v", v, got, err, want)
+		}
+	}
+	t.Setenv(SubmitCreatesExecutionEnv, "true")
+	if _, err := SubmitCreatesExecution(); err == nil {
+		t.Error("true accepted")
 	}
 }

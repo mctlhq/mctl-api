@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/workitems"
@@ -48,6 +50,8 @@ type submitExecution struct {
 	exec string
 	ref  string
 	mut  workitems.Mutation
+	// namespace is where the Workflow is created.
+	namespace string
 }
 
 // prepareSubmitExecution makes sure a run of an operation that must carry a
@@ -68,10 +72,17 @@ type submitExecution struct {
 // The returned context carries the workflow name the execution was recorded
 // under; ended must be called with Submit's outcome so an execution whose
 // workflow never started does not stay open.
-func (h *Handlers) prepareSubmitExecution(w http.ResponseWriter, r *http.Request, user *auth.User, op operations.Operation, input map[string]string) (ctx context.Context, ended func(*operations.SubmitResult, error), ok bool) {
+func (h *Handlers) prepareSubmitExecution(w http.ResponseWriter, r *http.Request, user *auth.User, op operations.Operation, tenant string, input map[string]string) (ctx context.Context, ended func(*operations.SubmitResult, error) string, ok bool) {
 	ctx = r.Context()
-	if !operations.RequiresExecution(op.Name) || strings.TrimSpace(input["execution_id"]) != "" {
-		return ctx, func(*operations.SubmitResult, error) {}, true
+	required, err := operations.ExecutionRequired(op.Name)
+	if err != nil {
+		slog.Error("submit-creates-execution switch is unreadable", "error", err)
+		writeErrorCode(w, http.StatusInternalServerError, "submit_switch_invalid", err.Error(), nil)
+		return nil, nil, false
+	}
+	// Switch off (the default) or another operation: exactly today's path.
+	if !required || strings.TrimSpace(input["execution_id"]) != "" {
+		return ctx, func(*operations.SubmitResult, error) string { return "" }, true
 	}
 	if h.opts.WorkItems == nil {
 		writeErrorCode(w, http.StatusServiceUnavailable, wiCodeUnavailable,
@@ -127,14 +138,20 @@ func (h *Handlers) prepareSubmitExecution(w http.ResponseWriter, r *http.Request
 	input["work_item_id"] = itemID
 	input["execution_id"] = exec.ID
 
-	se := &submitExecution{h: h, item: itemID, exec: exec.ID, ref: ref, mut: mut}
+	se := &submitExecution{h: h, item: itemID, exec: exec.ID, ref: ref, mut: mut,
+		namespace: operations.WorkflowNamespace(op.WorkflowTemplate, tenant)}
 	return operations.WithWorkflowRequestID(ctx, requestID), se.ended, true
 }
 
-// ended closes the execution when the submit that was to run it failed. A
-// close that itself fails is logged loudly: the execution then stays open
-// and blocks the work item's next run until it is ended by hand.
-func (se *submitExecution) ended(result *operations.SubmitResult, submitErr error) {
+// ended settles the execution after Submit. It returns a note for the error
+// response, "" when there is nothing to add.
+//
+// A Submit error does not prove the Workflow was never created (a timeout or
+// a cancelled context can follow an accepted create), so the execution is
+// ended in Error only once the Workflow is confirmed absent. Any other
+// answer, including a failed lookup, leaves it open and says so: "could not
+// observe" is not "absent".
+func (se *submitExecution) ended(result *operations.SubmitResult, submitErr error) string {
 	if submitErr == nil {
 		if result != nil && result.WorkflowName != se.ref {
 			// The execution was recorded under a name the workflow does not
@@ -142,16 +159,29 @@ func (se *submitExecution) ended(result *operations.SubmitResult, submitErr erro
 			slog.Error("workflow name differs from the name its execution was recorded under",
 				"workflow", result.WorkflowName, "engine_ref", se.ref, "execution_id", se.exec)
 		}
-		return
+		return ""
 	}
-	// The request context may be what failed; the close must still be tried.
+	// The request context may be what failed; the lookup and close must still be tried.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 10*time.Second)
 	defer cancel()
+	_, lookupErr := se.h.opts.Executor.GetWorkflowStatus(ctx, se.namespace, se.ref)
+	switch {
+	case lookupErr == nil:
+		slog.Error("submit failed but the workflow exists; its execution stays open",
+			"work_item_id", se.item, "execution_id", se.exec, "workflow", se.ref, "submit_error", submitErr)
+		return fmt.Sprintf("; workflow %s exists and its execution %s was left open", se.ref, se.exec)
+	case !apierrors.IsNotFound(lookupErr):
+		slog.Error("submit failed and whether the workflow exists could not be determined; its execution stays open",
+			"work_item_id", se.item, "execution_id", se.exec, "workflow", se.ref, "submit_error", submitErr, "error", lookupErr)
+		return fmt.Sprintf("; could not determine whether workflow %s was created, so its execution %s was left open", se.ref, se.exec)
+	}
 	_, _, err := se.h.opts.WorkItems.AttachExecution(ctx, workitems.ExecutionInput{
 		Mutation: se.mut, WorkItemID: se.item, Engine: workitems.EngineArgo, EngineRef: se.ref, Phase: workitems.PhaseError,
 	})
 	if err != nil {
 		slog.Error("submit failed and its execution could not be ended; it stays open",
 			"work_item_id", se.item, "execution_id", se.exec, "engine_ref", se.ref, "submit_error", submitErr, "error", err)
+		return fmt.Sprintf("; its execution %s could not be ended and was left open", se.exec)
 	}
+	return ""
 }

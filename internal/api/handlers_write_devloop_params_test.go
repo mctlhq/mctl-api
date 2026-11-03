@@ -22,12 +22,6 @@ const (
 // each row is named so the table can be re-checked against that code when it
 // changes; a parameter added there must be added here, and to the registry.
 //
-// Rows that model a caller which sends no execution_id (the continuation, the
-// directive poller, a digest-pinned manual trigger) carry one here anyway:
-// this table is about parameters surviving, and since mctl-agents#717 S3 an
-// investigate submit without an execution_id has the server create one first
-// (submit_execution_test.go covers that path against a real store).
-//
 // Every row is a parameter the CWFT already declares. Parameters mctl-agents
 // sends that the CWFT does NOT declare yet are listed in
 // devLoopParamsPendingDeclaration below instead.
@@ -78,7 +72,6 @@ var devLoopSubmissions = []struct {
 			"agent_version":         "issue-investigator@1.54.0",
 			"temporal_workflow_id":  "dev-loop-mctlhq-mctl-agents-494",
 			"temporal_run_id":       "00000000-0000-0000-0000-000000000000",
-			"execution_id":          "we_9a010000-0000-0000-0000-000000000000",
 			"human_input_responses": `[{"request_id":"hir-0123456789abcdef","request_hash":"sha256:` + strings.Repeat("a", 64) + `","value":"library B","received_at":"2026-10-04T10:00:00Z"}]`,
 			// mctlhq/mctl-agents#684: the owner principal rides with the answers.
 			"work_item_owner_principal_id": "prn_01M39HRB7JRXZ2PHW5VVB695YZ",
@@ -92,17 +85,13 @@ var devLoopSubmissions = []struct {
 			"issue_url":     "https://github.com/mctlhq/mctl-api/issues/372",
 			"agent_image":   pinImageByDigest,
 			"agent_version": "issue-investigator@1.33.0",
-			"execution_id":  "we_9a010000-0000-0000-0000-000000000000",
 		},
 	},
 	{
 		// run_issue_directive_poller.py submit_investigate.
 		name:      "investigate, directive poller",
 		operation: "mctl-agents-investigate",
-		params: map[string]string{
-			"issue_url":    "https://github.com/mctlhq/mctl-api/issues/372",
-			"execution_id": "we_9a010000-0000-0000-0000-000000000000",
-		},
+		params:    map[string]string{"issue_url": "https://github.com/mctlhq/mctl-api/issues/372"},
 	},
 	// No approve row: dev_loop.py approves through an action-approval grant
 	// (handlers_approval_grant_test.go asserts what that submit carries); a
@@ -278,10 +267,9 @@ func TestExecuteOperation_UnpinnedCallerSendsNoAgentImage(t *testing.T) {
 		name   string
 		params map[string]string
 	}{
-		{"omitted", map[string]string{"issue_url": "https://github.com/mctlhq/mctl-api/issues/372", "execution_id": "we_x"}},
+		{"omitted", map[string]string{"issue_url": "https://github.com/mctlhq/mctl-api/issues/372"}},
 		{"explicitly empty", map[string]string{
 			"issue_url":     "https://github.com/mctlhq/mctl-api/issues/372",
-			"execution_id":  "we_x",
 			"agent_image":   "",
 			"agent_version": "",
 		}},
@@ -321,7 +309,7 @@ func TestExecuteOperation_UncorrelatedCallerSendsNoCorrelationParams(t *testing.
 		keys      []string
 	}{
 		{"investigate, omitted", "mctl-agents-investigate",
-			map[string]string{"issue_url": "https://github.com/mctlhq/mctl-api/issues/372", "execution_id": "we_x"},
+			map[string]string{"issue_url": "https://github.com/mctlhq/mctl-api/issues/372"},
 			newCorrelationKeys},
 		{"implement, omitted", "mctl-agents-implement",
 			map[string]string{"service": "mctl-api", "slug": "issue-372-declare-pin-params"},
@@ -363,7 +351,7 @@ func TestExecuteOperation_HumanInputResponsesShape(t *testing.T) {
 	t.Run("empty omitted", func(t *testing.T) {
 		router, exec := newTestRouter(t)
 		w := postAs(t, router, "/api/v1/operations/mctl-agents-investigate/execute", map[string]string{
-			"issue_url": issue, "human_input_responses": "", "execution_id": "we_x",
+			"issue_url": issue, "human_input_responses": "",
 		}, auth.NewServiceUser())
 		assertStatus(t, w, http.StatusAccepted)
 		if _, ok := exec.submittedParams[len(exec.submittedParams)-1]["human_input_responses"]; ok {
@@ -392,7 +380,7 @@ func TestExecuteOperation_WorkItemOwnerPrincipalIDShape(t *testing.T) {
 	t.Run("empty omitted", func(t *testing.T) {
 		router, exec := newTestRouter(t)
 		w := postAs(t, router, "/api/v1/operations/mctl-agents-investigate/execute", map[string]string{
-			"issue_url": issue, "work_item_owner_principal_id": "", "execution_id": "we_x",
+			"issue_url": issue, "work_item_owner_principal_id": "",
 		}, auth.NewServiceUser())
 		assertStatus(t, w, http.StatusAccepted)
 		if _, ok := exec.submittedParams[len(exec.submittedParams)-1]["work_item_owner_principal_id"]; ok {

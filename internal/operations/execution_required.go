@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 
@@ -26,8 +27,41 @@ func RequiresExecution(opName string) bool {
 	return opName == InvestigateOperation
 }
 
+// SubmitCreatesExecutionEnv is the kill switch for the submitter-creates-the-
+// execution behaviour: "on" or "off", empty is off. It stays off until the
+// mctl-agents DevLoop continuation carries its own execution (mctl-agents#717
+// S3); turning it on is a separate gitops step.
+const SubmitCreatesExecutionEnv = "MCTL_SUBMIT_CREATES_EXECUTION"
+
+// SubmitCreatesExecution reads MCTL_SUBMIT_CREATES_EXECUTION. Any value other
+// than on, off or empty is an error: a mistyped switch must be refused
+// loudly, never read as a mode the operator did not ask for.
+func SubmitCreatesExecution() (bool, error) {
+	switch v := strings.ToLower(strings.TrimSpace(os.Getenv(SubmitCreatesExecutionEnv))); v {
+	case "", "off":
+		return false, nil
+	case "on":
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s=%q: want on or off", SubmitCreatesExecutionEnv, v)
+	}
+}
+
+// ExecutionRequired reports whether a submit of the named operation must
+// carry an execution right now: the operation needs one and the switch is on.
+func ExecutionRequired(opName string) (bool, error) {
+	if !RequiresExecution(opName) {
+		return false, nil
+	}
+	return SubmitCreatesExecution()
+}
+
 func checkExecutionRequired(op Operation, params map[string]string) error {
-	if RequiresExecution(op.Name) && strings.TrimSpace(params["execution_id"]) == "" {
+	required, err := ExecutionRequired(op.Name)
+	if err != nil {
+		return err
+	}
+	if required && strings.TrimSpace(params["execution_id"]) == "" {
 		return fmt.Errorf("%w: %s", ErrExecutionRequired, op.Name)
 	}
 	return nil

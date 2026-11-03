@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
 	"github.com/mctlhq/mctl-api/internal/audit"
@@ -52,6 +54,7 @@ type submitEnv struct {
 
 func newSubmitEnv(t *testing.T, withStore bool) *submitEnv {
 	t.Helper()
+	t.Setenv(operations.SubmitCreatesExecutionEnv, "on")
 	connStr := os.Getenv("TEST_DATABASE_URL")
 	if connStr == "" {
 		t.Skip("TEST_DATABASE_URL not set; skipping Postgres-backed submit test")
@@ -233,6 +236,7 @@ func TestInvestigateSubmit_UnknownWorkItemMeansNoSubmit(t *testing.T) {
 func TestInvestigateSubmit_FailedSubmitEndsTheExecution(t *testing.T) {
 	e := newSubmitEnv(t, true)
 	e.exec.err = errors.New("argo is down")
+	e.exec.getWorkflowStatusErr = apierrors.NewNotFound(schema.GroupResource{Group: "argoproj.io", Resource: "workflows"}, "x")
 	_, code, body := e.post(map[string]string{"issue_url": "https://github.com/mctlhq/mctl-api/issues/11"})
 	if code != http.StatusInternalServerError {
 		t.Fatalf("%d %s", code, body)
@@ -262,5 +266,74 @@ func TestExecute_OtherOperationsCreateNoExecution(t *testing.T) {
 	items, _ := e.store.List(context.Background(), workitems.ListFilter{Tenants: []string{e.tenant}})
 	if len(items) != 0 {
 		t.Errorf("items = %v", items)
+	}
+}
+
+// A submit error does not prove the workflow was never created. Unless the
+// lookup confirms it absent, the execution is left open and the failure says so.
+func TestInvestigateSubmit_AmbiguousSubmitErrorKeepsTheExecution(t *testing.T) {
+	cases := map[string]error{
+		"workflow exists":    nil,
+		"lookup cannot tell": errors.New("apiserver timeout"),
+	}
+	for name, lookupErr := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newSubmitEnv(t, true)
+			e.exec.err = context.DeadlineExceeded
+			e.exec.getWorkflowStatusErr = lookupErr
+			_, code, body := e.post(map[string]string{"issue_url": "https://github.com/mctlhq/mctl-api/issues/12"})
+			if code != http.StatusInternalServerError || !strings.Contains(body, "left open") {
+				t.Fatalf("%d %s, want a 500 saying the execution was left open", code, body)
+			}
+			items, err := e.store.List(context.Background(), workitems.ListFilter{Tenants: []string{e.tenant}})
+			if err != nil || len(items) != 1 {
+				t.Fatalf("items = %v, err %v", items, err)
+			}
+			if xs := e.execs(items[0].ID); len(xs) != 1 || xs[0].Phase != workitems.PhasePending {
+				t.Fatalf("executions = %+v, want one still Pending", xs)
+			}
+		})
+	}
+}
+
+// Switch off (the default, and when unset): exactly the old behaviour. An
+// id-less submit goes through, nothing is created, nothing is refused.
+func TestInvestigateSubmit_SwitchOffChangesNothing(t *testing.T) {
+	for _, v := range []string{"", "off"} {
+		t.Run("value="+v, func(t *testing.T) {
+			e := newSubmitEnv(t, true)
+			t.Setenv(operations.SubmitCreatesExecutionEnv, v)
+			r, code, body := e.post(map[string]string{"issue_url": "https://github.com/mctlhq/mctl-api/issues/13"})
+			if code != http.StatusAccepted {
+				t.Fatalf("%d %s", code, body)
+			}
+			p := e.lastParams()
+			if p["execution_id"] != "" || p["work_item_id"] != "" || r.ExecutionID != "" || strings.Contains(body, "execution_id") {
+				t.Errorf("ids appeared with the switch off: params %v body %s", p, body)
+			}
+			items, _ := e.store.List(context.Background(), workitems.ListFilter{Tenants: []string{e.tenant}})
+			if len(items) != 0 {
+				t.Errorf("items = %v, want none", items)
+			}
+		})
+	}
+}
+
+// Without the store the old behaviour also holds while the switch is off.
+func TestInvestigateSubmit_SwitchOffNeedsNoStore(t *testing.T) {
+	e := newSubmitEnv(t, false)
+	t.Setenv(operations.SubmitCreatesExecutionEnv, "off")
+	if _, code, body := e.post(map[string]string{"issue_url": "https://github.com/mctlhq/mctl-api/issues/5"}); code != http.StatusAccepted {
+		t.Fatalf("%d %s", code, body)
+	}
+}
+
+// A mistyped switch is refused loudly, never read as off or on.
+func TestInvestigateSubmit_InvalidSwitchRefuses(t *testing.T) {
+	e := newSubmitEnv(t, true)
+	t.Setenv(operations.SubmitCreatesExecutionEnv, "yes")
+	_, code, body := e.post(map[string]string{"issue_url": "https://github.com/mctlhq/mctl-api/issues/5"})
+	if code != http.StatusInternalServerError || !strings.Contains(body, "submit_switch_invalid") || len(e.exec.submitted) != 0 {
+		t.Fatalf("%d %s submitted=%v", code, body, e.exec.submitted)
 	}
 }
