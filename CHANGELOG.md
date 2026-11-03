@@ -1,5 +1,21 @@
 # Changelog
 
+## [4.154.0](https://github.com/mctlhq/mctl-api/compare/4.153.0...4.154.0) (2026-11-03)
+
+
+### Features
+
+* **auth:** add implement agent scope and exchange template ([911302a](https://github.com/mctlhq/mctl-api/commit/911302a0afc96cbb859f212c1729f2234c1321ec))
+* **operations:** gate submit-creates-execution behind a default-off switch ([5bb806a](https://github.com/mctlhq/mctl-api/commit/5bb806a983815a36192b68474d56d7599ccd18f0))
+* **operations:** submitter creates the investigate execution first ([be3e2f3](https://github.com/mctlhq/mctl-api/commit/be3e2f363615d5c7eeaa116fb6a5bb713240c6fa))
+* **operations:** submitter creates the investigate execution first ([051a4aa](https://github.com/mctlhq/mctl-api/commit/051a4aa6823921801089af73175e4aa6946beed4))
+
+
+### Bug Fixes
+
+* **operations:** keep request values in submit cleanup, scope MCP wording ([a1d898f](https://github.com/mctlhq/mctl-api/commit/a1d898fb27dc4e092a980517d75a7a1022d70917))
+* **operations:** parse the submit switch once, end certain-miss executions ([d826465](https://github.com/mctlhq/mctl-api/commit/d826465b0e7126efdc3efb5cc2b8c9c68b466ccb))
+
 ## [4.153.0](https://github.com/mctlhq/mctl-api/compare/4.152.0...4.153.0) (2026-11-03)
 
 
