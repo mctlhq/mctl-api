@@ -19,21 +19,35 @@ var ErrProvenanceAbsent = errors.New("execution provenance absent")
 // AttachedBy and AttachedByPrincipal record who chose engine and engine_ref;
 // they are an audit trail, not an eligibility decision.
 type Provenance struct {
-	ExecutionID         string    `json:"execution_id"`
-	ContractVersion     string    `json:"contract_version"`
-	AttemptID           string    `json:"attempt_id"`
-	LineageRoot         string    `json:"lineage_root"`
-	Engine              string    `json:"engine"`
-	EngineRun           string    `json:"engine_run"`
-	ParentExecutionID   string    `json:"parent_execution_id"`
-	RootExecutionID     string    `json:"root_execution_id"`
-	AttachedBy          string    `json:"attached_by"`
-	AttachedByPrincipal string    `json:"attached_by_principal"`
-	RecordedAt          time.Time `json:"recorded_at"`
+	ExecutionID         string `json:"execution_id"`
+	ContractVersion     string `json:"contract_version"`
+	AttemptID           string `json:"attempt_id"`
+	LineageRoot         string `json:"lineage_root"`
+	Engine              string `json:"engine"`
+	EngineRun           string `json:"engine_run"`
+	ParentExecutionID   string `json:"parent_execution_id"`
+	RootExecutionID     string `json:"root_execution_id"`
+	AttachedBy          string `json:"attached_by"`
+	AttachedByPrincipal string `json:"attached_by_principal"`
+	// AttachPath is the server-derived way the execution was inserted and
+	// AttachedDirectService is true only when the service principal acted
+	// directly (not relayed, not an agent). Rows recorded before mctl-api#917
+	// hold "" and false, so they are never reviewer-eligible.
+	AttachPath            string    `json:"attach_path"`
+	AttachedDirectService bool      `json:"attached_direct_service"`
+	RecordedAt            time.Time `json:"recorded_at"`
 }
 
+// Attach paths recorded on execution provenance.
+const (
+	AttachPathAttach       = "attach"
+	AttachPathResume       = "resume"
+	AttachPathFulfilStart  = "fulfil_start"
+	AttachPathFulfilResume = "fulfil_resume"
+)
+
 const provenanceColumns = `execution_id, contract_version, attempt_id, lineage_root, engine, engine_run,
-	parent_execution_id, root_execution_id, attached_by, attached_by_principal, recorded_at`
+	parent_execution_id, root_execution_id, attached_by, attached_by_principal, attach_path, attached_direct_service, recorded_at`
 
 // maxLineageWalk bounds the legacy root walk so a corrupt cycle cannot loop.
 const maxLineageWalk = 10000
@@ -64,7 +78,10 @@ func rootOf(ctx context.Context, tx pgx.Tx, parent string) (string, error) {
 	return "", fmt.Errorf("workitems: lineage of %s exceeds %d links", parent, maxLineageWalk)
 }
 
-func insertProvenance(ctx context.Context, tx pgx.Tx, e *Execution, from string, m Mutation, now time.Time) error {
+func insertProvenance(ctx context.Context, tx pgx.Tx, e *Execution, from string, m Mutation, attachPath string, now time.Time) error {
+	if attachPath == "" {
+		return fmt.Errorf("workitems: insert execution provenance: attach path is required")
+	}
 	root := e.ID
 	if from != "" {
 		var err error
@@ -73,11 +90,11 @@ func insertProvenance(ctx context.Context, tx pgx.Tx, e *Execution, from string,
 		}
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO execution_provenance (`+provenanceColumns+`)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
 		e.ID, executionprovenance.ContractVersion,
 		executionprovenance.AttemptID(e.Engine, e.EngineRef), executionprovenance.LineageRoot(root),
 		e.Engine, executionprovenance.EngineRun(e.EngineRef), from, root,
-		m.Actor, m.ActorPrincipalID, now)
+		m.Actor, m.ActorPrincipalID, attachPath, m.ActorDirectService, now)
 	if err != nil {
 		return fmt.Errorf("workitems: insert execution provenance: %w", err)
 	}
@@ -100,7 +117,7 @@ func (s *Store) ExecutionProvenance(ctx context.Context, executionID string) (*P
 	var p Provenance
 	err := s.pool.QueryRow(ctx, `SELECT `+provenanceColumns+` FROM execution_provenance WHERE execution_id=$1`, executionID).
 		Scan(&p.ExecutionID, &p.ContractVersion, &p.AttemptID, &p.LineageRoot, &p.Engine, &p.EngineRun,
-			&p.ParentExecutionID, &p.RootExecutionID, &p.AttachedBy, &p.AttachedByPrincipal, &p.RecordedAt)
+			&p.ParentExecutionID, &p.RootExecutionID, &p.AttachedBy, &p.AttachedByPrincipal, &p.AttachPath, &p.AttachedDirectService, &p.RecordedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("%w: %s", ErrProvenanceAbsent, executionID)
 	}

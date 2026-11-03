@@ -422,3 +422,58 @@ func TestOnlyImplementScopeListsApprovalWrites(t *testing.T) {
 		t.Fatal("implement scope must list execute")
 	}
 }
+
+// The review scope (mctl-api#917) reaches whoami and the worker receipt
+// route and nothing else: no other route, method or path variant, no MCP
+// endpoint and no tool. It is minted for review-worker only, by the service
+// principal only, and reads no tenant.
+func TestReviewScope_RoutesToolsAndMinting(t *testing.T) {
+	s, ok := LookupAgentScope(AgentScopeReview)
+	if !ok {
+		t.Fatal("review scope not defined")
+	}
+	for _, c := range []struct {
+		method, path string
+		want         bool
+	}{
+		{http.MethodGet, "/api/v1/whoami", true},
+		{http.MethodPost, "/api/v1/review-receipts", true},
+		{http.MethodGet, "/api/v1/review-receipts", false},
+		{http.MethodPost, "/api/v1/review-receipts/manual", false},
+		{http.MethodPost, "/api/v1/review-receipts/", false},
+		{http.MethodPost, "/api/v1/review-requests", false},
+		{http.MethodGet, "/api/v1/review-requests/rr_0000000000000000", false},
+		{http.MethodGet, "/api/v1/review-gate", false},
+		{http.MethodPost, "/api/v1/whoami", false},
+		{http.MethodPost, "/mcp", false},
+		{http.MethodGet, "/mcp", false},
+		{http.MethodGet, "/api/v1/tenants", false},
+		{http.MethodGet, "/api/v1/work-items/wi_a", false},
+		{http.MethodPost, "/api/v1/work-items/wi_a/executions", false},
+		{http.MethodPost, "/api/v1/work-items/wi_a/executions/we_1/snapshot", false},
+		{http.MethodGet, "/api/v1/executions/we_1/provenance", false},
+		{http.MethodPost, "/api/v1/agent-run-tokens", false},
+		{http.MethodGet, "/api/v1/work-items/wi_a/intents", false},
+		{http.MethodPost, "/api/v1/operations/deploy-service/execute", false},
+	} {
+		if got := s.AllowsRoute(c.method, c.path, "wi_a", "we_1"); got != c.want {
+			t.Errorf("AllowsRoute(%s %s) = %v, want %v", c.method, c.path, got, c.want)
+		}
+	}
+	for _, tool := range []string{"mctl_whoami", "whoami", "mctl_get_review_gate", "mctl_submit_review_assertion",
+		"mctl_list_services", "mctl_deploy_service", "mctl_get_work_item", ""} {
+		if s.AllowsTool(tool) || s.AllowsToolCall(tool, nil, "acme") {
+			t.Errorf("review scope allows tool %q", tool)
+		}
+	}
+	if !s.AdmitsAgent("review-worker") || s.AdmitsAgent("implementer") || s.AdmitsAgent("issue-investigator") || s.AdmitsAgent("") {
+		t.Errorf("review scope agents = %v, want review-worker only", s.Agents)
+	}
+	if s.ReadAllTenants || s.BoundTenant || s.MintByTenantMember || !s.AuditRequests {
+		t.Errorf("review scope = %+v, want no tenant reach, service-only minting, every request audited", s)
+	}
+	u := NewAgentUser("review-worker", AgentRun{Scope: AgentScopeReview, ExecutionID: "we_1"})
+	if u.HasTenantAccess("acme") || u.IsAdmin() {
+		t.Error("a review run reaches a tenant or is admin")
+	}
+}

@@ -1238,6 +1238,7 @@ func main() {
 		CodeScanningIngester:           codeScanningIngester,
 		Decisions:                      decisionStore,
 		ReviewStore:                    reviewStore,
+		ReviewWorkerIngestEnabled:      strings.EqualFold(strings.TrimSpace(os.Getenv("REVIEW_WORKER_INGEST_ENABLED")), "true"),
 		DomainStore:                    domainStore,
 		DomainVerifier:                 domainVerifier,
 		PlatformDomain:                 cfg.PlatformDomain,

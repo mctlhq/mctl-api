@@ -94,6 +94,10 @@ var (
 	requestIDRE   = anchored(`rr_[0-9a-f]{16}`)
 )
 
+// ValidExecutionID reports whether id has an execution-id shape the contract
+// accepts (executionIDRE): `we_<uuid>`, `we_<16-64 hex>` or `ex-<16 hex>`.
+func ValidExecutionID(id string) bool { return executionIDRE.MatchString(id) }
+
 // ReviewSubject is the exact, digest-bound thing under review.
 type ReviewSubject struct {
 	Kind string
