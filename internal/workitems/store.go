@@ -209,6 +209,8 @@ type Store struct {
 	// another holder's reference.
 	releaseOnce sync.Once
 	now         func() time.Time
+	// queueWhileActive: see queue_switch.go.
+	queueWhileActive bool
 }
 
 // StoreOption configures a Store.

@@ -1229,6 +1229,7 @@ components:
         created_at: {type: string, format: date-time}
         updated_at: {type: string, format: date-time}
         closed_at: {type: string, format: date-time}
+        queued_behind_execution_id: {type: string, description: 'Only on the create response, and only when the server runs with MCTL_EXECUTION_REQUEST_QUEUE_WHILE_ACTIVE=on and the request was accepted while this execution was open. Not stored; the execution_requested event carries it.'}
         schema_version: {type: string, enum: [workitem/v1]}
       required: [id, work_item_id, kind, expected_state_version, surface, requested_by, state, created_at, updated_at, schema_version]
 
@@ -1273,7 +1274,7 @@ components:
         work_item_id: {type: string}
         seq: {type: integer, format: int64}
         kind: {type: string, enum: [created, state_changed, resumed, intent_appended, execution_attached, surface_linked, snapshot_sealed,
-                                     execution_requested, execution_request_claimed, execution_request_fulfilled, execution_request_rejected]}
+                                     execution_requested, execution_request_claimed, execution_request_fulfilled, execution_request_rejected, execution_orphan_closed]}
         from_state: {type: string}
         to_state: {type: string}
         actor_principal: {type: string}
@@ -5797,12 +5798,12 @@ paths:
                 idempotency_key: {type: string, maxLength: 512}
               required: [kind, expected_state_version]
       responses:
-        '201': {description: Recorded as pending, content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestResponse'}}}}
+        '201': {description: 'Recorded as pending. With MCTL_EXECUTION_REQUEST_QUEUE_WHILE_ACTIVE=on this includes a request made while the item has a Pending or Running execution (queued_behind_execution_id names it); it is claimable only after that execution ends.', content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestResponse'}}}}
         '200': {description: Idempotent replay; the stored request, content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestResponse'}}}}
         '400': {description: 'invalid_request, execution_identity_not_accepted or actor_not_accepted', content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
         '403': {description: execution_request_requester_forbidden, content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
         '404': {description: 'work_item_not_found (or not visible), execution_not_found or intent_not_found', content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
-        '409': {description: 'state_version_conflict, invalid_transition (terminal item, or the wrong kind), execution_active, idempotency_key_reused, execution_request_open or intent_unavailable (the pinned intent text is unavailable)', content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
+        '409': {description: 'state_version_conflict, invalid_transition (terminal item, or the wrong kind), execution_active (only when MCTL_EXECUTION_REQUEST_QUEUE_WHILE_ACTIVE is off, the default), idempotency_key_reused, execution_request_open or intent_unavailable (the pinned intent text is unavailable)', content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
         '503': {description: work_items_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/ExecutionRequestError'}}}}
     get:
       summary: List a work item's execution requests

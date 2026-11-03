@@ -127,6 +127,9 @@ type DevLoopClient interface {
 	// already-closed DevLoop instead of stamping a fresh "started" message
 	// on it (issue #287).
 	DescribeDevLoopExecution(ctx context.Context, workflowID string) (*temporalclient.DevLoopExecution, error)
+	// DescribeDevLoopRun describes one run (runID "" = latest); a missing run
+	// is temporalclient.ErrRunNotFound.
+	DescribeDevLoopRun(ctx context.Context, workflowID, runID string) (*temporalclient.DevLoopExecution, error)
 	QueryShepherdInLoop(ctx context.Context, workflowID string) (bool, error)
 	QueryHumanInputState(ctx context.Context, workflowID, runID string) (*temporalclient.HumanInputState, error)
 	SignalHumanInputResponse(ctx context.Context, workflowID, runID string, response map[string]any) error

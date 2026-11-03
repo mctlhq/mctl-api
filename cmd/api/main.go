@@ -617,6 +617,8 @@ func main() {
 	// AUDIT_DB_URL other stores depend on. Nil makes every /api/v1/work-items
 	// route answer 503.
 	var workItemsStore *workitems.Store
+	// validate has already refused an unparsable value.
+	queueWhileActive, _ := workitems.ParseQueueWhileActive(cfg.ExecutionRequestQueueWhileActiveRaw)
 	workItemsDBURL, workItemsDisabled := workItemsStoreSource()
 	switch {
 	case workItemsDisabled:
@@ -625,7 +627,7 @@ func main() {
 		slog.Warn("no WORK_ITEMS_DB_URL or AUDIT_DB_URL; /api/v1/work-items and /api/v1/action-approvals routes will return 503")
 	default:
 		ws, wsErr := initStore(initCtx, storeFailures, "work items", func(ctx context.Context) (*workitems.Store, error) {
-			return workitems.NewStore(ctx, workItemsDBURL, workitems.WithClock(approvalClock))
+			return workitems.NewStore(ctx, workItemsDBURL, workitems.WithClock(approvalClock), workitems.WithQueueWhileActive(queueWhileActive))
 		})
 		if wsErr != nil {
 			slog.Error("work-items store init failed; /api/v1/work-items and /api/v1/action-approvals routes will return 503", "error", wsErr)
@@ -1009,6 +1011,25 @@ func main() {
 			return "connecting"
 		}
 		return "ok"
+	}
+
+	// Orphan sweeper: with the queue-while-active switch on, an execution
+	// whose Temporal run already closed must not block queued requests.
+	if queueWhileActive && workItemsStore != nil && devLoopClient != nil {
+		go func() {
+			ticker := time.NewTicker(mctlapi.OrphanReconcileInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-rootCtx.Done():
+					return
+				case <-ticker.C:
+					sctx, cancel := context.WithTimeout(rootCtx, time.Minute)
+					mctlapi.ReconcileOrphanedExecutions(sctx, workItemsStore, devLoopClient, time.Now())
+					cancel()
+				}
+			}
+		}()
 	}
 
 	executor := operations.NewExecutor()
@@ -1604,6 +1625,9 @@ type config struct {
 	// SubmitCreatesExecutionRaw is MCTL_SUBMIT_CREATES_EXECUTION (mctl-agents#717
 	// S3): on or off, empty is off; validated at startup.
 	SubmitCreatesExecutionRaw string
+	// ExecutionRequestQueueWhileActiveRaw is
+	// MCTL_EXECUTION_REQUEST_QUEUE_WHILE_ACTIVE: "" or "off" (default) or "on".
+	ExecutionRequestQueueWhileActiveRaw string
 	// ApprovalMaxDecisionAgeRaw is ACTION_APPROVAL_MAX_DECISION_AGE
 	// (mctl-api#700): a Go duration; empty is 24h.
 	ApprovalMaxDecisionAgeRaw string
@@ -1687,85 +1711,86 @@ func loadConfig() config {
 	}
 
 	return config{
-		Port:                           envOr("PORT", "8080"),
-		GitOpsRepoURL:                  envOr("GITOPS_REPO_URL", "https://github.com/mctlhq/mctl-gitops.git"),
-		GitOpsBranch:                   envOr("GITOPS_BRANCH", "main"),
-		GitOpsLocalPath:                envOr("GITOPS_LOCAL_PATH", "/tmp/mctl-gitops"),
-		GitOpsToken:                    gitOpsTokenSource(),
-		GitOpsActionsToken:             actionsTokenSource(),
-		GitOpsSSHKeyPath:               os.Getenv("GITOPS_SSH_KEY_PATH"),
-		GitOpsSSHKnownHostsPath:        os.Getenv("GITOPS_SSH_KNOWN_HOSTS_PATH"),
-		ArgoCDURL:                      envOr("ARGOCD_URL", "https://ops.mctl.ai"),
-		ErpactDeployerURL:              envOr("ERPACT_DEPLOYER_URL", "http://erpact-deployer.erpact.svc.cluster.local:8000"),
-		ArgoCDToken:                    os.Getenv("ARGOCD_TOKEN"),
-		GitHubOrg:                      envOr("GITHUB_ORG", "mctlhq"),
-		AdminUsers:                     adminList,
-		BackstageInternalURL:           envOr("BACKSTAGE_INTERNAL_URL", "http://backstage.backstage.svc.cluster.local:7007"),
-		PlatformDomain:                 envOr("PLATFORM_DOMAIN", "mctl.ai"),
-		DNSResolverAddr:                envOr("DNS_RESOLVER_ADDR", "1.1.1.1:53"),
-		BackstageGithubAppConnectToken: os.Getenv("BACKSTAGE_GITHUB_APP_CONNECT_TOKEN"),
-		DexIssuerURL:                   os.Getenv("DEX_ISSUER_URL"),
-		DexClientID:                    os.Getenv("DEX_CLIENT_ID"),
-		OIDCProvidersRaw:               os.Getenv("MCTL_OIDC_PROVIDERS"),
-		GitHubActionsOIDCRaw:           os.Getenv("MCTL_GITHUB_ACTIONS_OIDC"),
-		FederationDisabled:             killSwitchOn(os.Getenv("MCTL_FEDERATION_DISABLED")),
-		SelfURL:                        envOr("SELF_URL", "https://api.mctl.ai"),
-		AllowedOrigins:                 origins,
-		OAuthGitHubClientID:            os.Getenv("OAUTH_GITHUB_CLIENT_ID"),
-		OAuthGitHubClientSecret:        os.Getenv("OAUTH_GITHUB_CLIENT_SECRET"),
-		OAuthUpstreamRaw:               os.Getenv("OAUTH_UPSTREAM"),
-		OAuthZitadelClientID:           os.Getenv("OAUTH_ZITADEL_CLIENT_ID"),
-		OAuthZitadelClientSecret:       os.Getenv("OAUTH_ZITADEL_CLIENT_SECRET"),
-		OAuthZitadelProvider:           envOr("OAUTH_ZITADEL_PROVIDER", "zitadel"),
-		OAuthZitadelRedirectBaseURL:    os.Getenv("OAUTH_ZITADEL_REDIRECT_BASE_URL"),
-		ZitadelLinkClientID:            os.Getenv("ZITADEL_LINK_CLIENT_ID"),
-		ZitadelLinkClientSecret:        os.Getenv("ZITADEL_LINK_CLIENT_SECRET"),
-		ZitadelLinkProvider:            envOr("ZITADEL_LINK_PROVIDER", "zitadel"),
-		OAuthJWTSecret:                 os.Getenv("OAUTH_JWT_SECRET"),
-		OAuthAllowedRedirectURIs:       oauthRedirectURIs,
-		OAuthPreregisteredClientsRaw:   os.Getenv("OAUTH_PREREGISTERED_CLIENTS"),
-		OAuthCIMDAcceptRaw:             os.Getenv("OAUTH_CIMD_ACCEPT"),
-		OAuthCIMDAdvertiseRaw:          os.Getenv("OAUTH_CIMD_ADVERTISE"),
-		OAuthCIMDEnabledRaw:            os.Getenv("OAUTH_CIMD_ENABLED"),
-		OAuthCIMDAllowedHostsRaw:       os.Getenv("OAUTH_CIMD_ALLOWED_HOSTS"),
-		OAuthTokenTTL:                  parseDuration(os.Getenv("OAUTH_TOKEN_TTL"), time.Hour),
-		OAuthRefreshTokenTTL:           parseDuration(os.Getenv("OAUTH_REFRESH_TOKEN_TTL"), 30*24*time.Hour),
-		OAuthAccessTokenAudience:       os.Getenv("OAUTH_ACCESS_TOKEN_AUDIENCE"),
-		OAuthJWTSigningAlg:             os.Getenv("OAUTH_JWT_SIGNING_ALG"),
-		OAuthJWTSigningKeys:            os.Getenv("OAUTH_JWT_SIGNING_KEYS"),
-		OAuthJWTKeyRetention:           parseDuration(os.Getenv("OAUTH_JWT_KEY_RETENTION"), 0),
-		OAuthJWTRejectHS256:            os.Getenv("OAUTH_JWT_ACCEPT_HS256") == "false",
-		OAuthJWTRequireAud:             os.Getenv("OAUTH_JWT_REQUIRE_AUD") == "true",
-		VaultAddr:                      os.Getenv("VAULT_ADDR"),
-		VaultToken:                     os.Getenv("VAULT_TOKEN"),
-		VaultKubernetesRole:            os.Getenv("VAULT_KUBERNETES_ROLE"),
-		VaultKubernetesAuthPath:        os.Getenv("VAULT_KUBERNETES_AUTH_PATH"),
-		ArgoWebhookSecret:              os.Getenv("ARGO_WEBHOOK_SECRET"),
-		GitHubWebhookSecret:            os.Getenv("GITHUB_WEBHOOK_SECRET"),
-		GitHubWebhookOwners:            splitCSV(envOr("GITHUB_WEBHOOK_OWNERS", "mctlhq")),
-		ZitadelHook:                    loadZitadelHookConfig(),
-		MctlWebClientID:                os.Getenv("MCTL_WEB_CLIENT_ID"),
-		ZitadelPortalClientID:          os.Getenv("ZITADEL_PORTAL_CLIENT_ID"),
-		EventsValkeyURL:                os.Getenv("EVENTS_VALKEY_URL"),
-		EventsValkeyPassword:           os.Getenv("EVENTS_VALKEY_PASSWORD"),
-		OAuthRegistrationToken:         os.Getenv("OAUTH_REGISTRATION_TOKEN"),
-		TrustedProxyCIDRs:              os.Getenv("TRUSTED_PROXY_CIDRS"),
-		CommerceDispatchKeyID:          os.Getenv("COMMERCE_DISPATCH_KEY_ID"),
-		CommerceDispatchSigningKey:     os.Getenv("COMMERCE_DISPATCH_SIGNING_KEY"),
-		CommerceDisabled:               killSwitchOn(os.Getenv("COMMERCE_DISABLED")),
-		CommerceAcceptDisabled:         killSwitchOn(os.Getenv("COMMERCE_ACCEPT_DISABLED")),
-		TenantAuthzModeRaw:             os.Getenv("TENANT_AUTHZ_MODE"),
-		AgentReceiptGateRaw:            os.Getenv("MCTL_AGENT_RECEIPT_GATE"),
-		ApprovalBindingRaw:             os.Getenv("MCTL_APPROVAL_BINDING"),
-		AgentReceiptMaxAgeRaw:          os.Getenv("MCTL_AGENT_RECEIPT_MAX_AGE"),
-		WorkItemsConfigured:            workItemsStoreConfigured(),
-		LegacyApproverRaw:              os.Getenv("MCTL_AGENTS_APPROVE_LEGACY_APPROVER"),
-		SubmitCreatesExecutionRaw:      os.Getenv(operations.SubmitCreatesExecutionEnv),
-		ApprovalMaxDecisionAgeRaw:      os.Getenv("ACTION_APPROVAL_MAX_DECISION_AGE"),
-		ApprovalStrictPolicyRaw:        os.Getenv("ACTION_APPROVAL_REQUIRE_REGISTERED_POLICY"),
-		AdminPrincipalsRaw:             os.Getenv("ADMIN_PRINCIPALS"),
-		PrincipalsDisabled:             killSwitchOn(os.Getenv("PRINCIPALS_DISABLED")),
-		PrincipalDBConfigured:          postgresURL(os.Getenv("SURFACE_IDENTITY_DB_URL")) != "" || postgresURL(os.Getenv("AUDIT_DB_URL")) != "",
+		Port:                                envOr("PORT", "8080"),
+		GitOpsRepoURL:                       envOr("GITOPS_REPO_URL", "https://github.com/mctlhq/mctl-gitops.git"),
+		GitOpsBranch:                        envOr("GITOPS_BRANCH", "main"),
+		GitOpsLocalPath:                     envOr("GITOPS_LOCAL_PATH", "/tmp/mctl-gitops"),
+		GitOpsToken:                         gitOpsTokenSource(),
+		GitOpsActionsToken:                  actionsTokenSource(),
+		GitOpsSSHKeyPath:                    os.Getenv("GITOPS_SSH_KEY_PATH"),
+		GitOpsSSHKnownHostsPath:             os.Getenv("GITOPS_SSH_KNOWN_HOSTS_PATH"),
+		ArgoCDURL:                           envOr("ARGOCD_URL", "https://ops.mctl.ai"),
+		ErpactDeployerURL:                   envOr("ERPACT_DEPLOYER_URL", "http://erpact-deployer.erpact.svc.cluster.local:8000"),
+		ArgoCDToken:                         os.Getenv("ARGOCD_TOKEN"),
+		GitHubOrg:                           envOr("GITHUB_ORG", "mctlhq"),
+		AdminUsers:                          adminList,
+		BackstageInternalURL:                envOr("BACKSTAGE_INTERNAL_URL", "http://backstage.backstage.svc.cluster.local:7007"),
+		PlatformDomain:                      envOr("PLATFORM_DOMAIN", "mctl.ai"),
+		DNSResolverAddr:                     envOr("DNS_RESOLVER_ADDR", "1.1.1.1:53"),
+		BackstageGithubAppConnectToken:      os.Getenv("BACKSTAGE_GITHUB_APP_CONNECT_TOKEN"),
+		DexIssuerURL:                        os.Getenv("DEX_ISSUER_URL"),
+		DexClientID:                         os.Getenv("DEX_CLIENT_ID"),
+		OIDCProvidersRaw:                    os.Getenv("MCTL_OIDC_PROVIDERS"),
+		GitHubActionsOIDCRaw:                os.Getenv("MCTL_GITHUB_ACTIONS_OIDC"),
+		FederationDisabled:                  killSwitchOn(os.Getenv("MCTL_FEDERATION_DISABLED")),
+		SelfURL:                             envOr("SELF_URL", "https://api.mctl.ai"),
+		AllowedOrigins:                      origins,
+		OAuthGitHubClientID:                 os.Getenv("OAUTH_GITHUB_CLIENT_ID"),
+		OAuthGitHubClientSecret:             os.Getenv("OAUTH_GITHUB_CLIENT_SECRET"),
+		OAuthUpstreamRaw:                    os.Getenv("OAUTH_UPSTREAM"),
+		OAuthZitadelClientID:                os.Getenv("OAUTH_ZITADEL_CLIENT_ID"),
+		OAuthZitadelClientSecret:            os.Getenv("OAUTH_ZITADEL_CLIENT_SECRET"),
+		OAuthZitadelProvider:                envOr("OAUTH_ZITADEL_PROVIDER", "zitadel"),
+		OAuthZitadelRedirectBaseURL:         os.Getenv("OAUTH_ZITADEL_REDIRECT_BASE_URL"),
+		ZitadelLinkClientID:                 os.Getenv("ZITADEL_LINK_CLIENT_ID"),
+		ZitadelLinkClientSecret:             os.Getenv("ZITADEL_LINK_CLIENT_SECRET"),
+		ZitadelLinkProvider:                 envOr("ZITADEL_LINK_PROVIDER", "zitadel"),
+		OAuthJWTSecret:                      os.Getenv("OAUTH_JWT_SECRET"),
+		OAuthAllowedRedirectURIs:            oauthRedirectURIs,
+		OAuthPreregisteredClientsRaw:        os.Getenv("OAUTH_PREREGISTERED_CLIENTS"),
+		OAuthCIMDAcceptRaw:                  os.Getenv("OAUTH_CIMD_ACCEPT"),
+		OAuthCIMDAdvertiseRaw:               os.Getenv("OAUTH_CIMD_ADVERTISE"),
+		OAuthCIMDEnabledRaw:                 os.Getenv("OAUTH_CIMD_ENABLED"),
+		OAuthCIMDAllowedHostsRaw:            os.Getenv("OAUTH_CIMD_ALLOWED_HOSTS"),
+		OAuthTokenTTL:                       parseDuration(os.Getenv("OAUTH_TOKEN_TTL"), time.Hour),
+		OAuthRefreshTokenTTL:                parseDuration(os.Getenv("OAUTH_REFRESH_TOKEN_TTL"), 30*24*time.Hour),
+		OAuthAccessTokenAudience:            os.Getenv("OAUTH_ACCESS_TOKEN_AUDIENCE"),
+		OAuthJWTSigningAlg:                  os.Getenv("OAUTH_JWT_SIGNING_ALG"),
+		OAuthJWTSigningKeys:                 os.Getenv("OAUTH_JWT_SIGNING_KEYS"),
+		OAuthJWTKeyRetention:                parseDuration(os.Getenv("OAUTH_JWT_KEY_RETENTION"), 0),
+		OAuthJWTRejectHS256:                 os.Getenv("OAUTH_JWT_ACCEPT_HS256") == "false",
+		OAuthJWTRequireAud:                  os.Getenv("OAUTH_JWT_REQUIRE_AUD") == "true",
+		VaultAddr:                           os.Getenv("VAULT_ADDR"),
+		VaultToken:                          os.Getenv("VAULT_TOKEN"),
+		VaultKubernetesRole:                 os.Getenv("VAULT_KUBERNETES_ROLE"),
+		VaultKubernetesAuthPath:             os.Getenv("VAULT_KUBERNETES_AUTH_PATH"),
+		ArgoWebhookSecret:                   os.Getenv("ARGO_WEBHOOK_SECRET"),
+		GitHubWebhookSecret:                 os.Getenv("GITHUB_WEBHOOK_SECRET"),
+		GitHubWebhookOwners:                 splitCSV(envOr("GITHUB_WEBHOOK_OWNERS", "mctlhq")),
+		ZitadelHook:                         loadZitadelHookConfig(),
+		MctlWebClientID:                     os.Getenv("MCTL_WEB_CLIENT_ID"),
+		ZitadelPortalClientID:               os.Getenv("ZITADEL_PORTAL_CLIENT_ID"),
+		EventsValkeyURL:                     os.Getenv("EVENTS_VALKEY_URL"),
+		EventsValkeyPassword:                os.Getenv("EVENTS_VALKEY_PASSWORD"),
+		OAuthRegistrationToken:              os.Getenv("OAUTH_REGISTRATION_TOKEN"),
+		TrustedProxyCIDRs:                   os.Getenv("TRUSTED_PROXY_CIDRS"),
+		CommerceDispatchKeyID:               os.Getenv("COMMERCE_DISPATCH_KEY_ID"),
+		CommerceDispatchSigningKey:          os.Getenv("COMMERCE_DISPATCH_SIGNING_KEY"),
+		CommerceDisabled:                    killSwitchOn(os.Getenv("COMMERCE_DISABLED")),
+		CommerceAcceptDisabled:              killSwitchOn(os.Getenv("COMMERCE_ACCEPT_DISABLED")),
+		TenantAuthzModeRaw:                  os.Getenv("TENANT_AUTHZ_MODE"),
+		AgentReceiptGateRaw:                 os.Getenv("MCTL_AGENT_RECEIPT_GATE"),
+		ApprovalBindingRaw:                  os.Getenv("MCTL_APPROVAL_BINDING"),
+		AgentReceiptMaxAgeRaw:               os.Getenv("MCTL_AGENT_RECEIPT_MAX_AGE"),
+		WorkItemsConfigured:                 workItemsStoreConfigured(),
+		LegacyApproverRaw:                   os.Getenv("MCTL_AGENTS_APPROVE_LEGACY_APPROVER"),
+		SubmitCreatesExecutionRaw:           os.Getenv(operations.SubmitCreatesExecutionEnv),
+		ExecutionRequestQueueWhileActiveRaw: os.Getenv(workitems.QueueWhileActiveEnv),
+		ApprovalMaxDecisionAgeRaw:           os.Getenv("ACTION_APPROVAL_MAX_DECISION_AGE"),
+		ApprovalStrictPolicyRaw:             os.Getenv("ACTION_APPROVAL_REQUIRE_REGISTERED_POLICY"),
+		AdminPrincipalsRaw:                  os.Getenv("ADMIN_PRINCIPALS"),
+		PrincipalsDisabled:                  killSwitchOn(os.Getenv("PRINCIPALS_DISABLED")),
+		PrincipalDBConfigured:               postgresURL(os.Getenv("SURFACE_IDENTITY_DB_URL")) != "" || postgresURL(os.Getenv("AUDIT_DB_URL")) != "",
 	}
 }
 
@@ -2015,6 +2040,9 @@ func (c config) validate() error {
 		return err
 	}
 	if _, err := operations.ParseSubmitCreatesExecution(c.SubmitCreatesExecutionRaw); err != nil {
+		return err
+	}
+	if _, err := workitems.ParseQueueWhileActive(c.ExecutionRequestQueueWhileActiveRaw); err != nil {
 		return err
 	}
 	if _, err := parseApprovalMaxDecisionAge(c.ApprovalMaxDecisionAgeRaw); err != nil {

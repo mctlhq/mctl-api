@@ -326,6 +326,30 @@ func (c *Client) DescribeDevLoopExecution(ctx context.Context, workflowID string
 	}, nil
 }
 
+// ErrRunNotFound is DescribeDevLoopRun's answer when Temporal has no such
+// run (a typed, matchable fault, never folded into a status).
+var ErrRunNotFound = errors.New("temporalclient: workflow run not found")
+
+// DescribeDevLoopRun describes one specific run of a workflow (runID "" is
+// the latest). Unlike DescribeDevLoopExecution it can answer for a run that
+// is no longer the latest.
+func (c *Client) DescribeDevLoopRun(ctx context.Context, workflowID, runID string) (*DevLoopExecution, error) {
+	resp, err := c.temporal.DescribeWorkflowExecution(ctx, workflowID, runID)
+	if err != nil {
+		var nf *serviceerror.NotFound
+		if errors.As(err, &nf) {
+			return nil, fmt.Errorf("%w: %s run %q", ErrRunNotFound, workflowID, runID)
+		}
+		return nil, fmt.Errorf("temporalclient: describe %s run %q: %w", workflowID, runID, err)
+	}
+	info := resp.GetWorkflowExecutionInfo()
+	return &DevLoopExecution{
+		Status:    statusName(info.GetStatus()),
+		RunID:     info.GetExecution().GetRunId(),
+		StartTime: info.GetStartTime().AsTime(),
+	}, nil
+}
+
 // DescribeDevLoop returns the execution status of the DevLoopWorkflow with
 // the given workflow ID — the liveness read the shepherd sweeper uses to
 // skip proposals a live DevLoop already drives (mctl-agents#213). The

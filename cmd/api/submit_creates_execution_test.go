@@ -22,3 +22,17 @@ func TestConfigValidate_SubmitCreatesExecution(t *testing.T) {
 		}
 	}
 }
+
+// MCTL_EXECUTION_REQUEST_QUEUE_WHILE_ACTIVE refuses the boot on a bad value.
+func TestConfigValidate_QueueWhileActive(t *testing.T) {
+	for _, raw := range []string{"", "off", "on"} {
+		cfg := config{ExecutionRequestQueueWhileActiveRaw: raw, CommerceDisabled: true}
+		if err := cfg.validate(); err != nil {
+			t.Errorf("%q: validate() = %v", raw, err)
+		}
+	}
+	cfg := config{ExecutionRequestQueueWhileActiveRaw: "maybe", CommerceDisabled: true}
+	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "MCTL_EXECUTION_REQUEST_QUEUE_WHILE_ACTIVE") {
+		t.Errorf("validate() = %v, want a refusal naming the variable", err)
+	}
+}

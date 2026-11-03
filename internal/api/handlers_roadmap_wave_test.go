@@ -720,3 +720,8 @@ func TestRoadmapWave_BudgetExhaustedIsRefused(t *testing.T) {
 		t.Fatalf("started %v, audit %v", e.tc.started, waveAuditReasons(e))
 	}
 }
+
+// DescribeDevLoopRun answers like DescribeDevLoopExecution, for any run.
+func (f *waveDevLoop) DescribeDevLoopRun(ctx context.Context, workflowID, runID string) (*temporalclient.DevLoopExecution, error) {
+	return f.DescribeDevLoopExecution(ctx, workflowID)
+}

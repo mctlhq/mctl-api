@@ -1188,3 +1188,8 @@ func TestStartDevLoopWorkflow_RunningLoopNeverReadsTheMarker(t *testing.T) {
 		t.Fatalf("a running loop: reads %v, restarts %d, starts %d", fake.endedReadRuns, fake.restartCalls, fake.startCalls)
 	}
 }
+
+// DescribeDevLoopRun answers like DescribeDevLoopExecution, for any run.
+func (f *fakeDevLoopClient) DescribeDevLoopRun(ctx context.Context, workflowID, runID string) (*temporalclient.DevLoopExecution, error) {
+	return f.DescribeDevLoopExecution(ctx, workflowID)
+}
