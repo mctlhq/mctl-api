@@ -74,8 +74,8 @@ func (c orphanCase) kinds(t *testing.T) (orphan int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, ev := range evs {
-		if ev.Kind == workitems.EventExecutionOrphanClosed {
+	for i := range evs {
+		if evs[i].Kind == workitems.EventExecutionOrphanClosed {
 			orphan++
 		}
 	}
@@ -219,7 +219,8 @@ func TestReconcileOrphans_LeavesAloneWhatItShould(t *testing.T) {
 	})
 }
 
-// The candidate budget: a batch of 20 is the most that is described per tick.
+// A sweep walks every page of candidates (page size 20) with a keyset cursor,
+// describing each candidate exactly once.
 func TestReconcileOrphans_BatchIsBounded(t *testing.T) {
 	e := newWorkItemsEnv(t)
 	s := queueingStore(t, e)
@@ -228,8 +229,8 @@ func TestReconcileOrphans_BatchIsBounded(t *testing.T) {
 	}
 	d := &runDescriber{fakeDevLoopClient: &fakeDevLoopClient{}, status: "Running"}
 	ReconcileOrphanedExecutions(context.Background(), s, d, time.Now().Add(time.Hour))
-	if len(d.calls) != 20 {
-		t.Fatalf("%d describes, want 20 (design: limit 20 per tick)", len(d.calls))
+	if len(d.calls) != 23 {
+		t.Fatalf("%d describes, want 23 (every candidate, paged by 20)", len(d.calls))
 	}
 }
 
