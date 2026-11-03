@@ -58,6 +58,9 @@ type submitExecution struct {
 	mut  workitems.Mutation
 	// namespace is where the Workflow is created.
 	namespace string
+	// reqCtx is the request context: cleanup keeps its values (trace span,
+	// log attributes) but not its cancellation.
+	reqCtx context.Context
 }
 
 // prepareSubmitExecution makes sure a run of an operation that must carry a
@@ -139,7 +142,7 @@ func (h *Handlers) prepareSubmitExecution(w http.ResponseWriter, r *http.Request
 	input["execution_id"] = exec.ID
 
 	se := &submitExecution{h: h, item: itemID, exec: exec.ID, ref: ref, mut: mut,
-		namespace: operations.WorkflowNamespace(op.WorkflowTemplate, tenant)}
+		namespace: operations.WorkflowNamespace(op.WorkflowTemplate, tenant), reqCtx: ctx}
 	return operations.WithWorkflowRequestID(ctx, requestID), se.ended, true
 }
 
@@ -162,7 +165,7 @@ func (se *submitExecution) ended(result *operations.SubmitResult, submitErr erro
 		return ""
 	}
 	// The request context may be what failed; the lookup and close must still be tried.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(se.reqCtx), 10*time.Second)
 	defer cancel()
 	// Raised before the create call: the Workflow certainly does not exist.
 	// Any other error is ambiguous, so look the Workflow up.
