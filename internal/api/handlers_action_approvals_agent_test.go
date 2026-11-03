@@ -7,7 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/mctlhq/mctl-api/internal/auth"
+	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
@@ -20,10 +23,11 @@ import (
 // that name it are cleaned up by their execution id, like the rest.
 const agentTestWorkItem = "wi_agent-test"
 
-// agentTestScope is a defined scope. The handlers need a scoped token; which
-// scopes reach the approval routes is the scope gate's route list, which
-// these handler-level tests do not run.
-const agentTestScope = auth.AgentScopeInvestigate
+// agentTestScope is the scope an implementer run carries. The handlers need
+// a scoped token; which scopes reach the approval routes is the scope gate's
+// route list, which these handler-level tests do not run (see
+// TestAgentApprovals_ThroughTheScopeGate for both together).
+const agentTestScope = auth.AgentScopeImplement
 
 func (e *workItemsEnv) agentRun(execID, runID string) *auth.User {
 	return auth.NewAgentUser("implementer", auth.AgentRun{
@@ -273,5 +277,66 @@ func TestAgentApprovals_OnlyTheServicesGrantIsTheRuns(t *testing.T) {
 	}
 	if res := e.do(run, "GET", "/api/v1/action-approvals/"+a.ID, nil); res.code != http.StatusNotFound {
 		t.Fatalf("run reads another principal's gate = %d %s", res.code, res.raw)
+	}
+}
+
+// The scope gate and the handlers together: an implement run reaches the
+// approval routes it uses, for its own execution only; a decision is outside
+// its scope; and a run of any other scope reaches none of them (S5).
+func TestAgentApprovals_ThroughTheScopeGate(t *testing.T) {
+	e := newWorkItemsEnv(t)
+	gated := chi.NewRouter()
+	gated.Use(e.h.agentScopeGate)
+	gated.Mount("/", e.router)
+	e.router = gated
+
+	run := e.agentRun(e.tenant+"-exec", "art_run_a")
+	other := e.agentRun(e.tenant+"-exec-other", "art_run_b")
+	res := e.do(run, "POST", "/api/v1/action-approvals", e.agentApprovalBody("k-agent-gate"))
+	if res.code != http.StatusCreated {
+		t.Fatalf("create = %d %s", res.code, res.raw)
+	}
+	a := res.body["approval"].(map[string]any)
+	id := a["id"].(string)
+	if res := e.decide(rootAdmin, id, "approve"); res.code != http.StatusOK {
+		t.Fatalf("approve = %d %s", res.code, res.raw)
+	}
+
+	// Another execution's run is admitted by the scope and refused by the
+	// handlers: the route list alone is not the binding.
+	for name, res := range map[string]wiResponse{
+		"read":    e.do(other, "GET", "/api/v1/action-approvals/"+id, nil),
+		"consume": e.do(other, "POST", "/api/v1/action-approvals/"+id+"/consume", map[string]any{"intent_hash": a["intent_hash"]}),
+		"execute": e.markExecuted(other, id, executeBody(a["target"].(string), executeArtifactHash)),
+	} {
+		if res.code != http.StatusNotFound || code(res) != aarCodeNotFound {
+			t.Errorf("another execution's %s = %d %s", name, res.code, res.raw)
+		}
+	}
+	// A decision is outside the scope.
+	if res := e.decide(run, id, "approve"); res.code != http.StatusForbidden || code(res) != mctlmcp.AgentScopeCodeDenied {
+		t.Errorf("run decides = %d %s", res.code, res.raw)
+	}
+	if res := e.do(run, "GET", "/api/v1/action-approvals", nil); res.code != http.StatusForbidden || code(res) != mctlmcp.AgentScopeCodeDenied {
+		t.Errorf("run lists = %d %s", res.code, res.raw)
+	}
+
+	// The run itself spends and marks executed its own.
+	if res := e.do(run, "POST", "/api/v1/action-approvals/"+id+"/consume", map[string]any{"intent_hash": a["intent_hash"]}); res.code != http.StatusOK {
+		t.Fatalf("own consume = %d %s", res.code, res.raw)
+	}
+	// execute is outside every other scope: the same execution-bound token
+	// minted with the investigate scope is refused at the gate.
+	inv := auth.NewAgentUser("implementer", auth.AgentRun{
+		Agent: "implementer", ExecutionID: e.tenant + "-exec", WorkItemID: agentTestWorkItem, RunID: "art_run_a", Scope: auth.AgentScopeInvestigate,
+	})
+	if res := e.markExecuted(inv, id, executeBody(a["target"].(string), executeArtifactHash)); res.code != http.StatusForbidden || code(res) != mctlmcp.AgentScopeCodeDenied {
+		t.Errorf("investigate-scope execute = %d %s", res.code, res.raw)
+	}
+	if row := e.approvalRow(id); row["state"] != "consumed" {
+		t.Fatalf("state before own execute = %v", row["state"])
+	}
+	if res := e.markExecuted(run, id, executeBody(a["target"].(string), executeArtifactHash)); res.code != http.StatusOK {
+		t.Fatalf("own execute = %d %s", res.code, res.raw)
 	}
 }

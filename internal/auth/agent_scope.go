@@ -40,6 +40,14 @@ import (
 // snapshot of its own execution.
 const AgentScopeInvestigate = "investigate"
 
+// AgentScopeImplement is the scope of an implementer run: the same reads as
+// investigate, and the four action-approval routes it uses. The approval
+// routes carry no execution in their path; the handlers hold an agent run to
+// its own execution's approvals (mctlhq/mctl-agents#717 S4), so this scope is
+// only as strong as that handler binding. It is the only scope that lists
+// execute.
+const AgentScopeImplement = "implement"
+
 // AgentScopeSupport is the scope of a tenant support run: reads of exactly
 // one tenant, the one the token was minted for, and nothing else.
 const AgentScopeSupport = "support"
@@ -197,6 +205,44 @@ var mcpRoutes = []AgentScopeRoute{
 	{Method: http.MethodDelete, Pattern: regexp.MustCompile(`^/mcp$`)},
 }
 
+// agentPlatformReads are the platform reads the investigate and implement
+// scopes share: the REST routes behind the read-only MCP tools. Each is a
+// GET, so sharing the list widens no write.
+func agentPlatformReads() []AgentScopeRoute {
+	return []AgentScopeRoute{
+		getRoute(`^/api/v1/whoami$`),
+		getRoute(`^/api/v1/identity/self$`),
+		getRoute(`^/api/v1/tenants(/[^/]+)?$`),
+		getRoute(`^/api/v1/services(/[^/]+/[^/]+)?$`),
+		getRoute(`^/api/v1/status/[^/]+/[^/]+$`),
+		getRoute(`^/api/v1/workflows(/[^/]+(/logs)?)?$`),
+		getRoute(`^/api/v1/previews$`),
+		getRoute(`^/api/v1/resources/[^/]+$`),
+		getRoute(`^/api/v1/logs/[^/]+/[^/]+$`),
+		getRoute(`^/api/v1/pods/[^/]+/[^/]+$`),
+		getRoute(`^/api/v1/events/[^/]+$`),
+		getRoute(`^/api/v1/agent-runs$`),
+		getRoute(`^/api/v1/platform-skills(/[^/]+)?$`),
+		getRoute(`^/api/v1/repos$`),
+		getRoute(`^/api/v1/domains$`),
+		getRoute(`^/api/v1/incidents(/summary|/[^/]+)?$`),
+		getRoute(`^/api/v1/roadmap/(epics|epic-status|ready)$`),
+		getRoute(`^/api/v1/lifecycle/ownership(/record|/batch|/conflict)?$`),
+		getRoute(`^/api/v1/lifecycle/events$`),
+		getRoute(`^/api/v1/operations(/[^/]+)?$`),
+	}
+}
+
+// agentApprovalRoutes are the action-approval routes an implementer run
+// uses: request, read, spend and mark executed. Not decision (a human's) and
+// not the list. Their execution binding is in the handlers, not here.
+var agentApprovalRoutes = []AgentScopeRoute{
+	{Method: http.MethodPost, Pattern: regexp.MustCompile(`^/api/v1/action-approvals$`)},
+	getRoute(`^/api/v1/action-approvals/[^/]+$`),
+	{Method: http.MethodPost, Pattern: regexp.MustCompile(`^/api/v1/action-approvals/[^/]+/consume$`)},
+	{Method: http.MethodPost, Pattern: regexp.MustCompile(`^/api/v1/action-approvals/[^/]+/execute$`)},
+}
+
 var agentScopes = map[string]*AgentScope{
 	AgentScopeInvestigate: {
 		Name:           AgentScopeInvestigate,
@@ -204,27 +250,7 @@ var agentScopes = map[string]*AgentScope{
 		ReadAllTenants: true,
 		Tool:           IsReadTool,
 		Deny:           agentDeniedRoutes,
-		Routes: append(append([]AgentScopeRoute(nil), mcpRoutes...),
-			getRoute(`^/api/v1/whoami$`),
-			getRoute(`^/api/v1/identity/self$`),
-			getRoute(`^/api/v1/tenants(/[^/]+)?$`),
-			getRoute(`^/api/v1/services(/[^/]+/[^/]+)?$`),
-			getRoute(`^/api/v1/status/[^/]+/[^/]+$`),
-			getRoute(`^/api/v1/workflows(/[^/]+(/logs)?)?$`),
-			getRoute(`^/api/v1/previews$`),
-			getRoute(`^/api/v1/resources/[^/]+$`),
-			getRoute(`^/api/v1/logs/[^/]+/[^/]+$`),
-			getRoute(`^/api/v1/pods/[^/]+/[^/]+$`),
-			getRoute(`^/api/v1/events/[^/]+$`),
-			getRoute(`^/api/v1/agent-runs$`),
-			getRoute(`^/api/v1/platform-skills(/[^/]+)?$`),
-			getRoute(`^/api/v1/repos$`),
-			getRoute(`^/api/v1/domains$`),
-			getRoute(`^/api/v1/incidents(/summary|/[^/]+)?$`),
-			getRoute(`^/api/v1/roadmap/(epics|epic-status|ready)$`),
-			getRoute(`^/api/v1/lifecycle/ownership(/record|/batch|/conflict)?$`),
-			getRoute(`^/api/v1/lifecycle/events$`),
-			getRoute(`^/api/v1/operations(/[^/]+)?$`),
+		Routes: append(append(append([]AgentScopeRoute(nil), mcpRoutes...), agentPlatformReads()...),
 			// The run's own work item and everything under it.
 			AgentScopeRoute{
 				Method: http.MethodGet, BindWorkItem: true,
@@ -237,6 +263,20 @@ var agentScopes = map[string]*AgentScope{
 				Pattern: regexp.MustCompile(`^/api/v1/work-items/([^/]+)/executions/([^/]+)/snapshot$`),
 			},
 		),
+	},
+	AgentScopeImplement: {
+		Name:           AgentScopeImplement,
+		Agents:         []string{"implementer"},
+		ReadAllTenants: true,
+		Tool:           IsReadTool,
+		Deny:           agentDeniedRoutes,
+		Routes: append(append(append(append([]AgentScopeRoute(nil), mcpRoutes...), agentPlatformReads()...),
+			// The run's own work item and everything under it, read only.
+			AgentScopeRoute{
+				Method: http.MethodGet, BindWorkItem: true,
+				Pattern: regexp.MustCompile(`^/api/v1/work-items/([^/]+)(/.*)?$`),
+			}),
+			agentApprovalRoutes...),
 	},
 	AgentScopeSupport: {
 		Name: AgentScopeSupport, Agents: []string{"mctl-support"},
