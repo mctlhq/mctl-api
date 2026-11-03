@@ -44,6 +44,12 @@ const AgentScopeInvestigate = "investigate"
 // one tenant, the one the token was minted for, and nothing else.
 const AgentScopeSupport = "support"
 
+// AgentScopeReview is the scope of an autonomous reviewer run (mctl-api#917):
+// it reaches whoami and the worker review-receipt route, nothing else. It must
+// be bound to an execution; the reviewer's identity is derived from that
+// binding, never from a request body.
+const AgentScopeReview = "review"
+
 // AgentScope is one server-defined run scope.
 type AgentScope struct {
 	Name string
@@ -237,6 +243,19 @@ var agentScopes = map[string]*AgentScope{
 				Pattern: regexp.MustCompile(`^/api/v1/work-items/([^/]+)/executions/([^/]+)/snapshot$`),
 			},
 		),
+	},
+	AgentScopeReview: {
+		Name: AgentScopeReview,
+		// review-worker is the canonical reviewer agent name, decided in
+		// mctlhq/mctl-agents#905.
+		Agents:        []string{"review-worker"},
+		AuditRequests: true,
+		Deny:          agentDeniedRoutes,
+		Tool:          func(string) bool { return false },
+		Routes: []AgentScopeRoute{
+			getRoute(`^/api/v1/whoami$`),
+			{Method: http.MethodPost, Pattern: regexp.MustCompile(`^/api/v1/review-receipts$`)},
+		},
 	},
 	AgentScopeSupport: {
 		Name: AgentScopeSupport, Agents: []string{"mctl-support"},

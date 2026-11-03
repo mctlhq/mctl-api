@@ -654,13 +654,13 @@ func (s *Store) FulfilExecutionRequest(ctx context.Context, in FulfilInput) (*Ex
 			if err = checkStart(ctx, tx, cur, x, in); err == nil {
 				exec, err = attachNewTx(ctx, tx, cur, ExecutionInput{
 					Mutation: in.Mutation, WorkItemID: cur.ID, Engine: in.Engine, EngineRef: in.EngineRef, Phase: PhaseRunning,
-				}, now)
+				}, AttachPathFulfilStart, now)
 			}
 		case ExecutionRequestResume:
 			item, exec, err = resumeTx(ctx, tx, cur, ResumeInput{
 				Mutation: in.Mutation, WorkItemID: cur.ID, ExpectedStateVersion: x.ExpectedStateVersion,
 				ResumedFromExecutionID: x.ResumedFromExecutionID, Engine: in.Engine, EngineRef: in.EngineRef,
-			}, now)
+			}, AttachPathFulfilResume, now)
 		default:
 			err = fmt.Errorf("workitems: execution request %s has unknown kind %q", x.ID, x.Kind)
 		}

@@ -32,8 +32,14 @@ type Mutation struct {
 	// issued to; provenance only (never authorization); "" when the credential
 	// is not an mctl-api OAuth access token. Not part of RequestHash.
 	ActorClientID string
-	Surface       string
-	RequestID     string
+	// ActorDirectService is true only when the mutating principal is the
+	// service principal acting directly (not relayed, not an agent). It is
+	// recorded on execution provenance as attached_direct_service, the sole
+	// basis of review-reviewer eligibility (mctl-api#917). Not part of
+	// RequestHash.
+	ActorDirectService bool
+	Surface            string
+	RequestID          string
 	// IdempotencyKey deduplicates the request: per tenant for Create, per
 	// work item for everything else. RequestHash is the digest of the
 	// request the key was first used with. The same key with a different
