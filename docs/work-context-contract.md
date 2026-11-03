@@ -100,7 +100,7 @@ may live in different databases.
   `execution_attached` | `approval_requested` | `approval_decided` |
   `surface_linked` | `snapshot_sealed` | `execution_requested` |
   `execution_request_claimed` | `execution_request_fulfilled` |
-  `execution_request_rejected`), `from_state`, `to_state`, `actor_principal`, `actor_client_id`, `surface`,
+  `execution_request_rejected`, `execution_orphan_closed`), `from_state`, `to_state`, `actor_principal`, `actor_client_id`, `surface`,
   `request_id`, `detail`, `created_at`. Unique per `(work_item_id, seq)`.
 - **`execution_provenance`** — one immutable row per `work_item_executions`
   row, written in the same transaction: `attempt_id`, `lineage_root`,

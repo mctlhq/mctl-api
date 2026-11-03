@@ -18,7 +18,7 @@ const (
 	// orphanMinAge keeps a just-started execution out of reach: its run may
 	// not be visible to Temporal yet.
 	orphanMinAge = 5 * time.Minute
-	// orphanBatch bounds Temporal describe calls per sweep.
+	// orphanBatch is the page size of the keyset-paged candidate query; a sweep walks all pages within its deadline.
 	orphanBatch = 20
 )
 

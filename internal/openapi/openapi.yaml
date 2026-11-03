@@ -1274,7 +1274,7 @@ components:
         work_item_id: {type: string}
         seq: {type: integer, format: int64}
         kind: {type: string, enum: [created, state_changed, resumed, intent_appended, execution_attached, surface_linked, snapshot_sealed,
-                                     execution_requested, execution_request_claimed, execution_request_fulfilled, execution_request_rejected]}
+                                     execution_requested, execution_request_claimed, execution_request_fulfilled, execution_request_rejected, execution_orphan_closed]}
         from_state: {type: string}
         to_state: {type: string}
         actor_principal: {type: string}
