@@ -303,6 +303,10 @@ type Options struct {
 	// ReviewStore is the durable review-receipt store (mctl-api#897).
 	// Optional — nil makes every /api/v1/review-* route answer 503.
 	ReviewStore *reviewstore.Store
+	// ReviewWorkerIngestEnabled opens POST /api/v1/review-receipts to
+	// review-scoped agent run tokens (mctl-api#917). Default false: the route
+	// answers 501 and reads no body.
+	ReviewWorkerIngestEnabled bool
 	// HumanInputLedger is the idempotency/delivery record for human-input
 	// responses (mctl-api#261). Optional — nil makes the response endpoint
 	// 503: without it a response could be neither deduplicated nor

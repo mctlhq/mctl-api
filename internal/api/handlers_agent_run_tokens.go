@@ -58,6 +58,7 @@ const (
 	artCodeTenantForbidden       = "agent_scope_tenant_forbidden"
 	artCodeTenantNotFound        = "tenant_not_found"
 	artCodeTenantLookupFailed    = "tenant_lookup_failed"
+	artCodeExecutionRequired     = "agent_scope_execution_required"
 	artCodePermissionsUnexpected = "agent_scope_permissions_unexpected"
 	artCodeExecutionForeign      = "execution_not_in_tenant"
 )
@@ -343,6 +344,12 @@ func (h *Handlers) issueAgentRunToken(w http.ResponseWriter, r *http.Request, is
 			h.auditAgentRunTokenRefusalBy(r, iss, body.Agent, artCodeScopeNotForAgent)
 			writeErrorCode(w, http.StatusBadRequest, artCodeScopeNotForAgent,
 				"scope "+strconv.Quote(body.Scope)+" is not defined for agent "+strconv.Quote(body.Agent), nil)
+			return
+		}
+		if scope.Name == auth.AgentScopeReview && body.WithoutExecution {
+			h.auditAgentRunTokenRefusalBy(r, iss, body.Agent, artCodeExecutionRequired)
+			writeErrorCode(w, http.StatusBadRequest, artCodeExecutionRequired,
+				"scope "+strconv.Quote(body.Scope)+" must be bound to an execution", nil)
 			return
 		}
 	}

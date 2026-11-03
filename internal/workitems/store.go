@@ -165,6 +165,8 @@ CREATE TABLE IF NOT EXISTS execution_provenance (
     attached_by_principal TEXT NOT NULL DEFAULT '',
     recorded_at           TIMESTAMPTZ NOT NULL
 );
+ALTER TABLE execution_provenance ADD COLUMN IF NOT EXISTS attach_path TEXT NOT NULL DEFAULT '';
+ALTER TABLE execution_provenance ADD COLUMN IF NOT EXISTS attached_direct_service BOOLEAN NOT NULL DEFAULT false;
 CREATE INDEX IF NOT EXISTS execution_provenance_lineage ON execution_provenance (lineage_root, attempt_id);
 CREATE OR REPLACE FUNCTION execution_provenance_immutable() RETURNS trigger AS $$
 BEGIN
@@ -571,7 +573,7 @@ func (s *Store) Resume(ctx context.Context, in ResumeInput) (*WorkItem, *Executi
 			return err
 		}
 		now := s.now()
-		if item, exec, err = resumeTx(ctx, tx, cur, in, now); err != nil {
+		if item, exec, err = resumeTx(ctx, tx, cur, in, AttachPathResume, now); err != nil {
 			return err
 		}
 		if err := remember(ctx, tx, cur.ID, opResume, exec.ID, in.Mutation, now); err != nil {
@@ -589,7 +591,7 @@ func (s *Store) Resume(ctx context.Context, in ResumeInput) (*WorkItem, *Executi
 // resumeTx is Resume's decision and write, for a caller that holds the
 // item's lock and has already handled idempotency: Resume itself, and the
 // fulfilment of a resume execution request.
-func resumeTx(ctx context.Context, tx pgx.Tx, cur *WorkItem, in ResumeInput, now time.Time) (*WorkItem, *Execution, error) {
+func resumeTx(ctx context.Context, tx pgx.Tx, cur *WorkItem, in ResumeInput, attachPath string, now time.Time) (*WorkItem, *Execution, error) {
 	if cur.StateVersion != in.ExpectedStateVersion {
 		return nil, nil, &ConflictError{Err: ErrVersionConflict, Current: cur}
 	}
@@ -624,7 +626,7 @@ func resumeTx(ctx context.Context, tx pgx.Tx, cur *WorkItem, in ResumeInput, now
 				in.Engine, in.EngineRef, execs[i].ID, cur.ID)
 		}
 	}
-	exec, err := insertExecution(ctx, tx, in.Mutation, cur.ID, in.Engine, in.EngineRef, PhasePending, from, len(execs)+1, now)
+	exec, err := insertExecution(ctx, tx, in.Mutation, cur.ID, in.Engine, in.EngineRef, PhasePending, from, len(execs)+1, attachPath, now)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -662,7 +664,7 @@ func containsExecution(execs []Execution, id string) bool {
 	return false
 }
 
-func insertExecution(ctx context.Context, tx pgx.Tx, m Mutation, itemID, engine, ref, phase, from string, attempt int, now time.Time) (*Execution, error) {
+func insertExecution(ctx context.Context, tx pgx.Tx, m Mutation, itemID, engine, ref, phase, from string, attempt int, attachPath string, now time.Time) (*Execution, error) {
 	var ended *time.Time
 	if IsTerminalPhase(phase) {
 		ended = &now
@@ -674,7 +676,7 @@ func insertExecution(ctx context.Context, tx pgx.Tx, m Mutation, itemID, engine,
 		return nil, fmt.Errorf("workitems: insert execution: %w", err)
 	}
 	// Same transaction: a failure here rolls the execution back too.
-	if err := insertProvenance(ctx, tx, e, from, m, now); err != nil {
+	if err := insertProvenance(ctx, tx, e, from, m, attachPath, now); err != nil {
 		return nil, err
 	}
 	return e, nil
@@ -859,7 +861,7 @@ func (s *Store) AttachExecution(ctx context.Context, in ExecutionInput) (*Execut
 			}
 			out = existing
 		case errors.Is(err, pgx.ErrNoRows):
-			if out, err = attachNewTx(ctx, tx, cur, in, now); err != nil {
+			if out, err = attachNewTx(ctx, tx, cur, in, AttachPathAttach, now); err != nil {
 				return err
 			}
 			created = true
@@ -877,7 +879,7 @@ func (s *Store) AttachExecution(ctx context.Context, in ExecutionInput) (*Execut
 // attachNewTx attaches an engine run not yet correlated with cur, for a
 // caller that holds the item's lock: AttachExecution, and the fulfilment of
 // a start execution request.
-func attachNewTx(ctx context.Context, tx pgx.Tx, cur *WorkItem, in ExecutionInput, now time.Time) (*Execution, error) {
+func attachNewTx(ctx context.Context, tx pgx.Tx, cur *WorkItem, in ExecutionInput, attachPath string, now time.Time) (*Execution, error) {
 	if IsTerminal(cur.State) {
 		return nil, &ConflictError{Err: fmt.Errorf("%w: attach to %s", ErrInvalidTransition, cur.State), Current: cur}
 	}
@@ -892,7 +894,7 @@ func attachNewTx(ctx context.Context, tx pgx.Tx, cur *WorkItem, in ExecutionInpu
 			}
 		}
 	}
-	out, err := insertExecution(ctx, tx, in.Mutation, cur.ID, in.Engine, in.EngineRef, in.Phase, "", len(execs)+1, now)
+	out, err := insertExecution(ctx, tx, in.Mutation, cur.ID, in.Engine, in.EngineRef, in.Phase, "", len(execs)+1, attachPath, now)
 	if err != nil {
 		return nil, err
 	}
