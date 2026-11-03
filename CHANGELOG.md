@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.153.0](https://github.com/mctlhq/mctl-api/compare/4.152.0...4.153.0) (2026-11-03)
+
+
+### Features
+
+* **agents:** issue-917-feat-review-enable-autonomous-worker-rec ([de308b4](https://github.com/mctlhq/mctl-api/commit/de308b43023bd74906d2924ef919c613ca24eec1))
+
 ## [4.152.0](https://github.com/mctlhq/mctl-api/compare/4.151.0...4.152.0) (2026-11-02)
 
 
