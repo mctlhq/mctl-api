@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -131,11 +132,24 @@ func ownerActionAuditParams(o *workitems.OwnerAction, replayed bool) map[string]
 	}
 }
 
-// ownerCancelSignalledOutcome is what a delivered abandon signal means. Only
-// a grant that is pending or absent proves implement has not started; any
-// other state may already have produced effects.
-func ownerCancelSignalledOutcome(grant *workitems.ActionApprovalRequest) string {
-	if grant == nil || grant.State == workitems.ApprovalPending {
+// ownerCancelSignalledOutcome is what a delivered abandon signal means.
+// cancellation_pending claims nothing has been produced yet, so it is
+// answered only where the run is shown not to have reached implement:
+//
+//   - its newest grant is pending: implement waits on that approval;
+//   - it has no grant, its one open we_ execution was read (so the lookup
+//     really saw this run's gate), and the legacy approver payload, which
+//     approves a run with no grant at all, is disabled.
+//
+// Everything else is cancellation_effects_unknown: a decided grant; no open
+// execution to read a grant from (never attached, or already closed); or no
+// grant while the legacy payload may have approved the run without one.
+// Not having seen a grant is never taken as proof that nothing was approved.
+func ownerCancelSignalledOutcome(exec *workitems.Execution, grant *workitems.ActionApprovalRequest, legacyApproverDisabled bool) string {
+	switch {
+	case grant != nil && grant.State == workitems.ApprovalPending:
+		return ownerOutcomeCancellationPending
+	case grant == nil && exec != nil && legacyApproverDisabled:
 		return ownerOutcomeCancellationPending
 	}
 	return ownerOutcomeEffectsUnknown
@@ -380,7 +394,7 @@ func (h *Handlers) RequestDevLoopOwnerAction(w http.ResponseWriter, r *http.Requ
 			refuse(status, code, res.Fail.Client, nil)
 			return
 		case res.Outcome == devLoopOutcomeSignalled:
-			outcome, toState = ownerCancelSignalledOutcome(grant), workitems.OwnerActionSignalled
+			outcome, toState = ownerCancelSignalledOutcome(exec, grant, h.opts.LegacyApproverDisabled), workitems.OwnerActionSignalled
 		default:
 			outcome, toState = h.ownerCancelFinishedOutcome(ctx, workflowID, res.Exec.RunID, res.Exec.Status), workitems.OwnerActionFinished
 		}
@@ -422,7 +436,10 @@ func (h *Handlers) finishOwnerAction(w http.ResponseWriter, r *http.Request, use
 	writeJSON(w, http.StatusOK, ownerActionView(row, replayed))
 }
 
-// ListDevLoopOwnerActions handles GET /api/v1/agents/dev-loop/{workflow_id}/owner-actions.
+// ListDevLoopOwnerActions handles
+// GET /api/v1/agents/dev-loop/{workflow_id}/owner-actions?limit=, newest
+// first, at most workitems.MaxOwnerActionList (default
+// workitems.DefaultOwnerActionList). It reads the store only.
 func (h *Handlers) ListDevLoopOwnerActions(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireTemporalAdmin(w, r); !ok {
 		return
@@ -436,7 +453,17 @@ func (h *Handlers) ListDevLoopOwnerActions(w http.ResponseWriter, r *http.Reques
 		writeErrorCode(w, http.StatusServiceUnavailable, wiCodeUnavailable, "the work-item store is not configured", nil)
 		return
 	}
-	rows, err := h.opts.WorkItems.ListOwnerActions(r.Context(), workflowID)
+	limit := 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 || n > workitems.MaxOwnerActionList {
+			writeErrorCode(w, http.StatusBadRequest, wiCodeInvalid,
+				fmt.Sprintf("limit must be an integer from 1 to %d", workitems.MaxOwnerActionList), nil)
+			return
+		}
+		limit = n
+	}
+	rows, err := h.opts.WorkItems.ListOwnerActions(r.Context(), workflowID, limit)
 	if err != nil {
 		slog.Error("dev-loop owner actions: list failed", "workflow_id", workflowID, "error", err)
 		writeErrorCode(w, http.StatusServiceUnavailable, wiCodeUnavailable, "could not read the owner actions", nil)
@@ -451,7 +478,17 @@ func (h *Handlers) ListDevLoopOwnerActions(w http.ResponseWriter, r *http.Reques
 
 // GetDevLoopOwnerAction handles GET /api/v1/agents/dev-loop/{workflow_id}/owner-actions/{id}.
 // For a cancel whose signal was delivered it re-observes the run and records
-// how it ended. It never signals.
+// what it now shows. It never signals, starts or restarts anything, but it
+// can write: the re-observed outcome is persisted with a compare-and-set on
+// the row's state, so concurrent or repeated reads converge on one value.
+// The route sits outside the write group's rate limit (beside
+// GetDevLoopWorkflow); it makes at most a describe, a DevLoopEnded read and
+// one grant read per call.
+//
+// The answer carries "observed" for such a cancel: true when the run (and,
+// while it still runs, its grant) was read on this call, false when it
+// could not be, in which case the stored outcome is reported unchanged and
+// the caller must not read it as current.
 func (h *Handlers) GetDevLoopOwnerAction(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireTemporalAdmin(w, r); !ok {
 		return
@@ -479,24 +516,59 @@ func (h *Handlers) GetDevLoopOwnerAction(w http.ResponseWriter, r *http.Request)
 		writeErrorCode(w, http.StatusServiceUnavailable, wiCodeUnavailable, "could not read the owner action", nil)
 		return
 	}
-	if row.Action == workitems.OwnerActionRequestCancel && row.State == workitems.OwnerActionSignalled {
-		// A failed describe leaves the stored outcome, which never claims
-		// the run stopped.
-		if exec, fail := h.describeDevLoopRun(ctx, workflowID, "workflow not found"); fail == nil &&
-			(exec.RunID != row.RunID || exec.Status != devLoopStatusRunning) {
-			status := ""
-			if exec.RunID == row.RunID {
-				status = exec.Status
-			}
-			outcome := h.ownerCancelFinishedOutcome(ctx, workflowID, row.RunID, status)
-			marked, err := h.opts.WorkItems.MarkOwnerActionOutcome(ctx, row.ID, workitems.OwnerActionSignalled, workitems.OwnerActionFinished, outcome)
-			if errors.Is(err, workitems.ErrOwnerActionStateChanged) {
-				marked, err = h.opts.WorkItems.GetOwnerAction(ctx, row.ID)
-			}
-			if err == nil {
-				row = marked
-			}
-		}
+	if row.Action != workitems.OwnerActionRequestCancel || row.State != workitems.OwnerActionSignalled {
+		writeJSON(w, http.StatusOK, ownerActionView(row, false))
+		return
 	}
-	writeJSON(w, http.StatusOK, ownerActionView(row, false))
+	observed, toState, outcome := h.reobserveOwnerCancel(ctx, workflowID, row)
+	if observed && (toState != row.State || outcome != row.Outcome) {
+		marked, err := h.opts.WorkItems.MarkOwnerActionOutcome(ctx, row.ID, workitems.OwnerActionSignalled, toState, outcome)
+		if errors.Is(err, workitems.ErrOwnerActionStateChanged) {
+			// A concurrent read or replay recorded first; report that.
+			marked, err = h.opts.WorkItems.GetOwnerAction(ctx, row.ID)
+		}
+		if err != nil {
+			// What was observed could not be recorded: answering the stale
+			// row as current would misreport it.
+			slog.Error("dev-loop owner action: record re-observed outcome failed", "owner_action_id", row.ID, "error", err)
+			writeErrorCode(w, http.StatusServiceUnavailable, wiCodeUnavailable, "could not record the re-observed cancellation outcome", nil)
+			return
+		}
+		row = marked
+	}
+	v := ownerActionView(row, false)
+	v["observed"] = observed
+	writeJSON(w, http.StatusOK, v)
+}
+
+// reobserveOwnerCancel reads a signalled cancel's run again. observed is
+// false when the run or, while it still runs, its grant could not be read;
+// then nothing is to be recorded. Otherwise toState/outcome is what the run
+// shows now: a finished run maps like the POST path; a running one stays
+// signalled, and moves from cancellation_pending to
+// cancellation_effects_unknown when its gate no longer proves it is before
+// implement (for example its grant was approved after the signal). An
+// effects_unknown outcome never goes back to pending.
+func (h *Handlers) reobserveOwnerCancel(ctx context.Context, workflowID string, row *workitems.OwnerAction) (observed bool, toState, outcome string) {
+	exec, fail := h.describeDevLoopRun(ctx, workflowID, "workflow not found")
+	if fail != nil {
+		slog.Warn("owner cancel: could not re-observe the run", "owner_action_id", row.ID, "workflow_id", workflowID, "error", fail.Audit)
+		return false, row.State, row.Outcome
+	}
+	if exec.RunID != row.RunID || exec.Status != devLoopStatusRunning {
+		status := ""
+		if exec.RunID == row.RunID {
+			status = exec.Status
+		}
+		return true, workitems.OwnerActionFinished, h.ownerCancelFinishedOutcome(ctx, workflowID, row.RunID, status)
+	}
+	if row.Outcome != ownerOutcomeCancellationPending {
+		return true, row.State, row.Outcome
+	}
+	we, grant, err := h.resolveDevLoopGrant(ctx, workflowID)
+	if err != nil {
+		slog.Warn("owner cancel: could not re-read the grant", "owner_action_id", row.ID, "workflow_id", workflowID, "error", err)
+		return false, row.State, row.Outcome
+	}
+	return true, row.State, ownerCancelSignalledOutcome(we, grant, h.opts.LegacyApproverDisabled)
 }

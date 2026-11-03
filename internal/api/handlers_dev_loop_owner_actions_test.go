@@ -78,10 +78,25 @@ func TestRequestDevLoopOwnerAction_RefusesMalformedBodies(t *testing.T) {
 	}
 }
 
-// Only a grant that is pending or absent proves implement has not started.
+// cancellation_pending needs proof that implement has not started: a
+// pending grant, or no grant where the run could not have been approved
+// without one (an open we_ was read and the legacy approver payload is
+// disabled). Not seeing a grant is not that proof.
 func TestOwnerCancelSignalledOutcome(t *testing.T) {
-	if got := ownerCancelSignalledOutcome(nil); got != ownerOutcomeCancellationPending {
-		t.Fatalf("no grant: %s", got)
+	exec := &workitems.Execution{ID: "we_1"}
+	for name, tc := range map[string]struct {
+		exec           *workitems.Execution
+		legacyDisabled bool
+		want           string
+	}{
+		"no grant, open execution, legacy disabled":    {exec, true, ownerOutcomeCancellationPending},
+		"no grant, open execution, legacy enabled":     {exec, false, ownerOutcomeEffectsUnknown},
+		"no grant, no open execution, legacy disabled": {nil, true, ownerOutcomeEffectsUnknown},
+		"no grant, no open execution, legacy enabled":  {nil, false, ownerOutcomeEffectsUnknown},
+	} {
+		if got := ownerCancelSignalledOutcome(tc.exec, nil, tc.legacyDisabled); got != tc.want {
+			t.Errorf("%s: got %s, want %s", name, got, tc.want)
+		}
 	}
 	for state, want := range map[string]string{
 		workitems.ApprovalPending:  ownerOutcomeCancellationPending,
@@ -89,9 +104,13 @@ func TestOwnerCancelSignalledOutcome(t *testing.T) {
 		workitems.ApprovalInFlight: ownerOutcomeEffectsUnknown,
 		workitems.ApprovalConsumed: ownerOutcomeEffectsUnknown,
 		workitems.ApprovalExecuted: ownerOutcomeEffectsUnknown,
+		workitems.ApprovalDenied:   ownerOutcomeEffectsUnknown,
+		workitems.ApprovalExpired:  ownerOutcomeEffectsUnknown,
 	} {
-		if got := ownerCancelSignalledOutcome(&workitems.ActionApprovalRequest{State: state}); got != want {
-			t.Errorf("%s: got %s, want %s", state, got, want)
+		for _, legacyDisabled := range []bool{false, true} {
+			if got := ownerCancelSignalledOutcome(exec, &workitems.ActionApprovalRequest{State: state}, legacyDisabled); got != want {
+				t.Errorf("%s (legacy disabled %v): got %s, want %s", state, legacyDisabled, got, want)
+			}
 		}
 	}
 }

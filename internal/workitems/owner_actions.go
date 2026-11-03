@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Owner actions on a DevLoop (mctl-api#900): request changes, defer and
@@ -45,6 +46,16 @@ var (
 	ErrOwnerActionNotFound = errors.New("owner action not found")
 	// ErrOwnerActionStateChanged: the compare-and-set on state did not match.
 	ErrOwnerActionStateChanged = errors.New("owner action state changed")
+	// errOwnerActionRaced: the insert hit a unique constraint that a
+	// concurrent transaction committed after this one's lookups.
+	errOwnerActionRaced = errors.New("owner action insert raced a concurrent one")
+)
+
+// MaxOwnerActionList bounds one listing; DefaultOwnerActionList is used when
+// the caller names no limit.
+const (
+	MaxOwnerActionList     = 500
+	DefaultOwnerActionList = 100
 )
 
 const ownerActionSchema = `
@@ -155,10 +166,28 @@ func scanOwnerAction(row pgx.Row) (*OwnerAction, error) {
 // same content, the recorded cancel of the same run, or the action of the
 // same kind already open on the same grant. The same key with different
 // content is ErrOwnerActionIdempotencyConflict.
+//
+// The advisory lock is per workflow, but the idempotency key is unique per
+// principal across all workflows: two concurrent requests reusing one key on
+// different workflows both pass the key lookup, and the later INSERT fails
+// with a unique violation once the earlier one commits. That attempt is run
+// again, so its key lookup sees the committed row and answers replay or
+// ErrOwnerActionIdempotencyConflict rather than a store failure.
 func (s *Store) CreateOwnerAction(ctx context.Context, in OwnerActionInput) (*OwnerAction, bool, error) {
 	if err := in.validate(); err != nil {
 		return nil, false, err
 	}
+	out, replayed, err := s.createOwnerActionOnce(ctx, in)
+	if errors.Is(err, errOwnerActionRaced) {
+		out, replayed, err = s.createOwnerActionOnce(ctx, in)
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return out, replayed, nil
+}
+
+func (s *Store) createOwnerActionOnce(ctx context.Context, in OwnerActionInput) (*OwnerAction, bool, error) {
 	var out *OwnerAction
 	replayed := false
 	err := s.withTx(ctx, "owner-action:"+in.WorkflowID, func(tx pgx.Tx) error {
@@ -202,6 +231,10 @@ func (s *Store) CreateOwnerAction(ctx context.Context, in OwnerActionInput) (*Ow
 			OwnerActionIDPrefix+strings.ReplaceAll(uuid.NewString(), "-", ""), in.WorkflowID, in.RunID, in.ExecutionID,
 			in.ApprovalRef, in.Action, in.ReasonCode, in.RequestedBy, in.PrincipalID, in.IdempotencyKey,
 			in.ContentDigest, in.State, in.Outcome, now, OwnerActionSchemaVersion))
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return fmt.Errorf("%w (%s)", errOwnerActionRaced, pgErr.ConstraintName)
+		}
 		if err != nil {
 			return fmt.Errorf("workitems: insert owner action: %w", err)
 		}
@@ -242,10 +275,18 @@ func (s *Store) GetOwnerAction(ctx context.Context, id string) (*OwnerAction, er
 	return o, nil
 }
 
-// ListOwnerActions returns a workflow's owner actions, oldest first.
-func (s *Store) ListOwnerActions(ctx context.Context, workflowID string) ([]OwnerAction, error) {
+// ListOwnerActions returns up to limit of a workflow's owner actions, newest
+// first. A limit outside 1..MaxOwnerActionList is DefaultOwnerActionList, or
+// MaxOwnerActionList when it is larger.
+func (s *Store) ListOwnerActions(ctx context.Context, workflowID string, limit int) ([]OwnerAction, error) {
+	if limit <= 0 {
+		limit = DefaultOwnerActionList
+	}
+	if limit > MaxOwnerActionList {
+		limit = MaxOwnerActionList
+	}
 	rows, err := s.pool.Query(ctx, `SELECT `+ownerActionColumns+
-		` FROM dev_loop_owner_actions WHERE workflow_id=$1 ORDER BY created_at, id`, workflowID)
+		` FROM dev_loop_owner_actions WHERE workflow_id=$1 ORDER BY created_at DESC, id DESC LIMIT $2`, workflowID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("workitems: list owner actions: %w", err)
 	}

@@ -192,17 +192,36 @@ Cancel outcomes (`request_cancel`):
 
 | Situation | State | Outcome |
 |---|---|---|
-| signal delivered, grant pending or absent | `signalled` | `cancellation_pending` |
-| signal delivered, grant approved, in flight, consumed or executed | `signalled` | `cancellation_effects_unknown` |
+| signal delivered, newest grant pending | `signalled` | `cancellation_pending` |
+| signal delivered, no grant, open `we_` execution read, legacy approver payload disabled | `signalled` | `cancellation_pending` |
+| signal delivered, no grant, and the legacy approver payload enabled or no open `we_` execution | `signalled` | `cancellation_effects_unknown` |
+| signal delivered, grant approved, in flight, consumed, executed, denied or expired | `signalled` | `cancellation_effects_unknown` |
 | already finished, abandoned, did not reach implement | `finished` | `cancelled` |
 | already finished, abandoned, reached implement or result unreadable | `finished` | `cancellation_effects_unknown` |
 | already finished without an abandon result | `finished` | `already_finished` |
 | signal transport failure | `requested` | none (502/503; replay with the same key retries the stored run) |
 | run ended and a new run took the id | `requested` | none (409 `cancellation_run_changed`; the new run is not signalled) |
 
+`cancellation_pending` claims that nothing has been produced yet, so it needs
+proof that the run is before implement. A pending grant is that proof. A
+missing grant is proof only when the run could not have been approved without
+one: its open `we_` execution was read (so the lookup saw this run's gate) and
+`MCTL_AGENTS_APPROVE_LEGACY_APPROVER=false`, since the legacy payload approves
+a run with no grant at all. Otherwise a missing grant means "not observed",
+never "not approved", and the outcome is `cancellation_effects_unknown`. This
+narrows the proposal's "grant pending or absent" rule after review of
+mctl-api#930.
+
 `GET .../owner-actions/{id}` re-observes a `signalled` cancel and records
-`cancelled` or `cancellation_effects_unknown` once the run has finished; it
-never signals. Cancel stops future work. It is not rollback: branches, PRs
+`cancelled` or `cancellation_effects_unknown` once the run has finished, or
+`cancellation_effects_unknown` while it still runs once its gate no longer
+proves it is before implement (for example the grant was approved after the
+signal); an effects-unknown outcome never returns to pending. It never
+signals, but it does write: the outcome is stored with a compare-and-set on
+the record's state, so repeated reads are idempotent, and the route is served
+outside the write rate limit. The answer carries `observed: false` when the
+run or grant could not be read; the stored outcome is then returned unchanged
+and is not current. Cancel stops future work. It is not rollback: branches, PRs
 and merges already produced stay as they are.
 
 Idempotency: the same principal and key with the same content returns the
