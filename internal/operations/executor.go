@@ -137,6 +137,12 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 		slog.Warn("refusing to submit service operation", "operation", op.Name, "user", userID, "error", err)
 		return nil, err
 	}
+	// Backstop for every caller of Submit: a run that must be correlated to a
+	// we_ execution is never submitted without one (mctl-agents#717 S3).
+	if err := checkExecutionRequired(op, params); err != nil {
+		slog.Warn("refusing to submit operation without an execution", "operation", op.Name, "user", userID)
+		return nil, err
+	}
 	// Secret values never enter the Workflow spec (secret_handoff.go).
 	submitParams, secretValues, err := splitSecretParams(op, params)
 	if err != nil {
@@ -145,7 +151,10 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 	}
 	namespace := WorkflowNamespace(op.WorkflowTemplate, team)
 	requestID := uuid.New().String()[:8]
-	workflowName := fmt.Sprintf("%s-%s", op.WorkflowTemplate, requestID)
+	if preset, ok := WorkflowRequestIDFrom(ctx); ok {
+		requestID = preset
+	}
+	workflowName := WorkflowNameFor(op, requestID)
 
 	// Log params, redacting secrets.
 	logParams := make(map[string]string, len(params))

@@ -2968,6 +2968,22 @@ paths:
         | `preview-deploy` | Deploy ephemeral preview environment | low |
         | `preview-delete` | Remove preview environment | low |
 
+        **Issue investigator runs carry their execution (mctlhq/mctl-agents#717).**
+        `mctl-agents-investigate` is never submitted without an `execution_id`.
+        When the request names none, the server first opens (or joins, per
+        `external_key` = the canonical issue URL) the issue's work item in the
+        `ISSUE_WORK_ITEM_TENANT` tenant (default `mctl`), or uses the
+        request's `work_item_id`, and attaches a `Pending` `argo` execution
+        whose `engine_ref` is the workflow's own name; both ids are passed to
+        the workflow and returned as `work_item_id` and `execution_id` in the
+        202 body. If that cannot be done the request fails and nothing is
+        submitted: 404 `work_item_not_found`, 409 `execution_active` or
+        `invalid_transition` (the item already has a running execution, or
+        is terminal), 503 `work_items_unavailable` (store not configured). A
+        request that already names `execution_id` (the DevLoop) is submitted
+        as given and creates nothing. A workflow that then fails to start has
+        its execution ended in phase `Error`.
+
         **Grant-authorized approval (mctl-api#571).** `mctl-agents-approve`
         is the one operation an agent run may call with
         `X-MCTL-On-Behalf-Of: aar_…`. The action approval must be bound to

@@ -897,10 +897,10 @@ var builtinOperations = []Operation{
 			// Declared so StripUndeclared stops dropping them on the way to Argo;
 			// the CWFT half is mctlhq/mctl-gitops#1279.
 			{Name: "work_item_id", Type: "string", Required: false,
-				Description: "Optional. Canonical WorkItem id to resume from (docs/work-context-contract.md, e.g. wi_<uuid>). Omit for a cold issue-driven run.",
+				Description: "Optional. Canonical WorkItem id to resume from (docs/work-context-contract.md, e.g. wi_<uuid>). Omit and mctl-api opens or joins the issue's work item itself.",
 				Pattern:     `^[A-Za-z0-9_-]{1,64}$`},
 			{Name: "execution_id", Type: "string", Required: false,
-				Description: "Optional. WorkItemExecution id this run is attributed to (e.g. we_<uuid>). Omit for a cold issue-driven run.",
+				Description: "Optional. WorkItemExecution id this run is attributed to (e.g. we_<uuid>). Omit and mctl-api creates the execution before submitting; a run is never submitted without one (mctl-agents#717).",
 				Pattern:     `^[A-Za-z0-9_-]{1,64}$`},
 			// Release pin (mctlhq/mctl-api#372): the DevLoop resolves the released
 			// issue-investigator and sends it; cwft-mctl-agents-investigate declares

@@ -3129,6 +3129,8 @@ Given a GitHub issue URL under the mctlhq org, the investigator reads the issue,
 
 The proposal stops at status=proposed and awaits human approval — review the spec, then approve it (the dev-loop approve signal, or the mctl-agents-approve operation, flips .status.yaml to 'accepted') before the Tier 2 implementer (mctl_trigger_implementer) picks it up. No PR is opened by this step.
 
+The server first records the run as an execution of the issue's work item (opening the item if the issue has none) and passes its ids to the workflow; if that cannot be done nothing is submitted. A second trigger while the issue's previous run is still open is refused (409 execution_active).
+
 Cost: ~$3 (subscription quota).
 Duration: ~5-10 minutes.
 Result: a new proposal directory committed to mctl-gitops main, plus a comment on the issue.

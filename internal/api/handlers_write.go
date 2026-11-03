@@ -550,8 +550,27 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A run that must carry a we_ execution gets it created here, first; a
+	// failure to create it refuses the request (handlers_submit_execution.go).
+	submitCtx, executionEnded, prepared := h.prepareSubmitExecution(w, r, user, op, input)
+	if !prepared {
+		h.logAudit(r, audit.Entry{
+			UserID:     user.ID,
+			Operation:  opName,
+			Parameters: auditParams,
+			Status:     "failed",
+			RiskLevel:  string(op.RiskLevel),
+			Message:    "could not create the run's execution; nothing was submitted",
+		})
+		return
+	}
+	if _, set := input["execution_id"]; set {
+		auditParams["execution_id"], auditParams["work_item_id"] = input["execution_id"], input["work_item_id"]
+	}
+
 	// Submit the Argo Workflow in the team's namespace (team-{name}).
-	result, err := h.opts.Executor.Submit(r.Context(), op, input, user.ID, tenantParam)
+	result, err := h.opts.Executor.Submit(submitCtx, op, input, user.ID, tenantParam)
+	executionEnded(result, err)
 	if err != nil {
 		h.logAudit(r, audit.Entry{
 			UserID:     user.ID,
@@ -588,6 +607,9 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	}
 	if tid := telemetry.TraceIDFrom(r.Context()); tid != "" {
 		resp["trace_id"] = tid
+	}
+	if operations.RequiresExecution(op.Name) {
+		resp["work_item_id"], resp["execution_id"] = input["work_item_id"], input["execution_id"]
 	}
 	writeJSON(w, http.StatusAccepted, resp)
 }

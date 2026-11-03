@@ -1075,9 +1075,11 @@ func main() {
 		}
 		b, bErr := k8s.NewAgentRunBinder(aud, envOr("AGENT_RUN_EXCHANGE_NAMESPACE", "argo-workflows"), sas,
 			map[string]k8s.AgentRunTemplate{
-				// The directive poller and manual triggers submit investigate
-				// without an execution; those runs get a token bound to no
-				// work item.
+				// mctl-api no longer submits investigate without an execution
+				// (mctl-agents#717 S3: the submitter creates it). The flag stays
+				// for runs already in flight and for a workflow submitted
+				// straight to Argo; those get a token bound to no work item.
+				// Drop it once mctl-agents stops accepting such runs.
 				"mctl-agents-investigate": {Agent: "issue-investigator", Scope: auth.AgentScopeInvestigate, AllowWithoutExecution: true},
 			})
 		if bErr != nil {
@@ -1241,6 +1243,7 @@ func main() {
 		TemporalClient:                 devLoopClient,
 		HumanInputLedger:               humanInputLedger,
 		WorkItems:                      workItemsStore,
+		IssueWorkItemTenant:            os.Getenv("ISSUE_WORK_ITEM_TENANT"),
 		AgentRunBinder:                 agentRunBinder,
 		SurfaceIdentities:              surfaceIDs,
 		TenantResolver:                 gitReader,
