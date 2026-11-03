@@ -1012,6 +1012,9 @@ func main() {
 	}
 
 	executor := operations.NewExecutor()
+	// validate has already refused an unparsable value.
+	submitCreatesExecution, _ := operations.ParseSubmitCreatesExecution(cfg.SubmitCreatesExecutionRaw)
+	executor.SetSubmitCreatesExecution(submitCreatesExecution)
 
 	// MCP server for SSE transport (embedded in this process).
 	// Tools make REST calls back to this server using the caller's token (forwarded via context).
@@ -1249,6 +1252,7 @@ func main() {
 		HumanInputLedger:               humanInputLedger,
 		WorkItems:                      workItemsStore,
 		IssueWorkItemTenant:            os.Getenv("ISSUE_WORK_ITEM_TENANT"),
+		SubmitCreatesExecution:         submitCreatesExecution,
 		AgentRunBinder:                 agentRunBinder,
 		SurfaceIdentities:              surfaceIDs,
 		TenantResolver:                 gitReader,
@@ -1597,6 +1601,9 @@ type config struct {
 	// whether the service principal may still relay a free-text approver on
 	// mctl-agents-approve. Empty means on; validated at startup.
 	LegacyApproverRaw string
+	// SubmitCreatesExecutionRaw is MCTL_SUBMIT_CREATES_EXECUTION (mctl-agents#717
+	// S3): on or off, empty is off; validated at startup.
+	SubmitCreatesExecutionRaw string
 	// ApprovalMaxDecisionAgeRaw is ACTION_APPROVAL_MAX_DECISION_AGE
 	// (mctl-api#700): a Go duration; empty is 24h.
 	ApprovalMaxDecisionAgeRaw string
@@ -1753,6 +1760,7 @@ func loadConfig() config {
 		AgentReceiptMaxAgeRaw:          os.Getenv("MCTL_AGENT_RECEIPT_MAX_AGE"),
 		WorkItemsConfigured:            workItemsStoreConfigured(),
 		LegacyApproverRaw:              os.Getenv("MCTL_AGENTS_APPROVE_LEGACY_APPROVER"),
+		SubmitCreatesExecutionRaw:      os.Getenv(operations.SubmitCreatesExecutionEnv),
 		ApprovalMaxDecisionAgeRaw:      os.Getenv("ACTION_APPROVAL_MAX_DECISION_AGE"),
 		ApprovalStrictPolicyRaw:        os.Getenv("ACTION_APPROVAL_REQUIRE_REGISTERED_POLICY"),
 		AdminPrincipalsRaw:             os.Getenv("ADMIN_PRINCIPALS"),
@@ -2004,6 +2012,9 @@ func (c config) validate() error {
 		return err
 	}
 	if _, err := parseLegacyApprover(c.LegacyApproverRaw); err != nil {
+		return err
+	}
+	if _, err := operations.ParseSubmitCreatesExecution(c.SubmitCreatesExecutionRaw); err != nil {
 		return err
 	}
 	if _, err := parseApprovalMaxDecisionAge(c.ApprovalMaxDecisionAgeRaw); err != nil {

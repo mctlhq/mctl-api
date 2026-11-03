@@ -10,17 +10,17 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 // Executor.Submit is the choke point every caller shares: it refuses an
 // investigate run without an execution_id before it touches the cluster.
 func TestSubmit_InvestigateWithoutExecutionIsRefused(t *testing.T) {
-	t.Setenv(SubmitCreatesExecutionEnv, "on")
 	op, ok := NewRegistry().Get(InvestigateOperation)
 	if !ok {
 		t.Fatal("investigate operation missing")
 	}
-	e := &Executor{}
+	e := &Executor{submitCreatesExecution: true}
 	for _, params := range []map[string]string{
 		{"issue_url": "https://github.com/mctlhq/mctl-api/issues/1"},
 		{"issue_url": "https://github.com/mctlhq/mctl-api/issues/1", "execution_id": "  "},
@@ -54,10 +54,9 @@ func TestWorkflowRequestIDFrom_AcceptsOnlyGeneratedShape(t *testing.T) {
 // The workflow is named after the request id the caller recorded its
 // execution under, and the execution_id reaches the workflow's arguments.
 func TestSubmit_NamesWorkflowAfterPresetRequestID(t *testing.T) {
-	t.Setenv(SubmitCreatesExecutionEnv, "on")
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{workflowGVR: "WorkflowList"})
-	e := &Executor{dynamicClient: dyn}
+	e := &Executor{dynamicClient: dyn, submitCreatesExecution: true}
 	op, _ := NewRegistry().Get(InvestigateOperation)
 	ctx := WithWorkflowRequestID(context.Background(), "0a1b2c3d")
 	res, err := e.Submit(ctx, op, map[string]string{
@@ -88,25 +87,49 @@ func TestSubmit_NamesWorkflowAfterPresetRequestID(t *testing.T) {
 // Switch off (default): the backstop does not exist, id-less submits are as before.
 func TestSubmit_SwitchOffDoesNotRefuse(t *testing.T) {
 	op, _ := NewRegistry().Get(InvestigateOperation)
-	for _, v := range []string{"", "off"} {
-		t.Setenv(SubmitCreatesExecutionEnv, v)
-		_, err := (&Executor{}).Submit(context.Background(), op,
-			map[string]string{"issue_url": "https://github.com/mctlhq/mctl-api/issues/1"}, "u", "platform")
-		if err == nil || errors.Is(err, ErrExecutionRequired) {
-			t.Errorf("value %q: err = %v, want the missing-client failure, not a refusal", v, err)
+	_, err := (&Executor{}).Submit(context.Background(), op,
+		map[string]string{"issue_url": "https://github.com/mctlhq/mctl-api/issues/1"}, "u", "platform")
+	if err == nil || errors.Is(err, ErrExecutionRequired) {
+		t.Errorf("err = %v, want the missing-client failure, not a refusal", err)
+	}
+}
+
+func TestParseSubmitCreatesExecution(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want bool
+	}{{"", false}, {"off", false}, {"OFF", false}, {"on", true}, {" On ", true}} {
+		if got, err := ParseSubmitCreatesExecution(tc.in); err != nil || got != tc.want {
+			t.Errorf("%q = %v, %v; want %v", tc.in, got, err, tc.want)
+		}
+	}
+	for _, bad := range []string{"true", "1", "yes", "enabled"} {
+		if _, err := ParseSubmitCreatesExecution(bad); err == nil {
+			t.Errorf("%q accepted", bad)
 		}
 	}
 }
 
-func TestSubmitCreatesExecution_ParsesStrictly(t *testing.T) {
-	for v, want := range map[string]bool{"": false, "off": false, "OFF": false, "on": true, " On ": true} {
-		t.Setenv(SubmitCreatesExecutionEnv, v)
-		if got, err := SubmitCreatesExecution(); err != nil || got != want {
-			t.Errorf("%q = %v, %v; want %v", v, got, err, want)
-		}
+// Failures raised before the Workflow create call are marked so the caller
+// may end the execution; a create failure is not (it may have been accepted).
+func TestSubmit_NotCreatedMarking(t *testing.T) {
+	op, _ := NewRegistry().Get(InvestigateOperation)
+	params := map[string]string{"issue_url": "https://github.com/mctlhq/mctl-api/issues/1", "execution_id": "we_x"}
+	_, err := (&Executor{submitCreatesExecution: true}).Submit(context.Background(), op, params, "u", "platform")
+	if !IsNotCreated(err) {
+		t.Errorf("no client: %v not marked", err)
 	}
-	t.Setenv(SubmitCreatesExecutionEnv, "true")
-	if _, err := SubmitCreatesExecution(); err == nil {
-		t.Error("true accepted")
+	_, err = (&Executor{submitCreatesExecution: true}).Submit(context.Background(), op, map[string]string{"issue_url": params["issue_url"]}, "u", "platform")
+	if !IsNotCreated(err) || !errors.Is(err, ErrExecutionRequired) {
+		t.Errorf("backstop refusal %v not marked or not ErrExecutionRequired", err)
+	}
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{workflowGVR: "WorkflowList"})
+	dyn.PrependReactor("create", "workflows", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("timeout")
+	})
+	_, err = (&Executor{dynamicClient: dyn}).Submit(context.Background(), op, params, "u", "platform")
+	if err == nil || IsNotCreated(err) {
+		t.Errorf("create failure %v must not be marked", err)
 	}
 }

@@ -267,6 +267,10 @@ type Options struct {
 	// issue-investigator run is recorded on when the caller names none. ""
 	// means DefaultIssueWorkItemTenant.
 	IssueWorkItemTenant string
+	// SubmitCreatesExecution is MCTL_SUBMIT_CREATES_EXECUTION, parsed once at
+	// startup: an investigate submit without an execution_id gets one created
+	// first. Off by default; off is the previous behaviour exactly.
+	SubmitCreatesExecution bool
 	// AgentRunBinder verifies an agent pod's projected ServiceAccount token
 	// for POST /api/v1/agent-run-tokens/exchange (mctlhq/mctl-agents#737).
 	// Optional: nil makes that route 503.

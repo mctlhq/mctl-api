@@ -564,7 +564,7 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	executionRequired, _ := operations.ExecutionRequired(op.Name) // a bad switch already refused above
+	executionRequired := h.executionRequired(op)
 	if executionRequired {
 		auditParams["execution_id"], auditParams["work_item_id"] = input["execution_id"], input["work_item_id"]
 	}

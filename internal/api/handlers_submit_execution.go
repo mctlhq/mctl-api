@@ -42,6 +42,12 @@ func canonicalIssueURL(issueURL string) (key, title string, ok bool) {
 	return fmt.Sprintf("https://github.com/%s/issues/%d", repo, n), fmt.Sprintf("Investigate %s#%d", repo, n), true
 }
 
+// executionRequired reports whether a submit of op must carry an execution
+// right now: the operation needs one and the switch is on.
+func (h *Handlers) executionRequired(op operations.Operation) bool {
+	return h.opts.SubmitCreatesExecution && operations.RequiresExecution(op.Name)
+}
+
 // submitExecution is the execution a submitter created for a run it is about
 // to submit.
 type submitExecution struct {
@@ -74,14 +80,8 @@ type submitExecution struct {
 // workflow never started does not stay open.
 func (h *Handlers) prepareSubmitExecution(w http.ResponseWriter, r *http.Request, user *auth.User, op operations.Operation, tenant string, input map[string]string) (ctx context.Context, ended func(*operations.SubmitResult, error) string, ok bool) {
 	ctx = r.Context()
-	required, err := operations.ExecutionRequired(op.Name)
-	if err != nil {
-		slog.Error("submit-creates-execution switch is unreadable", "error", err)
-		writeErrorCode(w, http.StatusInternalServerError, "submit_switch_invalid", err.Error(), nil)
-		return nil, nil, false
-	}
 	// Switch off (the default) or another operation: exactly today's path.
-	if !required || strings.TrimSpace(input["execution_id"]) != "" {
+	if !h.executionRequired(op) || strings.TrimSpace(input["execution_id"]) != "" {
 		return ctx, func(*operations.SubmitResult, error) string { return "" }, true
 	}
 	if h.opts.WorkItems == nil {
@@ -111,12 +111,12 @@ func (h *Handlers) prepareSubmitExecution(w http.ResponseWriter, r *http.Request
 
 	itemID := strings.TrimSpace(input["work_item_id"])
 	if itemID == "" {
-		tenant := h.opts.IssueWorkItemTenant
-		if tenant == "" {
-			tenant = DefaultIssueWorkItemTenant
+		itemTenant := h.opts.IssueWorkItemTenant
+		if itemTenant == "" {
+			itemTenant = DefaultIssueWorkItemTenant
 		}
 		item, _, err := h.opts.WorkItems.Create(ctx, workitems.CreateInput{
-			Mutation: mut, Tenant: tenant, Visibility: workitems.VisibilityTenant,
+			Mutation: mut, Tenant: itemTenant, Visibility: workitems.VisibilityTenant,
 			OriginSurface: surface, Title: title, ExternalKey: key,
 		})
 		if err != nil {
@@ -164,16 +164,20 @@ func (se *submitExecution) ended(result *operations.SubmitResult, submitErr erro
 	// The request context may be what failed; the lookup and close must still be tried.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 10*time.Second)
 	defer cancel()
-	_, lookupErr := se.h.opts.Executor.GetWorkflowStatus(ctx, se.namespace, se.ref)
-	switch {
-	case lookupErr == nil:
-		slog.Error("submit failed but the workflow exists; its execution stays open",
-			"work_item_id", se.item, "execution_id", se.exec, "workflow", se.ref, "submit_error", submitErr)
-		return fmt.Sprintf("; workflow %s exists and its execution %s was left open", se.ref, se.exec)
-	case !apierrors.IsNotFound(lookupErr):
-		slog.Error("submit failed and whether the workflow exists could not be determined; its execution stays open",
-			"work_item_id", se.item, "execution_id", se.exec, "workflow", se.ref, "submit_error", submitErr, "error", lookupErr)
-		return fmt.Sprintf("; could not determine whether workflow %s was created, so its execution %s was left open", se.ref, se.exec)
+	// Raised before the create call: the Workflow certainly does not exist.
+	// Any other error is ambiguous, so look the Workflow up.
+	if !operations.IsNotCreated(submitErr) {
+		_, lookupErr := se.h.opts.Executor.GetWorkflowStatus(ctx, se.namespace, se.ref)
+		switch {
+		case lookupErr == nil:
+			slog.Error("submit failed but the workflow exists; its execution stays open",
+				"work_item_id", se.item, "execution_id", se.exec, "workflow", se.ref, "submit_error", submitErr)
+			return fmt.Sprintf("; workflow %s exists and its execution %s was left open", se.ref, se.exec)
+		case !apierrors.IsNotFound(lookupErr):
+			slog.Error("submit failed and whether the workflow exists could not be determined; its execution stays open",
+				"work_item_id", se.item, "execution_id", se.exec, "workflow", se.ref, "submit_error", submitErr, "error", lookupErr)
+			return fmt.Sprintf("; could not determine whether workflow %s was created, so its execution %s was left open", se.ref, se.exec)
+		}
 	}
 	_, _, err := se.h.opts.WorkItems.AttachExecution(ctx, workitems.ExecutionInput{
 		Mutation: se.mut, WorkItemID: se.item, Engine: workitems.EngineArgo, EngineRef: se.ref, Phase: workitems.PhaseError,

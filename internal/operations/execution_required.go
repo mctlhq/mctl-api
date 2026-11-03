@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"regexp"
 	"strings"
 
@@ -30,38 +29,30 @@ func RequiresExecution(opName string) bool {
 // SubmitCreatesExecutionEnv is the kill switch for the submitter-creates-the-
 // execution behaviour: "on" or "off", empty is off. It stays off until the
 // mctl-agents DevLoop continuation carries its own execution (mctl-agents#717
-// S3); turning it on is a separate gitops step.
+// S3); turning it on is a separate gitops step. It is parsed once at startup
+// (ParseSubmitCreatesExecution) and handed to the Executor and the API
+// options; nothing reads the environment per request.
 const SubmitCreatesExecutionEnv = "MCTL_SUBMIT_CREATES_EXECUTION"
 
-// SubmitCreatesExecution reads MCTL_SUBMIT_CREATES_EXECUTION. Any value other
-// than on, off or empty is an error: a mistyped switch must be refused
-// loudly, never read as a mode the operator did not ask for.
-func SubmitCreatesExecution() (bool, error) {
-	switch v := strings.ToLower(strings.TrimSpace(os.Getenv(SubmitCreatesExecutionEnv))); v {
+// ParseSubmitCreatesExecution reads MCTL_SUBMIT_CREATES_EXECUTION. Any value
+// other than on, off or empty is an error: a mistyped switch must stop the
+// boot, never be read as a mode the operator did not ask for.
+func ParseSubmitCreatesExecution(raw string) (bool, error) {
+	switch v := strings.ToLower(strings.TrimSpace(raw)); v {
 	case "", "off":
 		return false, nil
 	case "on":
 		return true, nil
 	default:
-		return false, fmt.Errorf("%s=%q: want on or off", SubmitCreatesExecutionEnv, v)
+		return false, fmt.Errorf("%s=%q: want on or off", SubmitCreatesExecutionEnv, raw)
 	}
 }
 
-// ExecutionRequired reports whether a submit of the named operation must
-// carry an execution right now: the operation needs one and the switch is on.
-func ExecutionRequired(opName string) (bool, error) {
-	if !RequiresExecution(opName) {
-		return false, nil
-	}
-	return SubmitCreatesExecution()
-}
+// SetSubmitCreatesExecution turns the Submit backstop on or off.
+func (e *Executor) SetSubmitCreatesExecution(on bool) { e.submitCreatesExecution = on }
 
-func checkExecutionRequired(op Operation, params map[string]string) error {
-	required, err := ExecutionRequired(op.Name)
-	if err != nil {
-		return err
-	}
-	if required && strings.TrimSpace(params["execution_id"]) == "" {
+func (e *Executor) checkExecutionRequired(op Operation, params map[string]string) error {
+	if e.submitCreatesExecution && RequiresExecution(op.Name) && strings.TrimSpace(params["execution_id"]) == "" {
 		return fmt.Errorf("%w: %s", ErrExecutionRequired, op.Name)
 	}
 	return nil
@@ -95,4 +86,22 @@ func WorkflowRequestIDFrom(ctx context.Context) (string, bool) {
 // requestID.
 func WorkflowNameFor(op Operation, requestID string) string {
 	return fmt.Sprintf("%s-%s", op.WorkflowTemplate, requestID)
+}
+
+// notCreatedError marks a Submit failure raised before the Workflow create
+// call was made: the Workflow certainly does not exist. Its message and
+// wrapped error are the original's.
+type notCreatedError struct{ err error }
+
+func (e *notCreatedError) Error() string { return e.err.Error() }
+func (e *notCreatedError) Unwrap() error { return e.err }
+
+func notCreated(err error) error { return &notCreatedError{err: err} }
+
+// IsNotCreated reports whether err from Submit certainly means no Workflow
+// was created. Any other Submit error is ambiguous: the create may have been
+// accepted before the failure was seen.
+func IsNotCreated(err error) bool {
+	var nc *notCreatedError
+	return errors.As(err, &nc)
 }

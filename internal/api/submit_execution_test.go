@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -17,6 +18,8 @@ import (
 
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
 	"github.com/mctlhq/mctl-api/internal/audit"
+	"github.com/mctlhq/mctl-api/internal/auth"
+	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
 	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/workitems"
 )
@@ -53,8 +56,11 @@ type submitEnv struct {
 }
 
 func newSubmitEnv(t *testing.T, withStore bool) *submitEnv {
+	return newSubmitEnvSwitch(t, withStore, true)
+}
+
+func newSubmitEnvSwitch(t *testing.T, withStore, on bool) *submitEnv {
 	t.Helper()
-	t.Setenv(operations.SubmitCreatesExecutionEnv, "on")
 	connStr := os.Getenv("TEST_DATABASE_URL")
 	if connStr == "" {
 		t.Skip("TEST_DATABASE_URL not set; skipping Postgres-backed submit test")
@@ -75,7 +81,7 @@ func newSubmitEnv(t *testing.T, withStore bool) *submitEnv {
 	e := &submitEnv{t: t, store: store, exec: &recordingExecutor{}, tenant: tenant}
 	opts := mctlapi.Options{
 		Registry: operations.NewRegistry(), GitReader: &fakeGitReader{}, AuditLog: audit.NewLogger(),
-		Executor: e.exec, IssueWorkItemTenant: tenant,
+		Executor: e.exec, IssueWorkItemTenant: tenant, SubmitCreatesExecution: on,
 	}
 	if withStore {
 		opts.WorkItems = store
@@ -296,13 +302,13 @@ func TestInvestigateSubmit_AmbiguousSubmitErrorKeepsTheExecution(t *testing.T) {
 	}
 }
 
-// Switch off (the default, and when unset): exactly the old behaviour. An
-// id-less submit goes through, nothing is created, nothing is refused.
+// Switch off (the default): exactly the old behaviour. An id-less submit
+// goes through, nothing is created, nothing is refused, and the response
+// carries no ids. This holds without a store too.
 func TestInvestigateSubmit_SwitchOffChangesNothing(t *testing.T) {
-	for _, v := range []string{"", "off"} {
-		t.Run("value="+v, func(t *testing.T) {
-			e := newSubmitEnv(t, true)
-			t.Setenv(operations.SubmitCreatesExecutionEnv, v)
+	for _, withStore := range []bool{true, false} {
+		t.Run(fmt.Sprintf("store=%v", withStore), func(t *testing.T) {
+			e := newSubmitEnvSwitch(t, withStore, false)
 			r, code, body := e.post(map[string]string{"issue_url": "https://github.com/mctlhq/mctl-api/issues/13"})
 			if code != http.StatusAccepted {
 				t.Fatalf("%d %s", code, body)
@@ -319,21 +325,56 @@ func TestInvestigateSubmit_SwitchOffChangesNothing(t *testing.T) {
 	}
 }
 
-// Without the store the old behaviour also holds while the switch is off.
-func TestInvestigateSubmit_SwitchOffNeedsNoStore(t *testing.T) {
-	e := newSubmitEnv(t, false)
-	t.Setenv(operations.SubmitCreatesExecutionEnv, "off")
-	if _, code, body := e.post(map[string]string{"issue_url": "https://github.com/mctlhq/mctl-api/issues/5"}); code != http.StatusAccepted {
+// A failure raised before the Workflow create call (here: no cluster client)
+// certainly created nothing, so the execution is ended instead of blocking
+// the work item until someone ends it by hand.
+func TestInvestigateSubmit_NotCreatedErrorEndsTheExecution(t *testing.T) {
+	e := newSubmitEnv(t, true)
+	e.router = mctlapi.NewRouter(mctlapi.Options{
+		Registry: operations.NewRegistry(), GitReader: &fakeGitReader{}, AuditLog: audit.NewLogger(),
+		Executor: &operations.Executor{}, IssueWorkItemTenant: e.tenant, SubmitCreatesExecution: true, WorkItems: e.store,
+	})
+	_, code, body := e.post(map[string]string{"issue_url": "https://github.com/mctlhq/mctl-api/issues/14"})
+	if code != http.StatusInternalServerError {
 		t.Fatalf("%d %s", code, body)
+	}
+	items, err := e.store.List(context.Background(), workitems.ListFilter{Tenants: []string{e.tenant}})
+	if err != nil || len(items) != 1 {
+		t.Fatalf("items = %v, err %v", items, err)
+	}
+	if xs := e.execs(items[0].ID); len(xs) != 1 || xs[0].Phase != workitems.PhaseError {
+		t.Fatalf("executions = %+v, want one in phase Error", xs)
 	}
 }
 
-// A mistyped switch is refused loudly, never read as off or on.
-func TestInvestigateSubmit_InvalidSwitchRefuses(t *testing.T) {
-	e := newSubmitEnv(t, true)
-	t.Setenv(operations.SubmitCreatesExecutionEnv, "yes")
-	_, code, body := e.post(map[string]string{"issue_url": "https://github.com/mctlhq/mctl-api/issues/5"})
-	if code != http.StatusInternalServerError || !strings.Contains(body, "submit_switch_invalid") || len(e.exec.submitted) != 0 {
-		t.Fatalf("%d %s submitted=%v", code, body, e.exec.submitted)
+// mctl_trigger_issue (use_temporal=false) reaches the execute handler over
+// loopback HTTP, so it is covered by the same switch: on, the run gets an
+// execution; off, it is submitted exactly as before.
+func TestTriggerIssueTool_FollowsTheSwitch(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		t.Run(fmt.Sprintf("on=%v", on), func(t *testing.T) {
+			e := newSubmitEnvSwitch(t, true, on)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				e.router.ServeHTTP(w, r.WithContext(auth.WithUser(r.Context(), adminUser)))
+			}))
+			defer srv.Close()
+			msg := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mctl_trigger_issue","arguments":{"issue_url":"https://github.com/mctlhq/mctl-api/issues/15"}}}`
+			out, err := json.Marshal(mctlmcp.NewServer(srv.URL, "").NewMCPServer().HandleMessage(context.Background(), []byte(msg)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(out), `"isError":true`) {
+				t.Fatalf("tool failed: %s", out)
+			}
+			p := e.lastParams()
+			items, _ := e.store.List(context.Background(), workitems.ListFilter{Tenants: []string{e.tenant}})
+			if on {
+				if !strings.HasPrefix(p["execution_id"], "we_") || len(items) != 1 || len(e.execs(items[0].ID)) != 1 {
+					t.Errorf("switch on: params %v items %v", p, items)
+				}
+			} else if p["execution_id"] != "" || len(items) != 0 {
+				t.Errorf("switch off: params %v items %v", p, items)
+			}
+		})
 	}
 }

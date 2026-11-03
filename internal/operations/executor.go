@@ -44,6 +44,9 @@ var workflowGVR = schema.GroupVersionResource{
 // Executor submits Argo Workflows for platform operations.
 type Executor struct {
 	dynamicClient dynamic.Interface
+	// submitCreatesExecution makes Submit refuse an operation that needs an
+	// execution_id when it has none (MCTL_SUBMIT_CREATES_EXECUTION).
+	submitCreatesExecution bool
 }
 
 // SubmitResult contains the result of submitting a workflow.
@@ -124,30 +127,30 @@ func WorkflowNamespace(workflowTemplate, team string) string {
 // Submit creates an Argo Workflow CR referencing the ClusterWorkflowTemplate.
 func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]string, userID string, team string) (*SubmitResult, error) {
 	if team == "" {
-		return nil, fmt.Errorf("team is required for workflow submission")
+		return nil, notCreated(fmt.Errorf("team is required for workflow submission"))
 	}
 	// Backstop for every caller of Submit, not only the REST handler (which
 	// has already rejected the name through Registry.ValidateInput): a
 	// reserved tenant name never reaches the workflow.
 	if err := checkCreateTenantName(op, params); err != nil {
 		slog.Warn("refusing to submit create-tenant", "user", userID, "error", err)
-		return nil, err
+		return nil, notCreated(err)
 	}
 	if err := checkServiceApplication(op, params); err != nil {
 		slog.Warn("refusing to submit service operation", "operation", op.Name, "user", userID, "error", err)
-		return nil, err
+		return nil, notCreated(err)
 	}
 	// Backstop for every caller of Submit: a run that must be correlated to a
 	// we_ execution is never submitted without one (mctl-agents#717 S3).
-	if err := checkExecutionRequired(op, params); err != nil {
+	if err := e.checkExecutionRequired(op, params); err != nil {
 		slog.Warn("refusing to submit operation without an execution", "operation", op.Name, "user", userID)
-		return nil, err
+		return nil, notCreated(err)
 	}
 	// Secret values never enter the Workflow spec (secret_handoff.go).
 	submitParams, secretValues, err := splitSecretParams(op, params)
 	if err != nil {
 		slog.Warn("refusing to submit operation with secret parameters", "operation", op.Name, "user", userID, "error", err)
-		return nil, err
+		return nil, notCreated(err)
 	}
 	namespace := WorkflowNamespace(op.WorkflowTemplate, team)
 	requestID := uuid.New().String()[:8]
@@ -177,7 +180,7 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 	)
 
 	if e.dynamicClient == nil {
-		return nil, fmt.Errorf("kubernetes client not available — check cluster config")
+		return nil, notCreated(fmt.Errorf("kubernetes client not available — check cluster config"))
 	}
 
 	wf := &unstructured.Unstructured{}
@@ -218,7 +221,7 @@ func (e *Executor) Submit(ctx context.Context, op Operation, params map[string]s
 	if handoff {
 		if err := e.checkSecretHandoffSupport(ctx, op.WorkflowTemplate); err != nil {
 			slog.Warn("refusing to submit workflow", "operation", op.Name, "workflow", workflowName, "error", err)
-			return nil, err
+			return nil, notCreated(err)
 		}
 		submitParams[SecretHandoffParam] = secretName
 		// Nothing runs until the Secret exists: resumed below.
