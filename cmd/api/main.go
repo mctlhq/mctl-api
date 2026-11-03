@@ -1081,6 +1081,10 @@ func main() {
 				// straight to Argo; those get a token bound to no work item.
 				// Drop it once mctl-agents stops accepting such runs.
 				"mctl-agents-investigate": {Agent: "issue-investigator", Scope: auth.AgentScopeInvestigate, AllowWithoutExecution: true},
+				// An implement run is execution-bound: its approvals are one
+				// execution's (mctl-agents#717 S4), so a run submitted
+				// without an execution_id is refused at the exchange.
+				"mctl-agents-implement": {Agent: "implementer", Scope: auth.AgentScopeImplement},
 			})
 		if bErr != nil {
 			slog.Warn("agent run token exchange unavailable", "error", bErr)

@@ -305,6 +305,127 @@ func TestInvestigateScope_DenyIsLoadBearing(t *testing.T) {
 	}
 }
 
+func TestImplementScope_Routes(t *testing.T) {
+	s, ok := LookupAgentScope(AgentScopeImplement)
+	if !ok {
+		t.Fatal("implement scope not defined")
+	}
+	if !s.AdmitsAgent("implementer") || s.AdmitsAgent("issue-investigator") || s.AdmitsAgent("shepherd") {
+		t.Error("implement scope must be for implementer only")
+	}
+	if s.BoundTenant || !s.ReadAllTenants {
+		t.Error("implement scope reads every tenant and is not tenant-bound")
+	}
+	if !s.Tool("mctl_list_services") || s.Tool("mctl_deploy_service") || s.Tool("mctl_resolve_incident") {
+		t.Error("implement scope must admit read tools and no write or governed tool")
+	}
+	for _, c := range []struct {
+		method, path, workItem string
+		want                   bool
+	}{
+		// The approval routes the implementer uses. Whose approval it is, is
+		// the handlers' decision (execution-bound, mctl-agents#717 S4).
+		{http.MethodPost, "/api/v1/action-approvals", "wi_a", true},
+		{http.MethodGet, "/api/v1/action-approvals/aar_1", "wi_a", true},
+		{http.MethodPost, "/api/v1/action-approvals/aar_1/consume", "wi_a", true},
+		{http.MethodPost, "/api/v1/action-approvals/aar_1/execute", "wi_a", true},
+		// A decision is a human's; the list is not used.
+		{http.MethodPost, "/api/v1/action-approvals/aar_1/decision", "wi_a", false},
+		{http.MethodGet, "/api/v1/action-approvals", "wi_a", false},
+		{http.MethodPut, "/api/v1/action-approvals/aar_1", "wi_a", false},
+		{http.MethodDelete, "/api/v1/action-approvals/aar_1", "wi_a", false},
+		{http.MethodPost, "/api/v1/action-approvals/aar_1/extra", "wi_a", false},
+		{http.MethodPost, "/api/v1/action-approvals/aar_1/execute/x", "wi_a", false},
+		// Work-item reads of its own item only, and no writes under it.
+		{http.MethodGet, "/api/v1/work-items/wi_a", "wi_a", true},
+		{http.MethodGet, "/api/v1/work-items/wi_b", "wi_a", false},
+		{http.MethodGet, "/api/v1/work-items/wi_a/intents", "wi_a", false},
+		{http.MethodPost, "/api/v1/work-items/wi_a/executions/we_1/snapshot", "wi_a", false},
+		{http.MethodPost, "/api/v1/work-items/wi_a/executions", "wi_a", false},
+		{http.MethodPatch, "/api/v1/work-items/wi_a", "wi_a", false},
+		// Reads and the MCP transport, as investigate.
+		{http.MethodGet, "/api/v1/tenants", "wi_a", true},
+		{http.MethodPost, "/mcp", "wi_a", true},
+		// Nothing else: the claims routes do not exist yet, and a route
+		// added tomorrow stays closed until this scope lists it.
+		{http.MethodPost, "/api/v1/lifecycle/claims/acquire", "wi_a", false},
+		{http.MethodPost, "/api/v1/lifecycle/ownership/acquire", "wi_a", false},
+		{http.MethodPost, "/api/v1/agents/dev-loop/x/approve", "wi_a", false},
+		{http.MethodPost, "/api/v1/operations/deploy-service/execute", "wi_a", false},
+		{http.MethodPost, "/api/v1/evidence/records", "wi_a", false},
+	} {
+		if got := s.AllowsRoute(c.method, c.path, c.workItem, "we_1"); got != c.want {
+			t.Errorf("AllowsRoute(%s %s) = %v, want %v", c.method, c.path, got, c.want)
+		}
+	}
+}
+
+// Every REST write the implement scope admits is on the approval routes, so
+// a new write added to the scope is a deliberate edit of this test.
+func TestImplementScope_WritesAreApprovalsOnly(t *testing.T) {
+	s, _ := LookupAgentScope(AgentScopeImplement)
+	want := map[string]bool{
+		"POST ^/api/v1/action-approvals$":               true,
+		"POST ^/api/v1/action-approvals/[^/]+/consume$": true,
+		"POST ^/api/v1/action-approvals/[^/]+/execute$": true,
+		"POST ^/mcp$":   true,
+		"DELETE ^/mcp$": true,
+	}
+	for _, r := range s.Routes {
+		if r.Method == http.MethodGet {
+			continue
+		}
+		key := r.Method + " " + r.Pattern.String()
+		if !want[key] {
+			t.Errorf("implement scope admits an unexpected write route: %s", key)
+		}
+		delete(want, key)
+	}
+	for k := range want {
+		t.Errorf("implement scope no longer lists %s", k)
+	}
+}
+
+// POST /action-approvals/{id}/execute marks a consumed approval executed,
+// and which approval is the handlers' decision. Only the implement scope
+// may list it, along with the other approval routes (mctl-api#906 open
+// design point).
+func TestOnlyImplementScopeListsApprovalWrites(t *testing.T) {
+	probes := []string{
+		"/api/v1/action-approvals",
+		"/api/v1/action-approvals/aar_1",
+		"/api/v1/action-approvals/aar_1/consume",
+		"/api/v1/action-approvals/aar_1/execute",
+		"/api/v1/action-approvals/aar_1/decision",
+	}
+	for _, name := range AgentScopeNames() {
+		s, _ := LookupAgentScope(name)
+		for _, p := range probes {
+			for _, m := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+				// Any binding id a route could be bound to.
+				admitted := false
+				for _, wi := range []string{"", "wi_a"} {
+					for _, ex := range []string{"", "we_1", "aar_1", "execute"} {
+						if s.Allows(AgentScopeRequest{Method: m, Path: p, WorkItemID: wi, ExecutionID: ex, Tenant: "t"}) {
+							admitted = true
+						}
+					}
+				}
+				if name == AgentScopeImplement {
+					continue
+				}
+				if admitted {
+					t.Errorf("scope %s admits %s %s: only implement may list the action-approval routes", name, m, p)
+				}
+			}
+		}
+	}
+	s, _ := LookupAgentScope(AgentScopeImplement)
+	if !s.AllowsRoute(http.MethodPost, "/api/v1/action-approvals/aar_1/execute", "wi_a", "we_1") {
+		t.Fatal("implement scope must list execute")
+	}
+}
+
 // The review scope (mctl-api#917) reaches whoami and the worker receipt
 // route and nothing else: no other route, method or path variant, no MCP
 // endpoint and no tool. It is minted for review-worker only, by the service
