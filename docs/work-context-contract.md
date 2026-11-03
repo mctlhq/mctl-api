@@ -566,12 +566,32 @@ schema (`work_item_execution_requests`):
   `state_version_conflict` with the current state), a terminal item (409
   `invalid_transition`), a kind the item cannot take (`start` needs an
   active item that never ran; `resume` needs a waiting item or one that
-  ran), a Pending/Running execution (409 `execution_active`), a
+  ran), a Pending/Running execution (409 `execution_active`; see "Queued
+  while active" for the switch that queues it instead), a
   `resumed_from_execution_id` or `intent_id` of another item (404
   `execution_not_found` / `intent_not_found`), and a second open request
   (409 `execution_request_open`, the open one's id in `details`).
   Idempotency is the per-item key bound to the actor, as for every other
   work-item mutation.
+- **Queued while active** (`MCTL_EXECUTION_REQUEST_QUEUE_WHILE_ACTIVE=on`;
+  empty or `off`, the default, keeps everything above unchanged, and any
+  other value refuses to start). When the only reason create would refuse is
+  a Pending/Running execution, the request is stored `pending` with its
+  actor, intent, `expected_state_version` and idempotency key, the
+  `execution_requested` event carries `queued_behind_execution_id`, and the
+  response is 201. Every other create check is unchanged, and a replay of
+  the same key returns the original request whether the execution is still
+  open or not. While on, claim returns no request of an item that has an
+  open execution (checked at candidate selection and again under the item
+  lock). Fulfil is unchanged: a changed `state_version` is 409
+  `state_version_conflict` and an open execution is 409 `execution_active`.
+  A sweeper (every 2 minutes) closes a `temporal` execution that has a
+  request queued behind it, is at least 5 minutes old, and whose run
+  Temporal reports closed (Completed, Failed, Canceled, Terminated,
+  TimedOut) or not found: the execution becomes `Error` and an
+  `execution_orphan_closed` event is appended. Running, ContinuedAsNew,
+  Unknown and a failed describe leave it open. `argo` and `a2a` executions
+  are not swept. See `docs/adr/0001-queue-execution-request-while-active.md`.
 - Claim is a compare-and-set under the item's advisory lock: racing
   claimants serialize and one wins. A claim whose lease lapsed is
   claimable again. Each claim mints a `claim_token` (returned by claim

@@ -185,6 +185,14 @@ func (r *Reconnecting) DescribeDevLoopExecution(ctx context.Context, workflowID 
 	return c.DescribeDevLoopExecution(ctx, workflowID)
 }
 
+func (r *Reconnecting) DescribeDevLoopRun(ctx context.Context, workflowID, runID string) (*DevLoopExecution, error) {
+	c := r.current.Load()
+	if c == nil {
+		return nil, r.unavailable()
+	}
+	return c.DescribeDevLoopRun(ctx, workflowID, runID)
+}
+
 func (r *Reconnecting) QueryShepherdInLoop(ctx context.Context, workflowID string) (bool, error) {
 	c := r.current.Load()
 	if c == nil {

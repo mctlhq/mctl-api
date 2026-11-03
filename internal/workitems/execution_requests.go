@@ -221,6 +221,10 @@ type ExecutionRequest struct {
 	// IntentAvailable is set only by ClaimExecutionRequest, when the request
 	// pins an intent; it is never serialized in the request itself.
 	IntentAvailable *bool `json:"-"`
+	// QueuedBehindExecutionID is set only on the response of a create that
+	// was accepted while this execution was open (queue-while-active
+	// switch). It is not stored; the execution_requested event carries it.
+	QueuedBehindExecutionID string `json:"queued_behind_execution_id,omitempty"`
 }
 
 func utcPtr(t *time.Time) *time.Time {
@@ -307,13 +311,20 @@ func (in ExecutionRequestInput) validate() error {
 // because the requester named it; fulfil (resumeTx) reports the same fault
 // as invalid_request. Executions are never deleted, so a reference valid at
 // create stays valid at fulfil and the second answer is not reachable.
-func checkRunnable(cur *WorkItem, execs []Execution, kind, from string) error {
+//
+// With allowActive, an open execution is not an error: its id is returned so
+// the caller can queue the request behind it. Every other check still runs.
+func checkRunnable(cur *WorkItem, execs []Execution, kind, from string, allowActive bool) (string, error) {
 	if IsTerminal(cur.State) {
-		return &ConflictError{Err: fmt.Errorf("%w: execution request on %s", ErrInvalidTransition, cur.State), Current: cur}
+		return "", &ConflictError{Err: fmt.Errorf("%w: execution request on %s", ErrInvalidTransition, cur.State), Current: cur}
 	}
+	activeID := ""
 	for i := range execs {
 		if !IsTerminalPhase(execs[i].Phase) {
-			return &ConflictError{Err: ErrExecutionActive, Current: cur}
+			if !allowActive {
+				return "", &ConflictError{Err: ErrExecutionActive, Current: cur}
+			}
+			activeID = execs[i].ID
 		}
 	}
 	switch kind {
@@ -321,22 +332,22 @@ func checkRunnable(cur *WorkItem, execs []Execution, kind, from string) error {
 		// Start is the first run of an active item. A waiting item leaves
 		// waiting only by resume, and an item that has run resumes.
 		if cur.State != StateActive {
-			return &ConflictError{Err: fmt.Errorf("%w: start from %s; request kind resume", ErrInvalidTransition, cur.State), Current: cur}
+			return "", &ConflictError{Err: fmt.Errorf("%w: start from %s; request kind resume", ErrInvalidTransition, cur.State), Current: cur}
 		}
 		if len(execs) > 0 {
-			return &ConflictError{Err: fmt.Errorf("%w: %s already ran; request kind resume", ErrInvalidTransition, cur.ID), Current: cur}
+			return "", &ConflictError{Err: fmt.Errorf("%w: %s already ran; request kind resume", ErrInvalidTransition, cur.ID), Current: cur}
 		}
 	case ExecutionRequestResume:
 		// Resume's own rule (resumeTx): an active item with no execution
 		// starts instead.
 		if len(execs) == 0 && cur.State == StateActive {
-			return invalid("%s has no execution to resume; request kind start", cur.ID)
+			return "", invalid("%s has no execution to resume; request kind start", cur.ID)
 		}
 		if from != "" && !containsExecution(execs, from) {
-			return fmt.Errorf("workitems: resumed_from_execution_id %s of %s: %w", from, cur.ID, ErrExecutionNotFound)
+			return "", fmt.Errorf("workitems: resumed_from_execution_id %s of %s: %w", from, cur.ID, ErrExecutionNotFound)
 		}
 	}
-	return nil
+	return activeID, nil
 }
 
 func openExecutionRequest(ctx context.Context, q querier, itemID string) (*ExecutionRequest, error) {
@@ -382,7 +393,8 @@ func (s *Store) CreateExecutionRequest(ctx context.Context, in ExecutionRequestI
 		if err != nil {
 			return err
 		}
-		if err := checkRunnable(cur, execs, in.Kind, in.ResumedFromExecutionID); err != nil {
+		queuedBehind, err := checkRunnable(cur, execs, in.Kind, in.ResumedFromExecutionID, s.queueWhileActive)
+		if err != nil {
 			return err
 		}
 		if in.IntentID != nil {
@@ -416,6 +428,10 @@ func (s *Store) CreateExecutionRequest(ctx context.Context, in ExecutionRequestI
 		}
 		if out.ResumedFromExecutionID != "" {
 			detail["resumed_from_execution_id"] = out.ResumedFromExecutionID
+		}
+		if queuedBehind != "" {
+			detail["queued_behind_execution_id"] = queuedBehind
+			out.QueuedBehindExecutionID = queuedBehind
 		}
 		if err := appendEvent(ctx, tx, cur.ID, EventExecutionRequested, "", "", in.Mutation, detail, now); err != nil {
 			return err
@@ -483,9 +499,7 @@ func (s *Store) ClaimExecutionRequest(ctx context.Context, in ClaimInput) (*Exec
 	if in.Lease < MinClaimLease || in.Lease > MaxClaimLease {
 		return nil, nil, invalid("lease must be from %s to %s", MinClaimLease, MaxClaimLease)
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id, work_item_id FROM work_item_execution_requests
-		WHERE state='pending' OR (state='claimed' AND claim_expires_at <= $1)
-		ORDER BY created_at, id LIMIT $2`, s.now(), claimCandidates)
+	rows, err := s.pool.Query(ctx, claimCandidateSQL(s.queueWhileActive), s.now(), claimCandidates)
 	if err != nil {
 		return nil, nil, fmt.Errorf("workitems: find claimable execution requests: %w", err)
 	}
@@ -507,6 +521,19 @@ func (s *Store) ClaimExecutionRequest(ctx context.Context, in ClaimInput) (*Exec
 		var out *ExecutionRequest
 		var item *WorkItem
 		err := s.withTx(ctx, "workitem:"+c.itemID, func(tx pgx.Tx) error {
+			if s.queueWhileActive {
+				// The scan above ran outside the lock: re-check that no
+				// execution opened since, and skip without touching the row.
+				execs, err := listExecutions(ctx, tx, c.itemID)
+				if err != nil {
+					return err
+				}
+				for i := range execs {
+					if !IsTerminalPhase(execs[i].Phase) {
+						return nil
+					}
+				}
+			}
 			now := s.now()
 			token := executionRequestClaimPrefix + strings.ReplaceAll(uuid.NewString(), "-", "")
 			x, err := scanExecutionRequest(tx.QueryRow(ctx, `UPDATE work_item_execution_requests
@@ -545,6 +572,22 @@ func (s *Store) ClaimExecutionRequest(ctx context.Context, in ClaimInput) (*Exec
 		}
 	}
 	return nil, nil, nil
+}
+
+// claimCandidateSQL selects claimable requests. With the queue-while-active
+// switch on, requests of an item with an open execution are excluded so they
+// do not use up the candidate budget. Off, the text is the original query.
+func claimCandidateSQL(guard bool) string {
+	if !guard {
+		return `SELECT id, work_item_id FROM work_item_execution_requests
+		WHERE state='pending' OR (state='claimed' AND claim_expires_at <= $1)
+		ORDER BY created_at, id LIMIT $2`
+	}
+	return `SELECT r.id, r.work_item_id FROM work_item_execution_requests r
+		WHERE (r.state='pending' OR (r.state='claimed' AND r.claim_expires_at <= $1))
+		AND NOT EXISTS (SELECT 1 FROM work_item_executions e
+			WHERE e.work_item_id = r.work_item_id AND e.phase IN ` + openPhasesSQL + `)
+		ORDER BY r.created_at, r.id LIMIT $2`
 }
 
 // ClaimRef names the claim a fulfil or reject acts under.
@@ -703,7 +746,8 @@ func checkStart(ctx context.Context, tx pgx.Tx, cur *WorkItem, x *ExecutionReque
 				in.Engine, in.EngineRef, execs[i].ID, cur.ID)
 		}
 	}
-	return checkRunnable(cur, execs, ExecutionRequestStart, "")
+	_, err = checkRunnable(cur, execs, ExecutionRequestStart, "", false)
+	return err
 }
 
 // RejectInput rejects a claimed request.
