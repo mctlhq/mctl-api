@@ -355,6 +355,9 @@ spec:
             exit 1
           fi
 
+          # ── 3b. Release gate: refuse before anything is written ───────────
+          sh platform-gitops/argo-workflows/scripts/release-gate-guard.sh target "$TEAM" "$SERVICE" || exit 1
+
           # ── 4. Generate files ──────────────────────────────────────────────
           if [ "$ACTION" = "onboard" ]; then
             mkdir -p "$DIR"
@@ -696,6 +699,8 @@ spec:
           # ── 5. Push with rebase retry ──────────────────────────────────────
           MAX_RETRIES=5
           for i in $(seq 1 $MAX_RETRIES); do
+            # On every attempt: a rebase below brings in main's current gate.
+            sh platform-gitops/argo-workflows/scripts/release-gate-guard.sh outgoing origin/main || exit 1
             if git push origin HEAD:main; then
               echo "✅ Pushed successfully"
               break
@@ -797,6 +802,10 @@ spec:
 
           DIR="platform-gitops/services/${TEAM}/${SERVICE}"
 
+          # Before the missing-directory exit below: a gated service whose
+          # directory has gone is a broken group, not an earlier retire.
+          sh platform-gitops/argo-workflows/scripts/release-gate-guard.sh target "$TEAM" "$SERVICE" || exit 1
+
           # A missing directory is not an error: this is the first step of a
           # retire that is not transactional, and a retry after a later step
           # failed must get past it. What gets deleted afterwards is bounded
@@ -819,6 +828,8 @@ spec:
           git commit -m "delete: ${TEAM}/${SERVICE}"
 
           for i in $(seq 1 5); do
+            # On every attempt: a rebase below brings in main's current gate.
+            sh platform-gitops/argo-workflows/scripts/release-gate-guard.sh outgoing origin/main || exit 1
             if git push origin HEAD:main; then
               echo "✅ Deleted and pushed"
               break

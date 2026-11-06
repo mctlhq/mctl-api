@@ -1,7 +1,7 @@
 {
   "source_repo": "mctlhq/mctl-gitops",
-  "source_commit": "7cdfb659592d3e9d595cd2c6406b4fde3dad1b24",
-  "captured_at": "2026-10-30T14:33:43Z",
+  "source_commit": "f96c6a3c96390da2fcc9a6d138e1174e4658285f",
+  "captured_at": "2026-11-06T21:55:21Z",
   "refresh": "scripts/refresh-deployplan-upstream.sh",
   "files": [
     {
@@ -12,7 +12,7 @@
     {
       "source_path": "platform-gitops/argo-workflows/cluster-templates/tpl-git-commit.yaml",
       "snapshot": "tpl-git-commit.yaml",
-      "sha256": "8fc45192c11bbe0bd4b3d317f97523837e541c5c85c526508113836aef1e5a65"
+      "sha256": "c2cbd86f6065c7edc845f2592f539bbfd78368509a4146c192e0b5edf5361d7d"
     },
     {
       "source_path": "platform-gitops/argo-workflows/scripts/rewrite_preview_values.py",
