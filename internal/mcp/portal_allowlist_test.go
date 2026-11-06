@@ -124,6 +124,7 @@ var mutatingOnPortal = map[string]string{
 	"mctl_rollback_agent":                   "what tenants run",
 	"mctl_rollback_service":                 "production image tag",
 	"mctl_scale_service":                    "replica count, and therefore cluster capacity",
+	"mctl_submit_review_assertion":          "adds a manual advisory review receipt to an open review request; it never satisfies independent assurance",
 	"mctl_sync_repos":                       "what the platform believes it owns",
 	"mctl_trigger_agents_run":               "starts model spend and repository writes",
 	"mctl_trigger_approve":                  "flips a proposal to accepted, which is what unblocks the implementer",

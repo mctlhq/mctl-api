@@ -551,8 +551,8 @@
     },
     {
       "name": "mctl_submit_review_assertion",
-      "enabled": false,
-      "reason": "A write: a human administrator records a manual advisory review receipt against an open manual-mode request. Refused for service, relayed and surface callers by the API. Not enabled on the shared portal: a human-admin write is a separate owner decision (mctl-api#897)."
+      "enabled": true,
+      "reason": "Enabled on the shared portal by owner decision 2026-11-06 (mctl-api#897). A write: a human administrator records a manual advisory review receipt against an open manual-mode request. Refused for service, relayed and surface callers by the API, so non-admins see it and get a refusal. It cannot tell an admin from an AI session on that admin's token, which is acceptable because a manual receipt is advisory and never satisfies independent assurance."
     },
     {
       "name": "mctl_ask_support",
