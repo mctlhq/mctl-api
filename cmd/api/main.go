@@ -1109,6 +1109,10 @@ func main() {
 				// execution's (mctl-agents#717 S4), so a run submitted
 				// without an execution_id is refused at the exchange.
 				"mctl-agents-implement": {Agent: "implementer", Scope: auth.AgentScopeImplement},
+				// A shepherd run belongs to no execution, permanently: the
+				// sweep drives many proposals. Its scope is one read, so a
+				// token bound to no work item is all it needs.
+				"mctl-agents-shepherd": {Agent: "shepherd", Scope: auth.AgentScopeShepherd, AllowWithoutExecution: true},
 			})
 		if bErr != nil {
 			slog.Warn("agent run token exchange unavailable", "error", bErr)

@@ -315,6 +315,21 @@ func (h *Handlers) requireTemporalAdmin(w http.ResponseWriter, r *http.Request) 
 	return user, true
 }
 
+// requireDevLoopRead admits what requireTemporalAdmin admits, plus a run token
+// of the shepherd scope, whose sweep reads dev-loop liveness. It guards only
+// the read: every other dev-loop route stays admin-only.
+func (h *Handlers) requireDevLoopRead(w http.ResponseWriter, r *http.Request) bool {
+	if user := auth.UserFromContext(r.Context()); user != nil && user.AgentScopeName() == auth.AgentScopeShepherd {
+		if msg := h.temporalState(); msg != "" {
+			writeError(w, http.StatusServiceUnavailable, msg)
+			return false
+		}
+		return true
+	}
+	_, ok := h.requireTemporalAdmin(w, r)
+	return ok
+}
+
 type startDevLoopRequest struct {
 	IssueURL string `json:"issue_url"`
 }
@@ -942,7 +957,7 @@ func (h *Handlers) AbandonDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 // mctl-agents#213), and this is the only Temporal surface the sweeper —
 // which deliberately holds no Temporal client — can reach.
 func (h *Handlers) GetDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.requireTemporalAdmin(w, r); !ok {
+	if !h.requireDevLoopRead(w, r) {
 		return
 	}
 

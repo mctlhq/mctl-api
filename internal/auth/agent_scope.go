@@ -58,6 +58,13 @@ const AgentScopeSupport = "support"
 // binding, never from a request body.
 const AgentScopeReview = "review"
 
+// AgentScopeShepherd is the scope of a shepherd run (mctlhq/mctl-gitops#1980):
+// one read, the dev-loop liveness check its sweep makes per proposal, so the
+// shepherd container can stop holding a static service token. It has no
+// execution and no work item, no MCP endpoint and no tool, and it writes
+// nothing.
+const AgentScopeShepherd = "shepherd"
+
 // AgentScope is one server-defined run scope.
 type AgentScope struct {
 	Name string
@@ -298,6 +305,16 @@ var agentScopes = map[string]*AgentScope{
 		Routes: []AgentScopeRoute{
 			getRoute(`^/api/v1/whoami$`),
 			{Method: http.MethodPost, Pattern: regexp.MustCompile(`^/api/v1/review-receipts$`)},
+		},
+	},
+	AgentScopeShepherd: {
+		Name:   AgentScopeShepherd,
+		Agents: []string{"shepherd"},
+		Deny:   agentDeniedRoutes,
+		Tool:   func(string) bool { return false },
+		Routes: []AgentScopeRoute{
+			getRoute(`^/api/v1/whoami$`),
+			getRoute(`^/api/v1/agents/dev-loop/[^/]+$`),
 		},
 	},
 	AgentScopeSupport: {
