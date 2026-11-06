@@ -42,6 +42,8 @@ func TestSpecParses(t *testing.T) {
 		"/api/v1/execution-requests/{request_id}/reject":                            {"post"},
 		"/api/v1/agents/dev-loop/{workflow_id}/approve":                             {"post"},
 		"/api/v1/agents/dev-loop/{workflow_id}/abandon":                             {"post"},
+		"/api/v1/agents/dev-loop/{workflow_id}/owner-actions":                       {"get", "post"},
+		"/api/v1/agents/dev-loop/{workflow_id}/owner-actions/{id}":                  {"get"},
 		"/api/v1/commerce/terms":                                                    {"get", "post"},
 		"/api/v1/commerce/terms/{terms_id}/versions/{version}":                      {"get"},
 		"/api/v1/commerce/terms/{terms_id}/versions/{version}/retire":               {"post"},

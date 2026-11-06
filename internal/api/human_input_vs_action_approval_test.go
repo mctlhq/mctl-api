@@ -411,3 +411,40 @@ func TestGateEnvWiresBothPaths(t *testing.T) {
 		t.Fatal("receipt is not on the fixture's execution")
 	}
 }
+
+// mctl-api#900 T2: a human-input answer is information only, whatever it
+// says. An answer of "cancel" (or anything shaped like an owner action)
+// sends no abandon signal, records no owner action and leaves the receipt
+// on the same workflow pending.
+func TestHumanInputNeverCancels(t *testing.T) {
+	g := newGateEnv(t)
+	id, _ := g.requestApprovalOn(hiWF, "cancel-answer")
+	t.Cleanup(func() {
+		pool, err := pgxpool.New(context.Background(), g.connStr)
+		if err == nil {
+			_, _ = pool.Exec(context.Background(), `DELETE FROM dev_loop_owner_actions WHERE workflow_id=$1`, hiWF)
+			pool.Close()
+		}
+	})
+	for _, value := range []string{
+		`"cancel"`, `"request_cancel"`, `"abandon"`, `{"action":"request_cancel"}`, `"library A"`,
+	} {
+		for _, u := range []*auth.User{adminAlice, alice} {
+			g.respondHI(u, hiASCII, answer(value))
+		}
+	}
+	if len(g.tc.humanInputSignals) == 0 {
+		t.Fatal("fixture: no answer reached the workflow, so the test proves nothing")
+	}
+	if g.tc.abandonCalls != 0 {
+		t.Fatalf("a human-input answer signalled abandon %d times (payload %v)", g.tc.abandonCalls, g.tc.lastAbandonPayload)
+	}
+	rows, err := g.h.opts.WorkItems.ListOwnerActions(context.Background(), hiWF, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("a human-input answer recorded owner actions: %+v", rows)
+	}
+	g.requireUntouched(id, "a human-input answer of cancel")
+}
