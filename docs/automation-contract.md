@@ -91,7 +91,7 @@ placeholders). A client never supplies them. Temporal's task queue is fixed serv
 
 ## 6. Triggers and policies
 
-- Kinds: `at`, `schedule`, `event`, `dependency`. MVP gate: `reminder.v1` with `at` only. The
+- Kinds: `at`, `schedule`, `event`, `dependency`. MVP gate (on the template and kind pair): `reminder.v1` with `at` only; `support.diagnostic-followup.v1` is not yet enabled and yields `automation_trigger_unsupported`. The
   others are schema-valid but `automation_trigger_unsupported`, as is any `event` naming
   `check_run` or `workflow_run` (no verified producer: `docs/github-events-producer.md` subscribes
   to `pull_request` and `pull_request_review` only, `proved-source`).

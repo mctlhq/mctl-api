@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/santhosh-tekuri/jsonschema/v6/kind"
@@ -130,10 +131,9 @@ var serverOwned = []string{
 }
 
 var (
-	once     sync.Once
-	compiler *jsonschema.Compiler
-	loadErr  error
-	cache    sync.Map
+	once    sync.Once
+	schemas map[string]*jsonschema.Schema // read-only after once.Do
+	loadErr error
 )
 
 func load() error {
@@ -144,6 +144,7 @@ func load() error {
 			return
 		}
 		c := jsonschema.NewCompiler()
+		var names []string
 		for _, e := range entries {
 			raw, err := schemaFS.ReadFile("schema/v1/" + e.Name())
 			if err != nil {
@@ -159,8 +160,20 @@ func load() error {
 				loadErr = fmt.Errorf("adding %s: %w", e.Name(), err)
 				return
 			}
+			names = append(names, e.Name())
 		}
-		compiler = c
+		// Compile everything eagerly: the Compiler is not safe for concurrent
+		// use, and the resulting map is only read afterwards.
+		m := make(map[string]*jsonschema.Schema, len(names))
+		for _, n := range names {
+			s, err := c.Compile(schemaBase + n)
+			if err != nil {
+				loadErr = fmt.Errorf("compiling %s: %w", n, err)
+				return
+			}
+			m[n] = s
+		}
+		schemas = m
 	})
 	return loadErr
 }
@@ -169,14 +182,10 @@ func schema(name string) (*jsonschema.Schema, error) {
 	if err := load(); err != nil {
 		return nil, err
 	}
-	if s, ok := cache.Load(name); ok {
-		return s.(*jsonschema.Schema), nil
+	s, ok := schemas[name]
+	if !ok {
+		return nil, fmt.Errorf("unknown schema %s", name)
 	}
-	s, err := compiler.Compile(schemaBase + name)
-	if err != nil {
-		return nil, fmt.Errorf("compiling %s: %w", name, err)
-	}
-	cache.Store(name, s)
 	return s, nil
 }
 
@@ -237,6 +246,53 @@ func checkServerOwned(obj map[string]any) error {
 	return nil
 }
 
+// supportOnlyFields are meaningful only for Support-scope templates.
+var supportOnlyFields = []string{"delegate", "impersonate_owner", "auth_ref", "requested_capabilities", "ttl_seconds", "max_fires"}
+
+// checkTemplateSemantics applies the rules shared by create and patch: params
+// schema and text rules, Support-only fields, Support constraints and the
+// trigger. Support constraints run before the trigger gate so a Support body
+// is judged on its constraints first.
+func checkTemplateSemantics(obj map[string]any, tmpl Template, patch bool) error {
+	if params, ok := obj["params"]; ok {
+		if err := validateAgainst(tmpl.ParamsSchema, params); err != nil {
+			return err
+		}
+		if tmpl.ID == "reminder.v1" {
+			if m, ok := params.(map[string]any); ok {
+				if err := checkReminderText(m); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if tmpl.Scope != ScopeSupport {
+		for _, k := range supportOnlyFields {
+			if _, ok := obj[k]; ok {
+				return fail(CodeInvalid, "%s is not allowed for template %s", k, tmpl.ID)
+			}
+		}
+	} else {
+		in := supportInputsFromBody(obj, tmpl)
+		if patch {
+			// Absent fields keep their stored (already validated) values.
+			if _, ok := obj["ttl_seconds"]; !ok {
+				in.TTL = time.Second
+			}
+			if _, ok := obj["max_fires"]; !ok {
+				in.MaxFires = 1
+			}
+		}
+		if err := CheckSupport(in); err != nil {
+			return err
+		}
+	}
+	if trig, ok := obj["trigger"].(map[string]any); ok {
+		return CheckTrigger(trig, tmpl)
+	}
+	return nil
+}
+
 // ValidateCreate checks a create request body: parse, server-owned prepass,
 // schema, then template, trigger and Support semantics.
 func ValidateCreate(raw []byte) error {
@@ -255,27 +311,13 @@ func ValidateCreate(raw []byte) error {
 	if !ok {
 		return fail(CodeTemplateNotAllowed, "%q", tmplID)
 	}
-	if err := validateAgainst(tmpl.ParamsSchema, obj["params"]); err != nil {
-		return err
-	}
-	trig, _ := obj["trigger"].(map[string]any)
-	if err := CheckTrigger(trig, tmpl); err != nil {
-		return err
-	}
-	if tmplID == "reminder.v1" {
-		if err := checkReminderText(obj["params"].(map[string]any)); err != nil {
-			return err
-		}
-	}
-	if tmpl.Scope == ScopeSupport {
-		return CheckSupport(supportInputsFromBody(obj, tmpl))
-	}
-	return nil
+	return checkTemplateSemantics(obj, tmpl, false)
 }
 
 // ValidatePatch checks a patch body (JSON Merge Patch over client-writable
-// fields, guarded by expected_version).
-func ValidatePatch(raw []byte) error {
+// fields, guarded by expected_version) against the stored definition's
+// template, re-running the create-time rules on every field the patch sets.
+func ValidatePatch(raw []byte, tmpl Template) error {
 	obj, err := parseObject(raw)
 	if err != nil {
 		return err
@@ -286,10 +328,7 @@ func ValidatePatch(raw []byte) error {
 	if err := validateAgainst("automation-patch.schema.json", obj); err != nil {
 		return err
 	}
-	if trig, ok := obj["trigger"].(map[string]any); ok {
-		return CheckTrigger(trig, Template{AllowedTriggers: []string{"at", "schedule", "event", "dependency"}})
-	}
-	return nil
+	return checkTemplateSemantics(obj, tmpl, true)
 }
 
 // ValidateDefinition checks a returned AutomationDefinition resource.

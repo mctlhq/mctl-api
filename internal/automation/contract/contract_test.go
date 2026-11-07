@@ -15,10 +15,12 @@
 package contract
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -28,11 +30,10 @@ func TestFixtures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var man []struct{ File, Kind, Code string }
+	var man []struct{ File, Kind, Code, Template string }
 	if err := json.Unmarshal(raw, &man); err != nil {
 		t.Fatal(err)
 	}
-	seenCodes := map[Code]bool{}
 	listed := map[string]bool{}
 	for _, m := range man {
 		listed[m.File] = true
@@ -46,7 +47,15 @@ func TestFixtures(t *testing.T) {
 			case "create":
 				verr = ValidateCreate(body)
 			case "patch":
-				verr = ValidatePatch(body)
+				tmplID := m.Template
+				if tmplID == "" {
+					tmplID = "reminder.v1"
+				}
+				tmpl, ok := LookupTemplate(tmplID)
+				if !ok {
+					t.Fatalf("unknown template %q", tmplID)
+				}
+				verr = ValidatePatch(body, tmpl)
 			case "definition":
 				verr = ValidateDefinition(body)
 			case "run":
@@ -60,18 +69,19 @@ func TestFixtures(t *testing.T) {
 			if m.Code == "" && verr != nil {
 				t.Fatalf("valid fixture failed: %v", verr)
 			}
-			seenCodes[Code(m.Code)] = true
 		})
 	}
 	for _, dir := range []string{"valid", "invalid"} {
-		files, _ := filepath.Glob("testdata/" + dir + "/*.json")
+		files, err := filepath.Glob("testdata/" + dir + "/*.json")
+		if err != nil {
+			t.Fatal(err)
+		}
 		for _, f := range files {
 			if !listed[strings.TrimPrefix(filepath.ToSlash(f), "testdata/")] {
 				t.Errorf("fixture %s missing from manifest", f)
 			}
 		}
 	}
-	_ = seenCodes
 }
 
 func TestReminderTextLimit(t *testing.T) {
@@ -152,7 +162,7 @@ func TestOccurrenceKeys(t *testing.T) {
 	if a == b || ExternalKey("au_1", a) == ExternalKey("au_1", b) || FireIdempotencyKey(a) == FireIdempotencyKey(b) {
 		t.Fatal("overlapping occurrences must differ")
 	}
-	if FireIdempotencyKey(a) != FireIdempotencyKey(a) || ExternalKey("au_1", a) != "automation:au_1:"+a {
+	if FireIdempotencyKey(a) != FireIdempotencyKey(OccurrenceKeyAt("au_1", 1, "at", at)) || ExternalKey("au_1", a) != "automation:au_1:"+a {
 		t.Fatal("derivation unstable")
 	}
 	var s OccurrenceSet
@@ -204,6 +214,18 @@ func TestDecide(t *testing.T) {
 		{"schedule as approval", func(i *Inputs) { i.ScheduleAsApproval = true; i.ApprovalRequired = true }, CheckpointSideEffect, CodeApprovalNotReusable},
 		{"approval missing", func(i *Inputs) { i.ApprovalRequired = true }, CheckpointSideEffect, CodeApprovalRequired},
 		{"approval bound to this run", func(i *Inputs) { i.ApprovalRequired = true; i.Approval = &ApprovalBinding{ExecutionID: "we_1"} }, CheckpointSideEffect, ""},
+		{"install zero value", func(i *Inputs) { i.Install = 0 }, CheckpointFire, CodeIdentityUnlinked},
+		{"install not required", func(i *Inputs) { i.Install = InstallNotRequired }, CheckpointFire, ""},
+		{"approval empty execution id", func(i *Inputs) { i.Approval = &ApprovalBinding{} }, CheckpointSideEffect, CodeApprovalNotReusable},
+		{"approval with empty this execution", func(i *Inputs) {
+			i.ThisExecutionID = ""
+			i.Approval = &ApprovalBinding{ExecutionID: "we_1"}
+		}, CheckpointSideEffect, CodeApprovalNotReusable},
+		{"approval both empty", func(i *Inputs) {
+			i.ThisExecutionID = ""
+			i.Approval = &ApprovalBinding{}
+		}, CheckpointSideEffect, CodeApprovalNotReusable},
+		{"invalid checkpoint beats unavailable", func(i *Inputs) { i.Unavailable = []Source{SourceBudget} }, Checkpoint(9), CodeInvalid},
 		{"invalid checkpoint", func(*Inputs) {}, Checkpoint(0), CodeInvalid},
 	}
 	for _, c := range cases {
@@ -217,8 +239,12 @@ func TestDecide(t *testing.T) {
 }
 
 func TestNotFoundBodiesIdentical(t *testing.T) {
-	if string(ErrorBody(CodeNotFound)) != string(ErrorBody(CodeNotFound)) || CodeNotFound.HTTPStatus() != 404 {
-		t.Fatal("not_found must be fixed")
+	want := []byte(`{"error":{"code":"automation_not_found","message":"automation_not_found"}}`)
+	if !bytes.Equal(ErrorBody(CodeNotFound), want) {
+		t.Fatalf("not_found body = %s", ErrorBody(CodeNotFound))
+	}
+	if CodeNotFound.HTTPStatus() != 404 {
+		t.Fatalf("not_found status = %d", CodeNotFound.HTTPStatus())
 	}
 }
 
@@ -250,4 +276,26 @@ func TestCheckSupport(t *testing.T) {
 	if err := CheckSupport(in); err != nil {
 		t.Errorf("live auth_ref: %v", err)
 	}
+}
+
+func TestParallelValidation(t *testing.T) {
+	bodies := [][]byte{
+		[]byte(`{"idempotency_key":"k","template_id":"reminder.v1","params":{"text":"hi"},"trigger":{"kind":"at","instant":"2026-12-01T10:00:00Z"}}`),
+		[]byte(`{"idempotency_key":"k","template_id":"reminder.v1","params":{"text":"hi","x":1},"trigger":{"kind":"at","instant":"2026-12-01T10:00:00Z"}}`),
+		[]byte(`{"idempotency_key":"k","template_id":"support.diagnostic-followup.v1","params":{"question_ref":"q"},"trigger":{"kind":"at","instant":"2026-12-01T10:00:00Z"},"ttl_seconds":60,"max_fires":1}`),
+	}
+	want := []Code{"", CodeUnknownField, CodeTriggerUnsupported}
+	var wg sync.WaitGroup
+	for n := 0; n < 16; n++ {
+		for i := range bodies {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if got := CodeOf(ValidateCreate(bodies[i])); got != want[i] {
+					t.Errorf("body %d: code %q, want %q", i, got, want[i])
+				}
+			}()
+		}
+	}
+	wg.Wait()
 }

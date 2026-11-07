@@ -2,7 +2,6 @@
 {"file":"valid/reminder-at-instant.json","kind":"create","code":""},
 {"file":"valid/reminder-at-local-ny.json","kind":"create","code":""},
 {"file":"valid/reminder-with-policies.json","kind":"create","code":""},
-{"file":"valid/support-followup.json","kind":"create","code":""},
 {"file":"valid/patch-version.json","kind":"patch","code":""},
 {"file":"valid/definition.json","kind":"definition","code":""},
 {"file":"valid/run.json","kind":"run","code":""},
@@ -64,5 +63,16 @@
 {"file":"invalid/patch-unknown.json","kind":"patch","code":"automation_unknown_field"},
 {"file":"invalid/definition-is-create-body.json","kind":"definition","code":"automation_unknown_field"},
 {"file":"invalid/definition-extra.json","kind":"definition","code":"automation_unknown_field"},
-{"file":"invalid/run-bad-key.json","kind":"run","code":"automation_invalid"}
+{"file":"invalid/run-bad-key.json","kind":"run","code":"automation_invalid"},
+{"file":"invalid/support-followup-gated.json","kind":"create","code":"automation_trigger_unsupported"},
+{"file":"invalid/reminder-delegate.json","kind":"create","code":"automation_invalid"},
+{"file":"invalid/reminder-ttl.json","kind":"create","code":"automation_invalid"},
+{"file":"invalid/reminder-auth-ref.json","kind":"create","code":"automation_invalid"},
+{"file":"invalid/patch-unknown-param.json","kind":"patch","code":"automation_unknown_field"},
+{"file":"invalid/patch-oversized-text.json","kind":"patch","code":"automation_invalid"},
+{"file":"invalid/patch-secret-text.json","kind":"patch","code":"automation_invalid"},
+{"file":"invalid/patch-trigger-schedule.json","kind":"patch","code":"automation_trigger_unsupported"},
+{"file":"invalid/patch-reminder-ttl.json","kind":"patch","code":"automation_invalid"},
+{"file":"invalid/patch-support-ttl.json","kind":"patch","code":"automation_support_constraint","template":"support.diagnostic-followup.v1"},
+{"file":"invalid/patch-support-fires.json","kind":"patch","code":"automation_support_constraint","template":"support.diagnostic-followup.v1"}
 ]

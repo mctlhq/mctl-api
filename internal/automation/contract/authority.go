@@ -57,11 +57,11 @@ type InstallState int
 
 // Install states.
 const (
-	InstallNotRequired InstallState = iota
+	InstallUnknown InstallState = iota // zero value: never allowed
+	InstallNotRequired
 	InstallLive
 	InstallRevoked
 	InstallExpired
-	InstallUnknown
 )
 
 // ApprovalBinding is the execution an aar_ is bound to.
@@ -110,6 +110,9 @@ func deny(c Code) Decision { return Decision{Code: c} }
 // is NOT wired to governance.Revalidate or any store, and it has no
 // production caller. Wiring is for later slices.
 func Decide(cp Checkpoint, in Inputs) Decision {
+	if cp < CheckpointCreateUpdate || cp > CheckpointSideEffect {
+		return deny(CodeInvalid)
+	}
 	if len(in.Unavailable) > 0 {
 		return deny(CodeAuthorityUnavailable)
 	}
@@ -127,14 +130,12 @@ func Decide(cp Checkpoint, in Inputs) Decision {
 	if in.BudgetNeeded > in.HeadroomPerRun || in.BudgetNeeded > in.HeadroomPerDay || in.BudgetNeeded > in.HeadroomPerTenant {
 		return deny(CodeBudgetExhausted)
 	}
-	if in.ScheduleAsApproval || (in.Approval != nil && in.Approval.ExecutionID != in.ThisExecutionID) {
+	if in.ScheduleAsApproval || (in.Approval != nil &&
+		(in.Approval.ExecutionID == "" || in.ThisExecutionID == "" || in.Approval.ExecutionID != in.ThisExecutionID)) {
 		return deny(CodeApprovalNotReusable)
 	}
 	if cp == CheckpointSideEffect && in.ApprovalRequired && in.Approval == nil {
 		return deny(CodeApprovalRequired)
-	}
-	if cp < CheckpointCreateUpdate || cp > CheckpointSideEffect {
-		return deny(CodeInvalid)
 	}
 	return Decision{Allowed: true}
 }

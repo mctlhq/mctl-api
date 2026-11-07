@@ -22,8 +22,9 @@ import (
 	_ "time/tzdata"
 )
 
-// mvpTriggers is the MVP gate: only the "at" trigger is enabled.
-var mvpTriggers = []string{"at"}
+// mvpTriggers is the MVP gate on (template, kind) pairs: only reminder.v1
+// with "at" is enabled. Support templates are not enabled yet.
+var mvpTriggers = map[string][]string{"reminder.v1": {"at"}}
 
 var offsetOnlyZone = regexp.MustCompile(`^(UTC|GMT)?[+-]?[0-9]`)
 
@@ -32,7 +33,7 @@ var offsetOnlyZone = regexp.MustCompile(`^(UTC|GMT)?[+-]?[0-9]`)
 // time resolution (zone, DST gap and fold).
 func CheckTrigger(trig map[string]any, tmpl Template) error {
 	k, _ := trig["kind"].(string)
-	if !slices.Contains(mvpTriggers, k) || !slices.Contains(tmpl.AllowedTriggers, k) {
+	if !slices.Contains(mvpTriggers[tmpl.ID], k) || !slices.Contains(tmpl.AllowedTriggers, k) {
 		return fail(CodeTriggerUnsupported, "trigger kind %q", k)
 	}
 	if k == "event" {
