@@ -197,3 +197,11 @@ func TestDevLoopApprovalRead_RouteIsWiredBehindAuth(t *testing.T) {
 		t.Fatalf("GET = %d %s, authenticated = %v; want the handler's 503 behind auth", rec.Code, rec.Body.String(), authenticated)
 	}
 }
+
+// mctl_get_dev_loop_approval treats this literal as proven absence. Renaming
+// the code would turn every real absence into "unknown" without any error.
+func TestDevLoopApprovalRead_AbsenceCodeIsTheToolContract(t *testing.T) {
+	if devLoopCodeGrantMissing != "approval_grant_missing" {
+		t.Fatalf("devLoopCodeGrantMissing = %q; update mctl_get_dev_loop_approval too", devLoopCodeGrantMissing)
+	}
+}

@@ -3332,7 +3332,7 @@ func (s *Server) toolGetDevLoopApproval() (mcplib.Tool, server.ToolHandlerFunc) 
 
 Returns: workflow_id, approval (id, state, artifact_hash, expires_at and the rest of the grant) and decision_context (context_digest, context_complete, missing_fields). This is the newest grant of the run's one open execution, in any state; superseded grants are not returned because they cannot be decided.
 
-The binding_* arguments of mctl_approve_dev_loop come from here: binding_approval_ref = approval.id, binding_context_digest = decision_context.context_digest, binding_content_digest = approval.artifact_hash. A parked loop can supersede its grant at any time, so read it right before deciding; only a grant in state "pending" with context_complete true can be approved.
+The binding_* arguments of mctl_approve_dev_loop come from here: binding_approval_ref = approval.id, binding_context_digest = decision_context.context_digest, binding_content_digest = approval.artifact_hash. A parked loop can supersede its grant at any time, so read it right before deciding; only a grant in state "pending" with context_complete true can be newly approved. For a grant already in state "approved" (re-sending after a lost signal), the approve compares against the digest recorded at the decision, so use approval.decided_context_digest as binding_context_digest there.
 
 An error that says the grant state is UNKNOWN means the read failed, not that no grant is pending. Only the error that says no approval grant exists is proven absence.
 
