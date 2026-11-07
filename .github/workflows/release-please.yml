@@ -16,6 +16,9 @@ concurrency:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       # release-please has to open the release PR as somebody. The default
       # GITHUB_TOKEN cannot: "Allow GitHub Actions to create and approve pull
@@ -47,29 +50,35 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      # Uses mctl-agents, the backend-only automation App — deliberately
-      # NOT MCTL App (APP_CLIENT_ID). MCTL App is the App customers install
-      # themselves from mctl.ai/#request-access, and it is being narrowed to
-      # contents:read + metadata:read so its published least-privilege
-      # description is actually true (mctlhq/mctl-gitops#761). A GitHub App's
-      # permissions apply to every installation alike, so anything needing
-      # write — like actions:write on mctl-gitops to dispatch below — has to
-      # live on the internal App instead.
-      - name: Generate Platform App token
-        if: ${{ steps.release.outputs.release_created == 'true' }}
+  # Split from release-please so the dispatch key lives in a main-only
+  # environment (app-dispatch) that no other step can reach, and so the
+  # release-token mint above stays on the old App until Stage 5
+  # (mctlhq/mctl-gitops#1033). Runs only on push to main, so the environment's
+  # main-only branch policy never blocks it.
+  dispatch:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    environment: app-dispatch
+    permissions: {}
+    steps:
+      # The mctl-gitops-dispatch App: actions:write + metadata:read, installed
+      # on mctl-gitops only. It replaces the org-wide mctl-agents App for the
+      # dispatch below (mctlhq/mctl-gitops#761, #1033).
+      - name: Generate dispatch token
         id: app
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
-          client-id: ${{ vars.AGENTS_APP_CLIENT_ID }}
-          private-key: ${{ secrets.AGENTS_APP_PRIVATE_KEY }}
+          client-id: ${{ vars.DISPATCH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.DISPATCH_APP_PRIVATE_KEY }}
           owner: mctlhq
           repositories: mctl-gitops
+          permission-actions: write
 
       - name: Dispatch centralized release-deploy
-        if: ${{ steps.release.outputs.release_created == 'true' }}
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
-          TAG: ${{ steps.release.outputs.tag_name }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
         run: |
           gh workflow run release-deploy.yaml \
             --repo mctlhq/mctl-gitops \
@@ -82,13 +91,18 @@ jobs:
             -f component_name=mctl-api \
             -f values_path=platform-gitops/bootstrap/templates/mctl-platform/mctl-api.yaml
 
+  notify-failure:
+    needs: [release-please, dispatch]
+    if: ${{ always() && needs.release-please.outputs.release_created == 'true' && (needs.release-please.result == 'failure' || needs.dispatch.result == 'failure') }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
       - name: Notify Telegram on release/deploy failure
-        if: ${{ failure() && steps.release.outputs.release_created == 'true' }}
         uses: appleboy/telegram-action@214f06cfa3d3a588c1472116889437e7c6fd29b1 # v1.1.1
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           message: |
             ❌ *mctl-api release-deploy dispatch failed*
-            Tag `${{ steps.release.outputs.tag_name }}` was created but the centralized deploy did not dispatch.
+            Tag `${{ needs.release-please.outputs.tag_name }}` was created but the centralized deploy did not dispatch.
             Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
