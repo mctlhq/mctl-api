@@ -1193,3 +1193,43 @@ func TestStartDevLoopWorkflow_RunningLoopNeverReadsTheMarker(t *testing.T) {
 func (f *fakeDevLoopClient) DescribeDevLoopRun(ctx context.Context, workflowID, runID string) (*temporalclient.DevLoopExecution, error) {
 	return f.DescribeDevLoopExecution(ctx, workflowID)
 }
+
+// A shepherd run token reads dev-loop liveness; no other run token does, and
+// the read does not open the dev-loop writes (mctlhq/mctl-gitops#1980).
+func TestGetDevLoopWorkflow_ShepherdScopeOnly(t *testing.T) {
+	const wf = "dev-loop-mctlhq-mctl-telegram-1"
+	for name, c := range map[string]struct {
+		user *auth.User
+		want int
+	}{
+		"shepherd scope":  {auth.NewAgentUser("shepherd", auth.AgentRun{Agent: "shepherd", Scope: auth.AgentScopeShepherd}), http.StatusOK},
+		"implement scope": {auth.NewAgentUser("implementer", auth.AgentRun{Agent: "implementer", Scope: auth.AgentScopeImplement}), http.StatusForbidden},
+		"unscoped agent":  {auth.NewAgentUser("shepherd", auth.AgentRun{Agent: "shepherd"}), http.StatusForbidden},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := &Handlers{opts: Options{TemporalClient: &fakeDevLoopClient{describeStatus: "Running"}}}
+			req := httptest.NewRequest("GET", "/api/v1/agents/dev-loop/"+wf, nil)
+			req = withChiParam(req, "workflow_id", wf)
+			req = req.WithContext(auth.WithUser(req.Context(), c.user))
+			rec := httptest.NewRecorder()
+			h.GetDevLoopWorkflow(rec, req)
+			if rec.Code != c.want {
+				t.Fatalf("expected %d, got %d: %s", c.want, rec.Code, rec.Body.String())
+			}
+		})
+	}
+
+	t.Run("shepherd scope cannot write", func(t *testing.T) {
+		fake := &fakeDevLoopClient{describeStatus: "Running"}
+		h := &Handlers{opts: Options{TemporalClient: fake}}
+		user := auth.NewAgentUser("shepherd", auth.AgentRun{Agent: "shepherd", Scope: auth.AgentScopeShepherd})
+		req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/"+wf+"/abandon", strings.NewReader(`{}`))
+		req = withChiParam(req, "workflow_id", wf)
+		req = req.WithContext(auth.WithUser(req.Context(), user))
+		rec := httptest.NewRecorder()
+		h.AbandonDevLoopWorkflow(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+}

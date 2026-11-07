@@ -480,3 +480,50 @@ func TestReviewScope_RoutesToolsAndMinting(t *testing.T) {
 		t.Error("a review run reaches a tenant or is admin")
 	}
 }
+
+// The shepherd scope (mctlhq/mctl-gitops#1980) reaches the dev-loop liveness
+// read and whoami and nothing else: not the dev-loop writes, no MCP endpoint,
+// no tool, and no tenant.
+func TestShepherdScope_RoutesAndTools(t *testing.T) {
+	s, ok := LookupAgentScope(AgentScopeShepherd)
+	if !ok {
+		t.Fatal("shepherd scope not defined")
+	}
+	for _, c := range []struct {
+		method, path string
+		want         bool
+	}{
+		{http.MethodGet, "/api/v1/whoami", true},
+		{http.MethodGet, "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-api-1", true},
+		{http.MethodPost, "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-api-1", false},
+		{http.MethodPost, "/api/v1/agents/dev-loop/start", false},
+		{http.MethodPost, "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-api-1/approve", false},
+		{http.MethodPost, "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-api-1/abandon", false},
+		{http.MethodGet, "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-api-1/approve", false},
+		{http.MethodGet, "/api/v1/agents/dev-loop/", false},
+		{http.MethodGet, "/api/v1/agents/dev-loop", false},
+		{http.MethodGet, "/api/v1/action-approvals/aar_1", false},
+		{http.MethodGet, "/api/v1/tenants", false},
+		{http.MethodGet, "/api/v1/work-items/wi_a", false},
+		{http.MethodGet, "/api/v1/workflows", false},
+		{http.MethodPost, "/api/v1/operations/deploy-service/execute", false},
+		{http.MethodPost, "/api/v1/agent-run-tokens", false},
+		{http.MethodPost, "/mcp", false},
+		{http.MethodGet, "/mcp", false},
+	} {
+		if got := s.AllowsRoute(c.method, c.path, "wi_a", "we_1"); got != c.want {
+			t.Errorf("AllowsRoute(%s %s) = %v, want %v", c.method, c.path, got, c.want)
+		}
+	}
+	for _, tool := range []string{"mctl_whoami", "whoami", "mctl_get_dev_loop", "mctl_list_services", "mctl_deploy_service", ""} {
+		if s.AllowsTool(tool) || s.AllowsToolCall(tool, nil, "acme") {
+			t.Errorf("shepherd scope allows tool %q", tool)
+		}
+	}
+	if !s.AdmitsAgent("shepherd") || s.AdmitsAgent("implementer") || s.AdmitsAgent("") {
+		t.Error("shepherd scope must be minted for the shepherd agent only")
+	}
+	if s.ReadAllTenants || s.BoundTenant || s.MintByTenantMember {
+		t.Error("shepherd scope must read no tenant and be minted by the service principal only")
+	}
+}
