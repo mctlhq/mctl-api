@@ -18,6 +18,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/k8s"
 	"github.com/mctlhq/mctl-api/internal/operations"
+	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
 // AgentRunBinder verifies an agent pod's projected ServiceAccount token.
@@ -47,6 +48,8 @@ const (
 	artCodeExchangeRefused     = "agent_run_exchange_refused"
 	artCodeRunEnded            = "agent_run_ended"
 	artCodeNotARunToken        = "not_an_agent_run_token"
+	artCodeGrantNotFound       = "agent_run_grant_not_found"
+	artCodeGrantUnusable       = "agent_run_grant_unusable"
 )
 
 // ExchangeAgentRunToken handles POST /api/v1/agent-run-tokens/exchange. The
@@ -105,12 +108,47 @@ func (h *Handlers) ExchangeAgentRunToken(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	grantID := ""
+	if binding.GrantTarget != "" {
+		if grantID, ok = h.resolveRunGrant(w, r, iss, binding); !ok {
+			return
+		}
+	}
+
 	h.issueAgentRunToken(w, r, iss, agentRunTokenBody{
 		Agent: binding.Agent, ExecutionID: binding.ExecutionID, Scope: binding.Scope,
-		WithoutExecution: binding.ExecutionID == "",
+		WithoutExecution: binding.ExecutionID == "", GrantID: grantID,
 	}, ttl, map[string]string{
 		"pod": binding.Pod, "workflow": binding.Workflow, "template": binding.Template,
 	})
+}
+
+// resolveRunGrant finds the one DevLoop grant a run submitted for a proposal
+// may act on: the newest one spent for that <service>/<slug>, requested by the
+// control worker, decided by a human, bound to proposal content. A store that
+// answers with none, or with one that fails a check, is a refusal; a store
+// that cannot answer is 503, never a refusal and never a token. It refuses
+// (and has answered) when ok is false.
+func (h *Handlers) resolveRunGrant(w http.ResponseWriter, r *http.Request, iss agentRunIssuer, binding *k8s.AgentRunBinding) (string, bool) {
+	ctx, cancel := context.WithTimeout(r.Context(), agentRunBindTimeout)
+	defer cancel()
+	a, err := h.opts.WorkItems.NewestSpentActionApproval(ctx, devLoopApprovalKind, binding.GrantTarget, principalOf(auth.NewServiceUser()))
+	switch {
+	case errors.Is(err, workitems.ErrApprovalNotFound):
+		h.auditAgentRunTokenRefusalBy(r, iss, binding.Agent, artCodeGrantNotFound)
+		writeErrorCode(w, http.StatusForbidden, artCodeGrantNotFound, "no decided grant has been spent for "+binding.GrantTarget, nil)
+		return "", false
+	case err != nil:
+		slog.Error("agent run token exchange: grant read failed", "target", binding.GrantTarget, "error", err)
+		writeErrorCode(w, http.StatusServiceUnavailable, artCodeExchangeUnavailable, "the run's grant could not be read", nil)
+		return "", false
+	}
+	if _, human := approverName(a.DecidedBy); !human || !contentDigestRE.MatchString(a.ArtifactHash) {
+		h.auditAgentRunTokenRefusalBy(r, iss, binding.Agent, artCodeGrantUnusable)
+		writeErrorCode(w, http.StatusForbidden, artCodeGrantUnusable, "the newest grant for "+binding.GrantTarget+" has no human decider or no content digest", nil)
+		return "", false
+	}
+	return a.ID, true
 }
 
 // RevokeOwnAgentRunToken handles POST /api/v1/agent-run-tokens/self/revoke:

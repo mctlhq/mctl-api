@@ -258,3 +258,38 @@ func TestMintAgentRunToken_TenantBindingRoundTrips(t *testing.T) {
 		t.Errorf("unbound token resolved as %+v, %v", run, err)
 	}
 }
+
+// A pin travels with the token, and only a token bound to no execution can
+// carry one.
+func TestMintAgentRunToken_GrantPin(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	_, exec := openExecution(t, s, PhaseRunning)
+	if _, _, err := s.MintAgentRunToken(ctx, MintAgentRunTokenInput{
+		Agent: "implementer", Scope: "implement-grant", ExecutionID: exec.ID, GrantID: "aar_1",
+	}); !errors.Is(err, ErrAgentRunTokenBinding) {
+		t.Fatalf("pin on an execution-bound token: err = %v, want ErrAgentRunTokenBinding", err)
+	}
+	row, secret, err := s.MintAgentRunToken(ctx, MintAgentRunTokenInput{
+		Agent: "implementer", Scope: "implement-grant", TTL: time.Hour, WithoutExecution: true, GrantID: "aar_1",
+	})
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	if row.GrantID != "aar_1" {
+		t.Errorf("row.GrantID = %q", row.GrantID)
+	}
+	run, err := s.ResolveAgentRunToken(ctx, secret)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if run.GrantID != "aar_1" || run.ExecutionID != "" || run.WorkItemID != "" {
+		t.Errorf("resolved run = %+v", run)
+	}
+	if err := s.RevokeAgentRunToken(ctx, row.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ResolveAgentRunToken(ctx, secret); !errors.Is(err, auth.ErrAgentRunNotFound) {
+		t.Errorf("revoked pinned token: err = %v", err)
+	}
+}

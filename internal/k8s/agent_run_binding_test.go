@@ -248,3 +248,77 @@ func TestAgentRunBinder_RequiresAnAudience(t *testing.T) {
 		}
 	}
 }
+
+// A template with a grant-pinned scope binds a run without an execution only
+// when it names one proposal, by both service and slug. A run with an
+// execution stays on the template's ordinary scope.
+func TestAgentRunBinder_GrantPinnedRunNamesOneProposal(t *testing.T) {
+	pin := func(b *AgentRunBinder) *AgentRunBinder {
+		tmpl := b.Templates["mctl-agents-investigate"]
+		tmpl.GrantPinnedScope = "pinned"
+		b.Templates["mctl-agents-investigate"] = tmpl
+		return b
+	}
+	params := func(f *bindFixture, kv ...string) {
+		list := []any{}
+		for i := 0; i+1 < len(kv); i += 2 {
+			list = append(list, map[string]any{"name": kv[i], "value": kv[i+1]})
+		}
+		_ = unstructured.SetNestedSlice(f.wf.Object, list, "spec", "arguments", "parameters")
+	}
+
+	f := newBindFixture()
+	params(f, "execution_id", "", "service", "mctl-api", "slug", "issue-7-a.b_c")
+	got, err := pin(f.binder()).Bind(context.Background(), "sa-token")
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if got.Scope != "pinned" || got.GrantTarget != "mctl-api/issue-7-a.b_c" || got.ExecutionID != "" {
+		t.Errorf("binding = %+v", got)
+	}
+
+	f = newBindFixture()
+	params(f, "execution_id", "we_1", "service", "mctl-api", "slug", "issue-7-x")
+	got, err = pin(f.binder()).Bind(context.Background(), "sa-token")
+	if err != nil {
+		t.Fatalf("Bind with execution: %v", err)
+	}
+	if got.Scope != "investigate" || got.GrantTarget != "" || got.ExecutionID != "we_1" {
+		t.Errorf("binding with execution = %+v", got)
+	}
+
+	for name, kv := range map[string][]string{
+		"neither":         {"execution_id", ""},
+		"blank":           {"execution_id", "", "service", "", "slug", ""},
+		"service only":    {"execution_id", "", "service", "mctl-api"},
+		"slug only":       {"execution_id", "", "slug", "issue-7-x"},
+		"slash in slug":   {"execution_id", "", "service", "mctl-api", "slug", "x/issue-7-x"},
+		"slash in svc":    {"execution_id", "", "service", "mctl/api", "slug", "issue-7-x"},
+		"dot-dot service": {"execution_id", "", "service", "..", "slug", "issue-7-x"},
+		"dot slug":        {"execution_id", "", "service", "mctl-api", "slug", "."},
+		"space in slug":   {"execution_id", "", "service", "mctl-api", "slug", "issue 7"},
+		"newline in slug": {"execution_id", "", "service", "mctl-api", "slug", "issue-7\nx"},
+		"oversized slug":  {"execution_id", "", "service", "mctl-api", "slug", strings.Repeat("a", 201)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newBindFixture()
+			params(f, kv...)
+			_, err := pin(f.binder()).Bind(context.Background(), "sa-token")
+			var refusal *BindingRefusedError
+			if !errors.As(err, &refusal) || refusal.Reason != "workflow_without_grant_target" {
+				t.Errorf("err = %v, want workflow_without_grant_target", err)
+			}
+		})
+	}
+
+	// A template default is not what the run was submitted with.
+	f = newBindFixture()
+	params(f, "execution_id", "")
+	_ = unstructured.SetNestedSlice(f.wf.Object, []any{
+		map[string]any{"name": "service", "value": "mctl-api"},
+		map[string]any{"name": "slug", "value": "issue-7-x"},
+	}, "status", "storedWorkflowTemplateSpec", "arguments", "parameters")
+	if _, err := pin(f.binder()).Bind(context.Background(), "sa-token"); err == nil {
+		t.Error("a template default bound a grant target")
+	}
+}
