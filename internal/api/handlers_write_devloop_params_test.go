@@ -165,14 +165,12 @@ var devLoopSubmissions = []struct {
 		},
 	},
 	{
-		// incidents.py IncidentResponderWorkflow.
-		name:      "incident responder, pinned",
+		// incidents.py IncidentLoopWorkflow. It sends no release pin: the
+		// responder's image comes from gitops only (mctlhq/mctl-gitops#1980),
+		// see TestExecuteOperation_IncidentsStripsTheImagePin.
+		name:      "incident responder",
 		operation: "mctl-agents-incidents",
-		params: map[string]string{
-			"mode":          "incident-responder",
-			"agent_image":   pinImageByTag,
-			"agent_version": "incident-responder@1.54.0",
-		},
+		params:    map[string]string{"mode": "incident-responder"},
 	},
 	{
 		// reconcile.py ReconcileWorkflow apply.
@@ -387,4 +385,30 @@ func TestExecuteOperation_WorkItemOwnerPrincipalIDShape(t *testing.T) {
 			t.Error("an empty work_item_owner_principal_id reached the executor; it must be omitted")
 		}
 	})
+}
+
+// TestExecuteOperation_IncidentsStripsTheImagePin is the other half of the
+// row above: a release of mctl-agents that still sends the registry pin is
+// accepted, and the pin never reaches Argo, so the responder runs the image
+// gitops pins (mctlhq/mctl-gitops#1980).
+func TestExecuteOperation_IncidentsStripsTheImagePin(t *testing.T) {
+	router, exec := newTestRouter(t)
+	w := postAs(t, router, "/api/v1/operations/mctl-agents-incidents/execute", map[string]string{
+		"mode":          "incident-responder",
+		"agent_image":   pinImageByTag,
+		"agent_version": "incident-responder@1.54.0",
+	}, auth.NewServiceUser())
+	assertStatus(t, w, http.StatusAccepted)
+	if len(exec.submittedParams) == 0 {
+		t.Fatal("expected a workflow submission")
+	}
+	got := exec.submittedParams[len(exec.submittedParams)-1]
+	for _, k := range []string{"agent_image", "agent_version"} {
+		if v, ok := got[k]; ok {
+			t.Errorf("%s = %q reached the executor; the responder image must come from gitops only", k, v)
+		}
+	}
+	if got["mode"] != "incident-responder" {
+		t.Errorf("mode = %q at the executor, want incident-responder", got["mode"])
+	}
 }
