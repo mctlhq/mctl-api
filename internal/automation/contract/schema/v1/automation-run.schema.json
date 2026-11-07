@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mctl.ai/schemas/automation/v1/automation-run.schema.json",
+  "title": "AutomationRun (read-only view over one fire's wi_ -> xr_ -> we_ chain)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["occurrence_key", "automation_id", "definition_version", "work_item_id"],
+  "properties": {
+    "occurrence_key": {"type": "string", "pattern": "^occ_[0-9a-f]{32}$"},
+    "automation_id": {"type": "string", "pattern": "^au_[0-9a-f-]{36}$"},
+    "definition_version": {"type": "integer", "minimum": 1},
+    "work_item_id": {"type": "string", "pattern": "^wi_"},
+    "execution_request_id": {"type": "string", "pattern": "^xr_"},
+    "execution_id": {"type": "string", "pattern": "^we_"},
+    "fired_at": {"type": "string", "format": "date-time"},
+    "delivery_outcome": {"enum": ["delivered", "undeliverable", "unknown"]}
+  }
+}

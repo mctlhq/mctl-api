@@ -1,0 +1,1 @@
+{"idempotency_key":"k1","template_id":"reminder.v1","params":{"text":"hi"},"trigger":{"kind":"at","local":"2026-03-09T09:00:00","zone":"America/New_York","dst_gap":"reject","dst_fold":"reject"}}

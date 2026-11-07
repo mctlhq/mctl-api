@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mctl.ai/schemas/automation/v1/template-support-followup.v1.schema.json",
+  "title": "support.diagnostic-followup.v1 params",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["question_ref"],
+  "properties": {"question_ref": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.:-]+$"}}
+}

@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mctl.ai/schemas/automation/v1/trigger.schema.json",
+  "title": "Automation trigger",
+  "type": "object",
+  "required": ["kind"],
+  "properties": {"kind": {"enum": ["at", "schedule", "event", "dependency"]}},
+  "allOf": [
+    {"if": {"required": ["kind"], "properties": {"kind": {"const": "at"}}}, "then": {"$ref": "#/$defs/at"}},
+    {"if": {"required": ["kind"], "properties": {"kind": {"const": "schedule"}}}, "then": {"$ref": "#/$defs/schedule"}},
+    {"if": {"required": ["kind"], "properties": {"kind": {"const": "event"}}}, "then": {"$ref": "#/$defs/event"}},
+    {"if": {"required": ["kind"], "properties": {"kind": {"const": "dependency"}}}, "then": {"$ref": "#/$defs/dependency"}}
+  ],
+  "$defs": {
+    "at": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {"const": "at"},
+        "instant": {"type": "string", "maxLength": 64},
+        "local": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$"},
+        "zone": {"type": "string", "minLength": 1, "maxLength": 64},
+        "dst_gap": {"enum": ["shift_forward", "reject"]},
+        "dst_fold": {"enum": ["earlier", "later", "reject"]}
+      },
+      "oneOf": [
+        {"required": ["instant"], "not": {"anyOf": [{"required": ["local"]}, {"required": ["zone"]}, {"required": ["dst_gap"]}, {"required": ["dst_fold"]}]}},
+        {"required": ["local", "zone", "dst_gap", "dst_fold"], "not": {"required": ["instant"]}}
+      ]
+    },
+    "schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "cron", "zone"],
+      "properties": {
+        "kind": {"const": "schedule"},
+        "cron": {"type": "string", "minLength": 1, "maxLength": 128},
+        "zone": {"type": "string", "minLength": 1, "maxLength": 64}
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source", "event"],
+      "properties": {
+        "kind": {"const": "event"},
+        "source": {"type": "string", "minLength": 1, "maxLength": 64},
+        "event": {"type": "string", "minLength": 1, "maxLength": 64}
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "depends_on"],
+      "properties": {
+        "kind": {"const": "dependency"},
+        "depends_on": {"type": "string", "pattern": "^au_[0-9a-f-]{36}$"}
+      }
+    }
+  }
+}
