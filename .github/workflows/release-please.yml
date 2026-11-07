@@ -93,7 +93,7 @@ jobs:
 
   notify-failure:
     needs: [release-please, dispatch]
-    if: ${{ always() && needs.release-please.outputs.release_created == 'true' && (needs.release-please.result == 'failure' || needs.dispatch.result == 'failure') }}
+    if: ${{ always() && needs.release-please.outputs.release_created == 'true' && contains(fromJSON('["failure", "skipped"]'), needs.dispatch.result) }}
     runs-on: ubuntu-latest
     permissions: {}
     steps:
