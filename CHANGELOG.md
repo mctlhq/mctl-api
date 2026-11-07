@@ -1,5 +1,29 @@
 # Changelog
 
+## [4.155.0](https://github.com/mctlhq/mctl-api/compare/4.154.0...4.155.0) (2026-11-07)
+
+
+### Features
+
+* **agents:** issue-931-feat-workitems-queue-an-execution-reques ([f72a470](https://github.com/mctlhq/mctl-api/commit/f72a470d1a6ac12eee8ad6223f633adf666dce49))
+* **agents:** issue-931-feat-workitems-queue-an-execution-reques ([23734bf](https://github.com/mctlhq/mctl-api/commit/23734bf7284d6f18f9a3acf58e8f930cee791372))
+* **agents:** pin an implementer run token to one grant ([425dd1b](https://github.com/mctlhq/mctl-api/commit/425dd1b55481dc2b677ed4f8e16eebfce07ed649))
+* **agents:** pin an implementer run token to one grant ([4649d90](https://github.com/mctlhq/mctl-api/commit/4649d9034cc5c26ce16a33a83e564412a586edaa))
+* **auth:** add read-only shepherd run token scope ([2c485a6](https://github.com/mctlhq/mctl-api/commit/2c485a6d4de942dced18ab88588c5684c4a85855))
+* **auth:** add read-only shepherd run token scope ([658b5c6](https://github.com/mctlhq/mctl-api/commit/658b5c65b36e4e3d80be21654ced7d9e4d691b0b))
+* **mcp:** enable review assertion on the shared portal ([4ddd995](https://github.com/mctlhq/mctl-api/commit/4ddd99590b8718bc9428f350025ae14494e9ad70))
+* **mcp:** enable review assertion on the shared portal ([30ae621](https://github.com/mctlhq/mctl-api/commit/30ae62195d9308bfcc1675a92a9d0af03289d684))
+* **mcp:** read a DevLoop's approval grant by workflow id ([a0d4f0e](https://github.com/mctlhq/mctl-api/commit/a0d4f0e3195cd732c5bfb9b9d19b7d94ab5ebcb1))
+* **mcp:** read a DevLoop's approval grant by workflow id ([1dde2bd](https://github.com/mctlhq/mctl-api/commit/1dde2bd579506d23df549c91a485abce6a1514dd))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-931-feat-workitems-queue-an-execution-reques ([524acf6](https://github.com/mctlhq/mctl-api/commit/524acf6cfb2f3d2074e07a8cb7a2d5ec49529847))
+* **agents:** address P1/P2 codex findings on issue-931-feat-workitems-queue-an-execution-reques ([99325ae](https://github.com/mctlhq/mctl-api/commit/99325aededbc2bc8bcf830b42fb5c0c30bdeffd5))
+* **agents:** address P1/P2 codex findings on issue-931-feat-workitems-queue-an-execution-reques ([b44d007](https://github.com/mctlhq/mctl-api/commit/b44d0075aa3fb22fb0d6c83b3d79cc24f0081f74))
+* **mcp:** name the decided digest for an already approved grant ([fcfe6a9](https://github.com/mctlhq/mctl-api/commit/fcfe6a97568847a76e47ead2e583ef68cb0e43b2))
+
 ## [4.154.0](https://github.com/mctlhq/mctl-api/compare/4.153.0...4.154.0) (2026-11-03)
 
 
