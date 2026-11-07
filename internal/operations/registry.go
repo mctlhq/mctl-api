@@ -796,12 +796,18 @@ var builtinOperations = []Operation{
 		MinRole:          RoleAdmin,
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/incident-{id}/"},
-		Parameters: append([]ParameterDef{
+		Parameters: []ParameterDef{
 			{Name: "mode", Type: "string", Required: false, Default: "incident-responder", Description: "Run mode (locked to 'incident-responder')", Enum: []string{"incident-responder"}},
 			{Name: "service", Type: "string", Required: false, Default: "", Description: "Unused for incident-responder mode", Enum: mctlAgentsServiceEnum},
-			// Release pin (mctlhq/mctl-api#372): mctl-agents' IncidentResponderWorkflow
-			// sends it; cwft-mctl-agents-run declares both.
-		}, agentPinParams("incident-responder")...),
+			// No release pin, unlike the other mctl-agents operations. The
+			// responder is the one mctl-agents-run template holding
+			// MCTL_TOKEN, and every release before its session was built
+			// without Bash still has a shell, so its image comes only from
+			// a literal in gitops (mctlhq/mctl-gitops#1980). Leaving
+			// agent_image and agent_version undeclared means StripUndeclared
+			// drops them: an mctl-agents release that still sends the
+			// registry pin keeps working and runs the gitops image.
+		},
 	},
 	{
 		// Tier 2 implementer — turns accepted proposals into PRs in sibling
