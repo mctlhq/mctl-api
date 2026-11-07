@@ -1,0 +1,6 @@
+state/
+*.sqlite
+*.sqlite-journal
+*.sqlite.lock/
+*-bundle.json
+.env
