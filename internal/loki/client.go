@@ -24,7 +24,18 @@ import (
 	"sort"
 	"strconv"
 	"time"
+	"unicode/utf8"
 )
+
+// maxErrorBody is the most upstream error-body bytes carried into a returned
+// error. The error reaches logs and MCP tool results, so a misbehaving or
+// hostile upstream must not be able to inflate it, nor make us read a huge
+// body just to build a message.
+const maxErrorBody = 512
+
+// truncatedMarker follows the kept bytes when the upstream body was longer
+// than maxErrorBody.
+const truncatedMarker = "... [truncated]"
 
 // LogLine represents a single log entry with its timestamp.
 type LogLine struct {
@@ -88,15 +99,37 @@ func (c *Client) query(ctx context.Context, logQL string, limit int, since time.
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
+	// Status first: a non-200 body is only needed for the message, so it is
+	// read bounded, before (and instead of) the unbounded success read.
+	if resp.StatusCode != http.StatusOK {
+		return nil, httpStatusError(resp.StatusCode, resp.Body)
+	}
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("loki: read response: %w", err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("loki: HTTP %d: %s", resp.StatusCode, string(body))
-	}
 
 	return parseLokiResponse(body)
+}
+
+// httpStatusError builds the error for a non-200 response. It reads at most
+// maxErrorBody+1 bytes: the extra byte is what tells a body of exactly
+// maxErrorBody bytes from a longer one. A longer body is cut to maxErrorBody
+// bytes (never in the middle of a UTF-8 sequence) and marked as truncated.
+func httpStatusError(status int, r io.Reader) error {
+	buf, err := io.ReadAll(io.LimitReader(r, maxErrorBody+1))
+	if err != nil {
+		return fmt.Errorf("loki: HTTP %d: read error body: %w", status, err)
+	}
+	if len(buf) <= maxErrorBody {
+		return fmt.Errorf("loki: HTTP %d: %s", status, buf)
+	}
+	cut := maxErrorBody
+	for cut > 0 && !utf8.RuneStart(buf[cut]) {
+		cut--
+	}
+	return fmt.Errorf("loki: HTTP %d: %s%s", status, buf[:cut], truncatedMarker)
 }
 
 // lokiResponse is the shape of a Loki query_range response.
