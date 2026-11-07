@@ -777,3 +777,58 @@ func TestReserveActionApprovalRefusesAStaleReceipt(t *testing.T) {
 		t.Fatalf("staleness of an undated receipt = %v", err)
 	}
 }
+
+// The newest spent request of a kind, target and requester answers; nothing
+// unspent does, and neither does anything of another kind, target or
+// requester. A read that fails is not an absence.
+func TestNewestSpentActionApproval(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	const kind, target = "github.merge_pr", "mctlhq/mctl-api#1"
+	newest := func() (*ActionApprovalRequest, error) {
+		return s.NewestSpentActionApproval(ctx, kind, target, agentPrincipal)
+	}
+	if _, err := newest(); !errors.Is(err, ErrApprovalNotFound) {
+		t.Fatalf("empty store: err = %v", err)
+	}
+	createApproval(t, s, approvalInput(s, "pending"))
+	approved(t, s, "approved")
+	if _, err := newest(); !errors.Is(err, ErrApprovalNotFound) {
+		t.Fatalf("nothing spent: err = %v", err)
+	}
+	first := consumed(t, s, "first")
+	if a, err := newest(); err != nil || a.ID != first.ID {
+		t.Fatalf("one spent: %+v %v", a, err)
+	}
+	if _, err := s.MarkActionApprovalExecuted(ctx, first.ID, first.Target, first.ArtifactHash, first.RequestedBy); err != nil {
+		t.Fatal(err)
+	}
+	if a, err := newest(); err != nil || a.ID != first.ID || a.State != ApprovalExecuted {
+		t.Fatalf("executed still answers: %+v %v", a, err)
+	}
+	second := consumed(t, s, "second")
+	if a, err := newest(); err != nil || a.ID != second.ID {
+		t.Fatalf("newest wins: %+v %v, want %s", a, err, second.ID)
+	}
+	approved(t, s, "newer-but-unspent")
+	if a, err := newest(); err != nil || a.ID != second.ID {
+		t.Fatalf("an unspent newer request answered: %+v %v", a, err)
+	}
+	for name, q := range map[string][3]string{
+		"kind":      {"other.kind", target, agentPrincipal},
+		"target":    {kind, "mctlhq/mctl-api#2", agentPrincipal},
+		"requester": {"", "", ""},
+	} {
+		if name == "requester" {
+			q = [3]string{kind, target, "service:someone-else"}
+		}
+		if _, err := s.NewestSpentActionApproval(ctx, q[0], q[1], q[2]); !errors.Is(err, ErrApprovalNotFound) {
+			t.Errorf("other %s: err = %v", name, err)
+		}
+	}
+	gone, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := s.NewestSpentActionApproval(gone, kind, target, agentPrincipal); err == nil || errors.Is(err, ErrApprovalNotFound) {
+		t.Errorf("failed read: err = %v, want an error that is not an absence", err)
+	}
+}

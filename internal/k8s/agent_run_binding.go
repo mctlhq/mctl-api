@@ -37,6 +37,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -62,6 +63,10 @@ const (
 	workflowLabel = "workflows.argoproj.io/workflow"
 	// executionParam is the Workflow parameter carrying the run's execution.
 	executionParam = "execution_id"
+	// serviceParam and slugParam name the one proposal a run was submitted
+	// for.
+	serviceParam = "service"
+	slugParam    = "slug"
 	// clusterTimeout bounds every read Bind makes. The exchange route is
 	// unauthenticated, so a slow API server must not hold its requests.
 	clusterTimeout = 10 * time.Second
@@ -77,6 +82,15 @@ var apiServerAudiences = map[string]bool{
 	"api":                                          true,
 }
 
+// grantServiceRE and grantSlugRE hold what a run without an execution names
+// to a shape with no separator in it, so a service and a slug can only ever
+// join into one <service>/<slug> target: "a/b" + "c" and "a" + "b/c" are both
+// refused rather than read as the same proposal.
+var (
+	grantServiceRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$`)
+	grantSlugRE    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$`)
+)
+
 var workflowGVR = schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "workflows"}
 
 // AgentRunTemplate is what one ClusterWorkflowTemplate's runs may become.
@@ -86,6 +100,12 @@ type AgentRunTemplate struct {
 	// AllowWithoutExecution binds a run with no execution_id too, to no
 	// execution and no work item.
 	AllowWithoutExecution bool
+	// GrantPinnedScope is the scope of a run submitted with no execution_id
+	// but naming one proposal, by both service and slug. The binding then
+	// carries that <service>/<slug> as GrantTarget, and the exchange pins the
+	// token to that proposal's human-decided grant. A run that names neither,
+	// or only one, is refused. Scope still applies to a run with an execution.
+	GrantPinnedScope string
 }
 
 // AgentRunBinding is a verified agent pod's run.
@@ -102,6 +122,9 @@ type AgentRunBinding struct {
 	// Deadline is when the Workflow's activeDeadlineSeconds runs out; zero
 	// when it has none.
 	Deadline time.Time
+	// GrantTarget is the <service>/<slug> a grant-pinned run was submitted
+	// for, read from its submitted arguments. Empty on every other run.
+	GrantTarget string
 }
 
 // BindingRefusedError is a token or pod that does not bind to an agent run.
@@ -242,12 +265,22 @@ func (b *AgentRunBinder) Bind(ctx context.Context, token string) (*AgentRunBindi
 		return nil, refused("workflow_template_not_allowed")
 	}
 	execID := workflowParam(wf, executionParam)
-	if execID == "" && !tmpl.AllowWithoutExecution {
-		return nil, refused("workflow_without_execution")
+	scope, grantTarget := tmpl.Scope, ""
+	if execID == "" {
+		switch {
+		case tmpl.GrantPinnedScope != "":
+			service, slug := workflowParam(wf, serviceParam), workflowParam(wf, slugParam)
+			if !grantServiceRE.MatchString(service) || !grantSlugRE.MatchString(slug) {
+				return nil, refused("workflow_without_grant_target")
+			}
+			scope, grantTarget = tmpl.GrantPinnedScope, service+"/"+slug
+		case !tmpl.AllowWithoutExecution:
+			return nil, refused("workflow_without_execution")
+		}
 	}
 
 	return &AgentRunBinding{
-		Agent: tmpl.Agent, Scope: tmpl.Scope, ExecutionID: execID,
+		Agent: tmpl.Agent, Scope: scope, ExecutionID: execID, GrantTarget: grantTarget,
 		Namespace: ns, ServiceAccount: sa, Pod: podName, Workflow: wfName, Template: tmplName,
 		Deadline: workflowDeadline(wf),
 	}, nil

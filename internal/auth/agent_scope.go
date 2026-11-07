@@ -48,6 +48,14 @@ const AgentScopeInvestigate = "investigate"
 // execute.
 const AgentScopeImplement = "implement"
 
+// AgentScopeImplementGrant is the scope of an implementer run that has no
+// execution (the sweep, a manual trigger; mctlhq/mctl-gitops#1980): the same
+// reads as implement, and only the read and the execute of the one DevLoop
+// grant its token is pinned to at the exchange. It can neither request nor
+// spend an approval, and it binds no work item. The pin lives in the handlers
+// (isPinnedAgentGrant), so this scope is only as strong as that binding.
+const AgentScopeImplementGrant = "implement-grant"
+
 // AgentScopeSupport is the scope of a tenant support run: reads of exactly
 // one tenant, the one the token was minted for, and nothing else.
 const AgentScopeSupport = "support"
@@ -76,9 +84,13 @@ type AgentScope struct {
 	// work item and execution: the tenant check is not where a scoped run's
 	// writes are stopped. The binding lives either in the route list
 	// (BindWorkItem / BindExecution) or, for the action-approval writes of
-	// the implement scope, in the handlers (boundAgentExecution,
-	// isAgentOwnApproval). A route list alone is not the whole binding.
+	// the implement scopes, in the handlers (boundAgentExecution,
+	// isAgentOwnApproval, isPinnedAgentGrant). A route list alone is not the
+	// whole binding.
 	ReadAllTenants bool
+	// PinnedGrant means a token with this scope is minted for exactly one
+	// DevLoop grant, which only the exchange can name.
+	PinnedGrant bool
 	// BoundTenant means a token with this scope is minted for exactly one
 	// tenant and every check compares against it. Mutually exclusive with
 	// ReadAllTenants.
@@ -293,6 +305,18 @@ var agentScopes = map[string]*AgentScope{
 				Pattern: regexp.MustCompile(`^/api/v1/work-items/([^/]+)(/.*)?$`),
 			}),
 			agentApprovalRoutes...),
+	},
+	AgentScopeImplementGrant: {
+		Name:           AgentScopeImplementGrant,
+		Agents:         []string{"implementer"},
+		ReadAllTenants: true,
+		PinnedGrant:    true,
+		Tool:           IsReadTool,
+		Deny:           agentDeniedRoutes,
+		Routes: append(append(append([]AgentScopeRoute(nil), mcpRoutes...), agentPlatformReads()...),
+			getRoute(`^/api/v1/action-approvals/[^/]+$`),
+			AgentScopeRoute{Method: http.MethodPost, Pattern: regexp.MustCompile(`^/api/v1/action-approvals/[^/]+/execute$`)},
+		),
 	},
 	AgentScopeReview: {
 		Name: AgentScopeReview,

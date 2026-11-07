@@ -144,14 +144,41 @@ func isAgentExecutionGrant(u *auth.User, a *workitems.ActionApprovalRequest) boo
 		a.RequestedBy == principalOf(auth.NewServiceUser())
 }
 
+// pinnedAgentGrant is the DevLoop grant a directly acting agent run token of
+// a PinnedGrant scope is pinned to (mctlhq/mctl-gitops#1980). Deliberately not
+// part of isApprovalRequester: such a run reads and marks executed that one
+// grant, and never requests or spends anything.
+func pinnedAgentGrant(u *auth.User) (string, bool) {
+	if u == nil || !u.IsAgent() {
+		return "", false
+	}
+	if _, relayed := u.RelaySurface(); relayed {
+		return "", false
+	}
+	scope, scoped := u.AgentScope()
+	if !scoped || !scope.PinnedGrant {
+		return "", false
+	}
+	id := u.PinnedGrantID()
+	return id, id != ""
+}
+
+// isPinnedAgentGrant: a is the DevLoop grant the agent run's token is pinned
+// to, requested by the control worker.
+func isPinnedAgentGrant(u *auth.User, a *workitems.ActionApprovalRequest) bool {
+	id, ok := pinnedAgentGrant(u)
+	return ok && a.ID == id && a.ActionKind == devLoopApprovalKind &&
+		a.RequestedBy == principalOf(auth.NewServiceUser())
+}
+
 // canSeeActionApproval: a human admin sees every request, the requesting
 // service its own, an agent run its own execution's own and that
-// execution's DevLoop grant.
+// execution's DevLoop grant, and a grant-pinned run that one grant.
 func canSeeActionApproval(u *auth.User, a *workitems.ActionApprovalRequest) bool {
 	if isHumanAdmin(u) {
 		return true
 	}
-	if isAgentOwnApproval(u, a) || isAgentExecutionGrant(u, a) {
+	if isAgentOwnApproval(u, a) || isAgentExecutionGrant(u, a) || isPinnedAgentGrant(u, a) {
 		return true
 	}
 	return isDirectService(u) && a.RequestedBy == principalOf(u)
@@ -545,7 +572,8 @@ func (h *Handlers) GetActionApproval(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !isHumanAdmin(user) && !isApprovalRequester(user) {
+	_, pinned := pinnedAgentGrant(user)
+	if !isHumanAdmin(user) && !isApprovalRequester(user) && !pinned {
 		writeErrorCode(w, http.StatusForbidden, aarCodeReaderForbidden, "action approvals are read by admins and their requester", nil)
 		return
 	}
@@ -771,7 +799,8 @@ func (h *Handlers) MarkActionApprovalExecuted(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
-	if !isApprovalRequester(user) {
+	_, pinned := pinnedAgentGrant(user)
+	if !isApprovalRequester(user) && !pinned {
 		h.auditActionApprovalRefusal(r, user, "action_approval.execute_refused", chi.URLParam(r, "id"), aarCodeRequesterForbidden)
 		writeErrorCode(w, http.StatusForbidden, aarCodeRequesterForbidden,
 			"only the requester, or the agent run of the execution a DevLoop grant names, may mark an action approval executed", nil)
@@ -802,7 +831,7 @@ func (h *Handlers) MarkActionApprovalExecuted(w http.ResponseWriter, r *http.Req
 	// run, so the requester the store checks is the grant's own; the run
 	// is recorded as the executor in the audit row.
 	requester := principalOf(user)
-	if isAgentExecutionGrant(user, cur) && !isAgentOwnApproval(user, cur) {
+	if (isAgentExecutionGrant(user, cur) && !isAgentOwnApproval(user, cur)) || isPinnedAgentGrant(user, cur) {
 		requester = cur.RequestedBy
 	}
 	a, err := h.opts.WorkItems.MarkActionApprovalExecuted(r.Context(), cur.ID, body.Target, body.ArtifactHash, requester)
@@ -816,6 +845,9 @@ func (h *Handlers) MarkActionApprovalExecuted(w http.ResponseWriter, r *http.Req
 	var extra []map[string]string
 	if exec, agent := boundAgentExecution(user); agent {
 		extra = append(extra, map[string]string{"bound_execution_id": exec, "agent_run_id": user.AgentRunID()})
+	}
+	if id, agent := pinnedAgentGrant(user); agent {
+		extra = append(extra, map[string]string{"pinned_grant_id": id, "agent_run_id": user.AgentRunID()})
 	}
 	h.auditActionApproval(r, user, "action_approval.execute", a, operations.RiskMedium, extra...)
 	h.writeApproval(w, http.StatusOK, a)

@@ -1105,10 +1105,16 @@ func main() {
 				// straight to Argo; those get a token bound to no work item.
 				// Drop it once mctl-agents stops accepting such runs.
 				"mctl-agents-investigate": {Agent: "issue-investigator", Scope: auth.AgentScopeInvestigate, AllowWithoutExecution: true},
-				// An implement run is execution-bound: its approvals are one
-				// execution's (mctl-agents#717 S4), so a run submitted
-				// without an execution_id is refused at the exchange.
-				"mctl-agents-implement": {Agent: "implementer", Scope: auth.AgentScopeImplement},
+				// An implement run with an execution is bound to it: its
+				// approvals are that execution's (mctl-agents#717 S4). One
+				// without an execution (the sweep, a manual trigger) must name
+				// one proposal by service and slug, and its token is pinned to
+				// that proposal's human-decided grant; naming less is refused
+				// at the exchange (mctl-gitops#1980).
+				"mctl-agents-implement": {
+					Agent: "implementer", Scope: auth.AgentScopeImplement,
+					GrantPinnedScope: auth.AgentScopeImplementGrant,
+				},
 				// A shepherd run belongs to no execution, permanently: the
 				// sweep drives many proposals. Its scope is one read, so a
 				// token bound to no work item is all it needs.

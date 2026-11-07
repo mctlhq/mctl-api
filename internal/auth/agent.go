@@ -65,6 +65,9 @@ type AgentRun struct {
 	// the principal id of the caller who minted the token. Empty otherwise.
 	Tenant      string
 	RequestedBy string
+	// GrantID is the one DevLoop grant a PinnedGrant scope may read and mark
+	// executed. Empty otherwise.
+	GrantID string
 }
 
 // AgentRunResolver resolves a presented run-token bearer secret to the
@@ -92,6 +95,7 @@ func NewAgentUser(name string, run AgentRun) *User {
 		agentScope:       run.Scope,
 		boundTenant:      run.Tenant,
 		runRequestedBy:   run.RequestedBy,
+		pinnedGrantID:    run.GrantID,
 	}
 }
 
@@ -155,4 +159,13 @@ func (u *User) AgentRunRequestedBy() string {
 		return ""
 	}
 	return u.runRequestedBy
+}
+
+// PinnedGrantID returns the DevLoop grant this principal's run token is
+// pinned to, or "" for every other principal.
+func (u *User) PinnedGrantID() string {
+	if u == nil || u.agent == "" {
+		return ""
+	}
+	return u.pinnedGrantID
 }

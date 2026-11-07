@@ -208,6 +208,8 @@ type User struct {
 	// limited to and the principal that minted the token.
 	boundTenant    string
 	runRequestedBy string
+	// pinnedGrantID is the DevLoop grant a PinnedGrant scope is pinned to.
+	pinnedGrantID string
 }
 
 // NewGitHubUser builds a principal whose ID is a GitHub-verified login.

@@ -628,6 +628,30 @@ func (s *Store) ActionApproval(ctx context.Context, id string) (*ActionApprovalR
 	return s.getActionApproval(ctx, s.pool, id, "")
 }
 
+// NewestSpentActionApproval returns the most recently spent request of this
+// kind, target and requester: consumed, or already marked executed by an
+// earlier attempt on it. ErrApprovalNotFound means the store answered and
+// holds none; any other error is a failed read, never an absence.
+//
+// Newest rather than "the only one": a proposal amended after a decision is
+// decided again, so one target can hold several spent requests, and the
+// latest decision is the one that stands. An older one is never a fallback.
+func (s *Store) NewestSpentActionApproval(ctx context.Context, actionKind, target, requestedBy string) (*ActionApprovalRequest, error) {
+	now := s.now()
+	a, err := scanActionApproval(s.pool.QueryRow(ctx, `SELECT `+actionApprovalColumns+`
+		FROM action_approval_requests
+		WHERE action_kind=$1 AND target=$2 AND requested_by=$3
+		  AND state IN ('consumed', 'executed') AND consumed_at IS NOT NULL
+		ORDER BY consumed_at DESC, id DESC LIMIT 1`, actionKind, target, requestedBy), now)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("workitems: spent action approval for %s: %w", target, ErrApprovalNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("workitems: spent action approval for %s: %w", target, err)
+	}
+	return a, nil
+}
+
 // ActionApprovalFilter narrows a listing. RequestedBy, when set, limits it
 // to one requester's requests (the HTTP layer's visibility rule).
 type ActionApprovalFilter struct {
