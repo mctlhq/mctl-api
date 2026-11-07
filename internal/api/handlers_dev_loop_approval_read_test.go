@@ -180,18 +180,20 @@ func TestDevLoopApprovalRead_ServiceSeesOnlyItsOwnGrant(t *testing.T) {
 	}
 }
 
-// The route is wired behind the API's authentication: a refusing middleware
-// answers for it, where an unrouted path would be a 404.
+// The route reaches its handler, which answers for the missing store where an
+// unrouted path would be a 404, and only through the API's authentication.
 func TestDevLoopApprovalRead_RouteIsWiredBehindAuth(t *testing.T) {
-	router := NewRouter(Options{AuthMiddleware: func(http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusUnauthorized)
+	authenticated := false
+	router := NewRouter(Options{AuthMiddleware: func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			authenticated = true
+			next.ServeHTTP(w, r)
 		})
 	}})
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/dev-loop/wf/approval", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("anonymous GET = %d %s, want 401", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusServiceUnavailable || !authenticated {
+		t.Fatalf("GET = %d %s, authenticated = %v; want the handler's 503 behind auth", rec.Code, rec.Body.String(), authenticated)
 	}
 }
