@@ -325,6 +325,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolApproveDevLoop())
 	srv.AddTool(s.toolAbandonDevLoop())
 	srv.AddTool(s.toolGetDevLoop())
+	srv.AddTool(s.toolGetDevLoopApproval())
 	srv.AddTool(s.toolGetLifecycleOwnership())
 	srv.AddTool(s.toolInspectLifecycleConflict())
 	srv.AddTool(s.toolRequestLifecycleReconcile())
@@ -3197,13 +3198,13 @@ Human admins only, acting directly: a service or agent credential is refused 403
 		),
 		// The optional binding (mctl-api#869): all three or none.
 		mcplib.WithString("binding_approval_ref",
-			mcplib.Description("Optional binding. The aar_ id of the grant you were shown. Send all three binding_* arguments or none; only that grant is decided, never the newest."),
+			mcplib.Description("Optional binding. The aar_ id of the grant you were shown (approval.id from mctl_get_dev_loop_approval). Send all three binding_* arguments or none; only that grant is decided, never the newest."),
 		),
 		mcplib.WithString("binding_context_digest",
-			mcplib.Description("Optional binding. decision_context.context_digest of that grant at render time."),
+			mcplib.Description("Optional binding. decision_context.context_digest of that grant at render time, as mctl_get_dev_loop_approval returns it."),
 		),
 		mcplib.WithString("binding_content_digest",
-			mcplib.Description("Optional binding. The grant's artifact_hash (proposal content digest) at render time."),
+			mcplib.Description("Optional binding. The grant's artifact_hash (proposal content digest) at render time: approval.artifact_hash from mctl_get_dev_loop_approval."),
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -3318,6 +3319,71 @@ Admin-only. Requires the server's Temporal client to be configured — returns 5
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to describe dev-loop workflow: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolGetDevLoopApproval() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_get_dev_loop_approval",
+		mcplib.WithTitleAnnotation("Read a DevLoopWorkflow's approval grant"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithDescription(`Read-only: the approval grant a bound mctl_approve_dev_loop of this DevLoopWorkflow would decide, so a reviewer can verify what they are about to bind to. Wraps GET /api/v1/agents/dev-loop/{workflow_id}/approval (mctl-api#936). It decides nothing and sends no signal.
+
+Returns: workflow_id, approval (id, state, artifact_hash, expires_at and the rest of the grant) and decision_context (context_digest, context_complete, missing_fields). This is the newest grant of the run's one open execution, in any state; superseded grants are not returned because they cannot be decided.
+
+The binding_* arguments of mctl_approve_dev_loop come from here: binding_approval_ref = approval.id, binding_context_digest = decision_context.context_digest, binding_content_digest = approval.artifact_hash. A parked loop can supersede its grant at any time, so read it right before deciding; only a grant in state "pending" with context_complete true can be approved.
+
+An error that says the grant state is UNKNOWN means the read failed, not that no grant is pending. Only the error that says no approval grant exists is proven absence.
+
+A human admin reads every grant and the requesting service its own; everyone else is refused 403.`),
+		mcplib.WithString("workflow_id",
+			mcplib.Description("The DevLoopWorkflow's Temporal workflow ID, e.g. dev-loop-mctlhq-mctl-telegram-296. Provide this or issue_url, not both."),
+		),
+		mcplib.WithString("issue_url",
+			mcplib.Description("Full GitHub issue URL under the mctlhq org, e.g. https://github.com/mctlhq/mctl-telegram/issues/123. The workflow_id is derived from it. Provide this or workflow_id, not both."),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		workflowID := strings.TrimSpace(stringArg(req, "workflow_id"))
+		issueURL := strings.TrimSpace(stringArg(req, "issue_url"))
+		switch {
+		case workflowID != "" && issueURL != "":
+			return mcplib.NewToolResultError("provide workflow_id or issue_url, not both"), nil
+		case workflowID == "" && issueURL == "":
+			return mcplib.NewToolResultError("missing required argument: workflow_id or issue_url"), nil
+		case issueURL != "":
+			derived, err := temporalclient.WorkflowIDForIssueURL(issueURL)
+			if err != nil {
+				return mcplib.NewToolResultError(fmt.Sprintf("invalid issue_url: %v", err)), nil
+			}
+			workflowID = derived
+		}
+		body, status, err := s.apiGetStatus(ctx, "/api/v1/agents/dev-loop/"+url.PathEscape(workflowID)+"/approval")
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Grant state is UNKNOWN, the read failed: %v", err)), nil
+		}
+		var parsed struct {
+			Code     string `json:"code"`
+			Error    string `json:"error"`
+			Approval struct {
+				ID string `json:"id"`
+			} `json:"approval"`
+		}
+		decodeErr := json.Unmarshal(body, &parsed)
+		switch {
+		// Only the API's typed code is proven absence: a bare 404 can be a
+		// server that does not have this route yet.
+		case status == http.StatusNotFound && decodeErr == nil && parsed.Code == "approval_grant_missing":
+			return mcplib.NewToolResultError("No approval grant exists to decide: " + parsed.Error), nil
+		case status == http.StatusOK && decodeErr == nil && parsed.Approval.ID != "":
+			return mcplib.NewToolResultText(string(body)), nil
+		case status == http.StatusOK:
+			return mcplib.NewToolResultError("Grant state is UNKNOWN: the API answered 200 without a readable grant."), nil
+		case decodeErr == nil && parsed.Error != "":
+			return mcplib.NewToolResultError(fmt.Sprintf("Grant state is UNKNOWN (HTTP %d): %s", status, parsed.Error)), nil
+		}
+		return mcplib.NewToolResultError(fmt.Sprintf("Grant state is UNKNOWN (HTTP %d).", status)), nil
 	}
 	return tool, handler
 }

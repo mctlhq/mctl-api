@@ -145,6 +145,11 @@
       "reason": "Liveness of one DevLoop workflow by id: status and phase only, no code, no secrets; the upstream refuses ids outside the caller's tenants."
     },
     {
+      "name": "mctl_get_dev_loop_approval",
+      "enabled": false,
+      "reason": "Reads a DevLoop's approval grant and decision context by workflow id (mctl-api#936). Off the shared portal until the owner decides: the portal switch is user-blind, and reviewers can use the direct MCP endpoint meanwhile."
+    },
+    {
       "name": "mctl_get_incident",
       "enabled": true,
       "reason": "Incident record with collected evidence (log excerpts, analysis, PR links); tenant-scoped by the upstream. Excerpts can carry application log text, acceptable on a private admin-only aggregate."

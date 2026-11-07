@@ -1728,3 +1728,104 @@ func TestCancelCustomerDeletionRequiresConfirmationAndExactTarget(t *testing.T) 
 		t.Fatal("malformed target reached API")
 	}
 }
+
+func callToolGetDevLoopApproval(t *testing.T, apiURL string, args map[string]any) *mcplib.CallToolResult {
+	t.Helper()
+	srv := NewServer(apiURL, "test-token")
+	_, handler := srv.toolGetDevLoopApproval()
+	result, err := handler(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{Name: "mctl_get_dev_loop_approval", Arguments: args},
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	return result
+}
+
+func toolResultText(t *testing.T, r *mcplib.CallToolResult) string {
+	t.Helper()
+	if len(r.Content) == 0 {
+		t.Fatal("empty tool result")
+	}
+	text, ok := r.Content[0].(mcplib.TextContent)
+	if !ok {
+		t.Fatalf("content = %T", r.Content[0])
+	}
+	return text.Text
+}
+
+func TestToolGetDevLoopApproval_ReadsTheGrantByIssueURL(t *testing.T) {
+	var gotMethod, gotPath string
+	grant := `{"workflow_id":"w","approval":{"id":"aar_1","artifact_hash":"sha256:c"},"decision_context":{"context_digest":"sha256:d"}}`
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		_, _ = w.Write([]byte(grant))
+	}))
+	defer backend.Close()
+
+	result := callToolGetDevLoopApproval(t, backend.URL, map[string]any{
+		"issue_url": " https://github.com/mctlhq/mctl-telegram/issues/296\n",
+	})
+	if result.IsError || toolResultText(t, result) != grant {
+		t.Fatalf("result = %+v", result.Content)
+	}
+	if gotMethod != http.MethodGet || gotPath != "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-296/approval" {
+		t.Fatalf("request = %s %s", gotMethod, gotPath)
+	}
+}
+
+func TestToolGetDevLoopApproval_NeedsExactlyOneTarget(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request %s", r.URL.Path)
+	}))
+	defer backend.Close()
+	for name, args := range map[string]map[string]any{
+		"neither": {},
+		"both":    {"workflow_id": "w", "issue_url": "https://github.com/mctlhq/x/issues/1"},
+	} {
+		if r := callToolGetDevLoopApproval(t, backend.URL, args); !r.IsError {
+			t.Errorf("%s: expected an error result", name)
+		}
+	}
+}
+
+// Only the API's typed code is proven absence. Everything else, a bare 404
+// from a server without the route included, reads as unknown.
+func TestToolGetDevLoopApproval_UnknownIsNeverAbsence(t *testing.T) {
+	const absent, unknown = "No approval grant exists", "UNKNOWN"
+	for name, tc := range map[string]struct {
+		status int
+		body   string
+		want   string
+	}{
+		"typed absence":   {404, `{"error":"no grant","code":"approval_grant_missing"}`, absent},
+		"bare 404":        {404, `404 page not found`, unknown},
+		"404, other code": {404, `{"error":"x","code":"not_found"}`, unknown},
+		"store down":      {503, `{"error":"could not read","code":"work_items_unavailable"}`, unknown},
+		"forbidden":       {403, `{"error":"no","code":"reader_forbidden"}`, unknown},
+		"ambiguous":       {409, `{"error":"2 open","code":"execution_ambiguous"}`, unknown},
+		"200, empty":      {200, `{}`, unknown},
+		"200, malformed":  {200, `not json`, unknown},
+		"502, html":       {502, `<html>bad gateway</html>`, unknown},
+	} {
+		t.Run(name, func(t *testing.T) {
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer backend.Close()
+			r := callToolGetDevLoopApproval(t, backend.URL, map[string]any{"workflow_id": "w"})
+			text := toolResultText(t, r)
+			if !r.IsError || !strings.Contains(text, tc.want) {
+				t.Fatalf("result = %v %q, want an error containing %q", r.IsError, text, tc.want)
+			}
+		})
+	}
+	unreachable := httptest.NewServer(http.NotFoundHandler())
+	addr := unreachable.URL
+	unreachable.Close()
+	r := callToolGetDevLoopApproval(t, addr, map[string]any{"workflow_id": "w"})
+	if text := toolResultText(t, r); !r.IsError || !strings.Contains(text, unknown) {
+		t.Fatalf("unreachable API = %v %q", r.IsError, text)
+	}
+}

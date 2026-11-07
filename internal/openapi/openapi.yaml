@@ -4121,6 +4121,70 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/v1/agents/dev-loop/{workflow_id}/approval:
+    get:
+      summary: Read the approval grant a bound approve would decide
+      description: |
+        The newest `mctl-agents-approve` grant of the run's one open work-item
+        execution, in any state, with its decision context. The binding values
+        of the approve call are `approval.id`, `decision_context.context_digest`
+        and `approval.artifact_hash`. Decides nothing (mctl-api#936).
+        A human admin reads every grant and the requesting service its own.
+      tags: [Agent Registry]
+      parameters:
+        - name: workflow_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: dev-loop-mctlhq-mctl-telegram-296
+      responses:
+        '200':
+          description: The grant and its decision context
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schema_version:
+                    type: integer
+                  workflow_id:
+                    type: string
+                  approval:
+                    type: object
+                    additionalProperties: true
+                  decision_context:
+                    type: object
+                    additionalProperties: true
+        '403':
+          description: Not an admin or the grant's requester (`reader_forbidden`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            The store proved there is no open execution or no grant
+            (`approval_grant_missing`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: More than one open execution (`execution_ambiguous`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: |
+            The store could not be read (`work_items_unavailable`). The grant
+            state is unknown, which is not the same as no grant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/v1/agents/dev-loop/{workflow_id}/approve:
     post:
       summary: Signal a running DevLoopWorkflow's approval
