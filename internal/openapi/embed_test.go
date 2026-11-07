@@ -40,6 +40,7 @@ func TestSpecParses(t *testing.T) {
 		"/api/v1/execution-requests/claim":                                          {"post"},
 		"/api/v1/execution-requests/{request_id}/fulfil":                            {"post"},
 		"/api/v1/execution-requests/{request_id}/reject":                            {"post"},
+		"/api/v1/agents/dev-loop/{workflow_id}/approval":                            {"get"},
 		"/api/v1/agents/dev-loop/{workflow_id}/approve":                             {"post"},
 		"/api/v1/agents/dev-loop/{workflow_id}/abandon":                             {"post"},
 		"/api/v1/commerce/terms":                                                    {"get", "post"},

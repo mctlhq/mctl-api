@@ -951,6 +951,9 @@ func NewRouter(opts Options) http.Handler {
 			// which would eat the 20/min write budget shared with
 			// /operations/{name}/execute and starve real writes.
 			r.Get("/agents/dev-loop/{workflow_id}", h.GetDevLoopWorkflow)
+			// The grant a bound approve would decide (mctl-api#936): a read,
+			// outside the write group for the same reason.
+			r.Get("/agents/dev-loop/{workflow_id}/approval", h.GetDevLoopApproval)
 
 			// Who the API resolved the caller to (mctl-api#376 D3):
 			// side-effect-free, outside the write group like the dev-loop

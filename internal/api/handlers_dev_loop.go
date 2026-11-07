@@ -619,6 +619,75 @@ const (
 	devLoopCodeExecutionAmbiguous = "execution_ambiguous"
 )
 
+// GetDevLoopApproval handles GET /api/v1/agents/dev-loop/{workflow_id}/approval
+// (mctl-api#936): the grant a bound approve of this workflow would decide,
+// with its decision context, so a reviewer can check what they are about to
+// bind to. It resolves the grant as decideDevLoopApproval does and changes
+// nothing.
+//
+// A human admin reads every grant and the requesting service its own; anyone
+// else is refused before the store is asked. 404 is reported only when the
+// store proved there is no open execution or no grant; a store that could not
+// be read is a 503, never "no grant".
+func (h *Handlers) GetDevLoopApproval(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.workItemsUser(w, r)
+	if !ok {
+		return
+	}
+	forbidden := func() {
+		writeErrorCode(w, http.StatusForbidden, aarCodeReaderForbidden, "action approvals are read by admins and their requester", nil)
+	}
+	if !isHumanAdmin(user) && !isDirectService(user) {
+		forbidden()
+		return
+	}
+	workflowID := chi.URLParam(r, "workflow_id")
+	if workflowID == "" {
+		writeError(w, http.StatusBadRequest, "missing workflow_id path parameter")
+		return
+	}
+	unavailable := func(err error) {
+		slog.Error("dev-loop approval read: grant lookup failed", "workflow_id", workflowID, "error", err)
+		writeErrorCode(w, http.StatusServiceUnavailable, wiCodeUnavailable, "could not read the DevLoop's approval grant", nil)
+	}
+	ctx := r.Context()
+	execs, err := h.opts.WorkItems.OpenExecutionsOfEngineRun(ctx, workitems.EngineTemporal, workflowID)
+	switch {
+	case err != nil:
+		unavailable(err)
+		return
+	case len(execs) == 0:
+		writeErrorCode(w, http.StatusNotFound, devLoopCodeGrantMissing, "no open work-item execution is attached for this workflow", nil)
+		return
+	case len(execs) > 1:
+		writeErrorCode(w, http.StatusConflict, devLoopCodeExecutionAmbiguous,
+			fmt.Sprintf("%d open work-item executions are attached for this workflow; resolve them before approving", len(execs)), nil)
+		return
+	}
+	list, err := h.opts.WorkItems.ActionApprovals(ctx, workitems.ActionApprovalFilter{
+		ExecutionID: execs[0].ID, ActionKind: devLoopApprovalKind, Limit: 1,
+	})
+	if err != nil {
+		unavailable(err)
+		return
+	}
+	if len(list) == 0 {
+		writeErrorCode(w, http.StatusNotFound, devLoopCodeGrantMissing, "no "+devLoopApprovalKind+" approval for execution "+execs[0].ID, nil)
+		return
+	}
+	newest := &list[0]
+	if !canSeeActionApproval(user, newest) {
+		forbidden()
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"schema_version":   workitems.ActionApprovalSchemaVersion,
+		"workflow_id":      workflowID,
+		"approval":         newest,
+		"decision_context": h.decisionContext(newest),
+	})
+}
+
 // decideDevLoopApproval resolves workflowID to the run's one open we_
 // execution (engine temporal, engine_ref the workflow id or, for a run
 // dispatched from an execution request, "<workflow_id>#<request_id>"),
