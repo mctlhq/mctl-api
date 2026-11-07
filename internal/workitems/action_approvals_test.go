@@ -832,3 +832,39 @@ func TestNewestSpentActionApproval(t *testing.T) {
 		t.Errorf("failed read: err = %v, want an error that is not an absence", err)
 	}
 }
+
+// The grant-pinned exchange calls NewestSpentActionApproval on every token
+// exchange, so it must be served by its index rather than by the state index,
+// which matches every executed row. Sequential scans are disabled so the
+// planner picks an index on an empty table too; the test then fails if the
+// spent index is missing or no longer matches the query's predicate.
+func TestNewestSpentActionApprovalUsesItsIndex(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := tx.Query(ctx, "EXPLAIN "+newestSpentActionApprovalSQL, "github.merge_pr", "mctlhq/mctl-api#1", agentPrincipal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan strings.Builder
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		plan.WriteString(line + "\n")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plan.String(), "action_approval_requests_spent") {
+		t.Fatalf("NewestSpentActionApproval is not served by action_approval_requests_spent:\n%s", plan.String())
+	}
+}
