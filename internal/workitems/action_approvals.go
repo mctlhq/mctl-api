@@ -155,6 +155,13 @@ CREATE INDEX IF NOT EXISTS action_approval_requests_execution
     ON action_approval_requests (execution_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS action_approval_requests_state
     ON action_approval_requests (state, created_at DESC);
+-- NewestSpentActionApproval runs on every grant-pinned token exchange and
+-- filters by kind, target and requester. The state index matches every
+-- executed row, and those only grow, so without this the lookup scans all
+-- spent grants. Partial on consumed_at, the same predicate the query uses.
+CREATE INDEX IF NOT EXISTS action_approval_requests_spent
+    ON action_approval_requests (action_kind, target, requested_by, consumed_at DESC, id DESC)
+    WHERE consumed_at IS NOT NULL;
 -- Canonical principal ids (mctl-api#373), dual-written next to the strings.
 ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS requested_by_principal_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE action_approval_requests ADD COLUMN IF NOT EXISTS via_principal_id TEXT NOT NULL DEFAULT '';
@@ -628,6 +635,14 @@ func (s *Store) ActionApproval(ctx context.Context, id string) (*ActionApprovalR
 	return s.getActionApproval(ctx, s.pool, id, "")
 }
 
+// newestSpentActionApprovalSQL is served by action_approval_requests_spent;
+// TestNewestSpentActionApprovalUsesItsIndex plans this exact text.
+const newestSpentActionApprovalSQL = `SELECT ` + actionApprovalColumns + `
+		FROM action_approval_requests
+		WHERE action_kind=$1 AND target=$2 AND requested_by=$3
+		  AND state IN ('consumed', 'executed') AND consumed_at IS NOT NULL
+		ORDER BY consumed_at DESC, id DESC LIMIT 1`
+
 // NewestSpentActionApproval returns the most recently spent request of this
 // kind, target and requester: consumed, or already marked executed by an
 // earlier attempt on it. ErrApprovalNotFound means the store answered and
@@ -638,11 +653,7 @@ func (s *Store) ActionApproval(ctx context.Context, id string) (*ActionApprovalR
 // latest decision is the one that stands. An older one is never a fallback.
 func (s *Store) NewestSpentActionApproval(ctx context.Context, actionKind, target, requestedBy string) (*ActionApprovalRequest, error) {
 	now := s.now()
-	a, err := scanActionApproval(s.pool.QueryRow(ctx, `SELECT `+actionApprovalColumns+`
-		FROM action_approval_requests
-		WHERE action_kind=$1 AND target=$2 AND requested_by=$3
-		  AND state IN ('consumed', 'executed') AND consumed_at IS NOT NULL
-		ORDER BY consumed_at DESC, id DESC LIMIT 1`, actionKind, target, requestedBy), now)
+	a, err := scanActionApproval(s.pool.QueryRow(ctx, newestSpentActionApprovalSQL, actionKind, target, requestedBy), now)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("workitems: spent action approval for %s: %w", target, ErrApprovalNotFound)
 	}
