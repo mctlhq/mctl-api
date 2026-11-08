@@ -197,6 +197,7 @@ func BuildFederationRegistry(ctx context.Context, cfg FederationProvidersConfig,
 	registryPublisher := registryPublisherToken()
 	supportProducer := supportIncidentProducerToken()
 	securityProviders := securityProviderTokens()
+	bridgeProviders := bridgeProviderTokens()
 	static := []Provider{
 		newServiceTokenProvider(func() string { return strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN")) }),
 		newSurfaceProvider(func() map[string]string { return surfaces }),
@@ -205,6 +206,7 @@ func BuildFederationRegistry(ctx context.Context, cfg FederationProvidersConfig,
 		newRegistryPublisherProvider(func() string { return registryPublisher }),
 		newSupportIncidentProducerProvider(func() string { return supportProducer }),
 		newSecurityProviderProvider(func() map[string]string { return securityProviders }),
+		newBridgeProviderProvider(func() map[string]string { return bridgeProviders }),
 	}
 
 	var jwtProviders []Provider
