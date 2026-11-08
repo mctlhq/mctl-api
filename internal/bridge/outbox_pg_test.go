@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -175,15 +176,17 @@ func TestPGOutboxVisibilityTimeoutReleases(t *testing.T) {
 	s := pgIsolatedStore(t)
 	ctx := context.Background()
 	insertOutbox(t, s, "v1", "pending", -time.Minute)
-	if got, err := s.LeaseSignals(ctx, 5, time.Second); err != nil || len(got) != 1 {
+	if got, err := s.LeaseSignals(ctx, 5, 3*time.Second); err != nil || len(got) != 1 {
 		t.Fatalf("first lease: %v %v", got, err)
 	}
-	if got, _ := s.LeaseSignals(ctx, 5, time.Second); len(got) != 0 {
-		t.Fatal("row leasable while invisible")
+	if got, err := s.LeaseSignals(ctx, 5, 3*time.Second); err != nil {
+		t.Fatalf("second lease: %v", err)
+	} else if len(got) != 0 {
+		t.Fatalf("row leasable while invisible: %v", ids(got))
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		got, err := s.LeaseSignals(ctx, 5, time.Second)
+		got, err := s.LeaseSignals(ctx, 5, 3*time.Second)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -424,7 +427,7 @@ func TestPGOutboxLeaseError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := s.LeaseSignals(ctx, 5, time.Minute)
-	if err == nil || err.Error()[:len("bridge: lease signals:")] != "bridge: lease signals:" {
+	if err == nil || !strings.HasPrefix(err.Error(), "bridge: lease signals:") {
 		t.Fatalf("err = %v, want wrapped bridge: lease signals", err)
 	}
 	if err := s.MarkSignalSent(context.Background(), "absent"); err != nil {
