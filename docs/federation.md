@@ -169,6 +169,7 @@ A JSON array, parsed by `auth.ParseOIDCProviders` and validated in
 | `kind` | no | `human` | One of `human`, `agent`, `service`. |
 | `grant_groups` | no | `false` | Whether this entry's groups reach `User.Groups`, i.e. grant tenant access. Off: the claim is dropped and counted in `federation_groups_withheld_total{provider}`. On: kept, with `admins` still stripped. Refused at boot on the trusted Dex slot. See "Groups" below. |
 | `customers_org_id` | no | — | The ZITADEL organization of self-service customer accounts (digits; `human` entries only; at most one entry). When set, every token from this entry must carry `urn:zitadel:iam:user:resourceowner:id` or it is refused, and a customers token resolves by its proven GitHub id. See "Self-service customers" below. |
+| `subject_audiences` | no | — | Extra accepted audiences for single verified subjects, as `{"<subject>": ["<audience>", ...]}` (not on `dex`). A ZITADEL machine user signing in with its own key (JWT profile) gets only the project id in `aud`, never the client id this entry enforces. Listing the project id in `audiences` would accept it from every client that requests the project audience scope, so any relying party could replay its users' tokens here; keyed by subject, it holds for that machine user alone. Signature, issuer and expiry are checked as for every token. Used by the orchestrator DevLoop principal (docs/orchestrator-devloop.md). |
 
 A malformed value, an entry missing `audiences`, an invalid
 `audience_enforcement` or `kind`, a reserved or surface-colliding name, or two
