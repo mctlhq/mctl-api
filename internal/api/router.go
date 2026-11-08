@@ -595,6 +595,9 @@ func NewRouter(opts Options) http.Handler {
 		// A GitHub Actions principal reaches the deploy route and nothing
 		// else (mctl-api#530).
 		r.Use(ciPrincipalGate)
+		// The orchestrator DevLoop principal starts and reads DevLoops for
+		// allowed repositories and nothing else (mctl-api#963).
+		r.Use(h.orchestratorDevLoopGate)
 
 		// Global rate limit: 300 requests/minute per user (fallback to per-IP).
 		// Loopback is skipped so MCP's in-process REST to localhost:8080 does
