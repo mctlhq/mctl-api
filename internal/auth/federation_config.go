@@ -160,9 +160,10 @@ func ParseOIDCProviders(raw string) ([]OIDCProviderConfigEntry, error) {
 }
 
 // validSubjectAudiences refuses a subject_audiences map that would widen
-// more than one named subject: an empty subject, an empty list or an empty
-// audience. Not on the "dex" slot, whose audience handling is the legacy
-// shim's.
+// more than one named subject or never match: an empty map, an empty or
+// padded subject, an empty list, an empty or padded audience, or a subject
+// claim other than sub. Not on the "dex" slot, whose audience handling is
+// the legacy shim's.
 func validSubjectAudiences(e *OIDCProviderConfigEntry) error {
 	if e.SubjectAudiences == nil {
 		return nil
@@ -187,8 +188,10 @@ func validSubjectAudiences(e *OIDCProviderConfigEntry) error {
 			return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q grants subject %q no audience", e.Name, subject)
 		}
 		for _, a := range auds {
-			if strings.TrimSpace(a) == "" {
-				return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q grants subject %q an empty audience", e.Name, subject)
+			if strings.TrimSpace(a) == "" || a != strings.TrimSpace(a) {
+				// Matched exactly against the token's aud: a padded value
+				// would pass here and never match at runtime.
+				return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q grants subject %q an empty or padded audience", e.Name, subject)
 			}
 		}
 	}
