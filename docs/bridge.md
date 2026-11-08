@@ -56,9 +56,25 @@ v1alpha1 `outcome` (a refused approval is `outcome=approval_refused` with
   `TEMPORAL_ADDRESS`. Interval 30s (override `MCTL_BRIDGE_EXPIRY_SWEEP_INTERVAL`),
   100 rows per batch, a finite number of batches per tick, rows locked by
   another transaction skipped (`FOR UPDATE SKIP LOCKED`). Under a large backlog,
-  long locks or database failures there is no one-interval guarantee; progress
-  is observable through the sweep's counts, backlog and oldest-overdue age, and
-  the logs warn on sustained overdue age or repeated errors.
+  long locks or database failures there is no one-interval guarantee.
+  When the bridge is enabled, `/metrics` exposes
+  `mctl_api_bridge_expiry_processed_total`,
+  `mctl_api_bridge_expiry_sweep_errors_total`,
+  `mctl_api_bridge_expiry_consecutive_errors`,
+  `mctl_api_bridge_expiry_backlog`,
+  `mctl_api_bridge_expiry_oldest_overdue_seconds` and
+  `mctl_api_bridge_expiry_last_success_timestamp_seconds`. The values are
+  process-local (reset at restart), with no command or tenant labels.
+  A failed backlog query counts as an error and does **not** advance the last
+  success timestamp; normal shutdown cancellation is not an error. Warning
+  logs flag overdue age over 300 seconds or three consecutive failures.
+  Install corresponding Prometheus alerts **before activation**: sustained
+  `mctl_api_bridge_expiry_oldest_overdue_seconds > 300` for 5m,
+  `mctl_api_bridge_expiry_consecutive_errors >= 3` for 2m, and
+  `time() - mctl_api_bridge_expiry_last_success_timestamp_seconds > 120`
+  for 5m, scoped to bridge-enabled targets. These are **recommended alert
+  thresholds, not a claim that PrometheusRule is already deployed**;
+  installation and alert delivery verification are a separate release gate.
 - Transition rows record the status the command had under the row lock as
   `from_status` (`pending -> leased` for a first lease, `leased -> leased` for a
   reclaim, `pending|leased -> expired` for expiry).
@@ -66,10 +82,41 @@ v1alpha1 `outcome` (a refused approval is `outcome=approval_refused` with
   unchanged (it still covers the full parsed result). `ReadOutcome` strips
   `lease_token` from rows written before this change. Historical rows are
   cleaned by the operator-invoked, bounded `Store.ScrubLegacyResultBatch`,
-  never at startup; run it until `remaining` is 0 before activation. The
-  plaintext `bridge_commands.lease_token` column is not changed here: a separate
-  security decision (including backup retention) is required before the first
-  provider credential is issued (mctl-gitops#2457).
+  never at startup. The **explicitly gated maintenance CLI** below provides
+  a runnable entry point. The plaintext `bridge_commands.lease_token` column
+  is not changed here: a separate security decision (including backup
+  retention) is required before the first provider credential is issued
+  (mctl-gitops#2457).
+
+### Operator-only legacy JSONB scrub (activation prerequisite)
+
+Run only under a separately approved maintenance change and limited DB
+credentials, after confirming old writers cannot reintroduce token-bearing
+results. **Never** invoke from API startup or a deployment hook. Supply the
+database URL through a scoped secret named
+`MCTL_BRIDGE_SCRUB_DATABASE_URL` (not command-line arguments) and keep it
+out of logs and version control:
+
+```sh
+# Within an approved maintenance job whose environment securely contains
+# MCTL_BRIDGE_SCRUB_DATABASE_URL (do not paste the URL into shell history):
+go run ./cmd/bridge-scrub --confirm=scrub-legacy-results --batch-size=100 --max-batches=100
+```
+
+Every batch executes in a short (at most 30s) transaction using `FOR UPDATE
+SKIP LOCKED`, prints the count changed and exact remaining token-bearing
+JSONB rows, and is safe to repeat after interruption. The command has a
+10-minute outer limit, finite batch cap, and **nonzero exit** for DB errors,
+no progress due to locks, cancellation, or remaining rows. When the limit is
+reached, repeat the same approved command after assessing contention. The
+`remaining` query is an exact full-table scan after *each* committed batch;
+avoid high-frequency execution on a large table and budget DB I/O/WAL. A
+reported zero is a point-in-time result only: verify no old writer is active
+and independently query `SELECT count(*) FROM bridge_commands WHERE result
+? 'lease_token'` on the target DB before changing the activation hold. The
+scrub **does not** erase plaintext `bridge_commands.lease_token` nor any
+previous backup, audit/log export or snapshot. These retain separate
+security-owner and data-retention decisions.
 - Commands of one execution are claimable in `sequence` order.
 - Result CAS: `status='leased'` and the stored epoch and private nonce. The
   signal-outbox row is inserted in the same transaction.
