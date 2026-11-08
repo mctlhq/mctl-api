@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/mctlhq/mctl-api/internal/audit"
@@ -105,7 +104,7 @@ func (h *Handlers) authorizeCIDeploy(w http.ResponseWriter, r *http.Request, use
 		// the identifying fields: the rest is either refused or not secret
 		// to begin with, and secret_env_vars is never echoed.
 		params := map[string]string{}
-		for _, k := range []string{"action", "team_name", "component_name", "dockerfile_repo", "git_tag"} {
+		for _, k := range []string{"action", "team_name", "component_name", "dockerfile_repo", "git_tag", "dockerfile_path"} {
 			if v, ok := input[k]; ok {
 				params[k] = v
 			}
@@ -135,7 +134,7 @@ func (h *Handlers) authorizeCIDeploy(w http.ResponseWriter, r *http.Request, use
 		}
 	}
 	if len(extra) > 0 {
-		sort.Strings(extra)
+		slices.Sort(extra)
 		return deny(http.StatusForbidden, "parameters not allowed for CI: "+strings.Join(extra, ", "))
 	}
 	if input["action"] != "deploy" {
