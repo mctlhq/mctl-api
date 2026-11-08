@@ -356,6 +356,41 @@ func TestPGLegacyScrubSkipsLockedWriterAndResumes(t *testing.T) {
 	t.Fatal("scrub could not clean previously locked legacy results")
 }
 
+func TestPGExpiryBacklogCountsAndOldestOverdue(t *testing.T) {
+	s := pgStore(t)
+	ctx := context.Background()
+	before, _, err := s.ExpiryBacklog(ctx)
+	if err != nil {
+		t.Fatalf("initial expiry backlog: %v", err)
+	}
+	tenant := fmt.Sprintf("expiry-backlog-%d", time.Now().UnixNano())
+	id := enqueue(t, s, tenant, KindQuote)
+	// This command is overdue but still pending. Verify the actual SQL query.
+	if _, err := s.pool.Exec(ctx, `UPDATE bridge_commands
+		SET expires_at=now()-interval '90 seconds' WHERE command_id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	count, oldest, err := s.ExpiryBacklog(ctx)
+	if err != nil {
+		t.Fatalf("backlog with overdue command: %v", err)
+	}
+	if count != before+1 || oldest < 85 {
+		t.Fatalf("backlog count=%d (previous=%d), oldest=%.1f seconds; want +1 and >=85", count, before, oldest)
+	}
+	// Removing the row from the active states must remove it from the backlog.
+	if _, err := s.pool.Exec(ctx, `UPDATE bridge_commands SET status='expired'
+		WHERE command_id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	after, _, err := s.ExpiryBacklog(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("backlog after terminal transition=%d, initially=%d", after, before)
+	}
+}
+
 func TestPGExpiredLeasedPermitIsUnknownAndAudited(t *testing.T) {
 	s := pgStore(t)
 	ctx := context.Background()
