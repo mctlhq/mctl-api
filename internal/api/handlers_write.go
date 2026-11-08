@@ -25,6 +25,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -44,6 +45,8 @@ var legacyRelayTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "mctl_agents_approve_legacy_relay_total",
 	Help: "Free-text approver relays on mctl-agents-approve by a service principal, by outcome (relayed, refused).",
 }, []string{"outcome"})
+
+var creatorUserIDRe = regexp.MustCompile(operations.CreatorUserIDPattern)
 
 func init() { prometheus.MustRegister(legacyRelayTotal) }
 
@@ -216,7 +219,22 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		// Force creator_user_id from the authenticated session (prevent spoofing).
+		// creator_user_id is always forced from the authenticated session, never
+		// taken from the caller. The workflow splices it into YAML unquoted, so
+		// an identity outside its charset is refused here with a clear cause
+		// instead of a pattern error on a field the caller never sent.
+		if !creatorUserIDRe.MatchString(user.ID) {
+			h.logAudit(r, audit.Entry{
+				UserID:    user.ID,
+				Operation: opName,
+				Status:    "denied",
+				RiskLevel: string(op.RiskLevel),
+				Message:   fmt.Sprintf("create-tenant refused: sign-in identity %q does not match the creator_user_id format", user.ID),
+			})
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("your sign-in identity %q cannot be recorded as a workspace owner (allowed characters: A-Z a-z 0-9 . _ @ -)", user.ID))
+			return
+		}
 		input["creator_user_id"] = user.ID
 		// The owner entry is keyed by the creator's canonical principal too:
 		// principal-mode authorization grants by members[].principalId alone

@@ -975,8 +975,10 @@ var operationToTool = map[string]string{
 // `service` parameter carries an Enum to the MCP tool that mirrors it.
 // mctl-agents-single-service is intentionally excluded (a deliberately
 // shorter, unrelated list of eight rotating service-agent targets) and
-// mctl-agents-incidents is intentionally excluded (its `service` parameter
-// has no Enum at all) — see TestServiceEnumsMatchRegistry.
+// mctl-agents-incidents is intentionally excluded (its registry `service`
+// parameter does carry an Enum, but mctl_trigger_incident_responder exposes
+// no `service` argument, so there is nothing to mirror) — see
+// TestServiceEnumsMatchRegistry.
 var serviceEnumOperationToTool = map[string]string{
 	"mctl-agents-implement": "mctl_trigger_implementer",
 	"mctl-agents-shepherd":  "mctl_trigger_shepherd",
