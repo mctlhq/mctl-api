@@ -68,9 +68,13 @@ func run(ctx context.Context, args []string, getenv func(string) string, output 
 		}
 		total += n
 		remaining = left
-		fmt.Fprintf(output, "batch=%d scrubbed=%d total_scrubbed=%d remaining=%d\n", i, n, total, remaining)
+		if _, err := fmt.Fprintf(output, "batch=%d scrubbed=%d total_scrubbed=%d remaining=%d\n", i, n, total, remaining); err != nil {
+			return fmt.Errorf("bridge-scrub: write output: %w", err)
+		}
 		if remaining == 0 {
-			fmt.Fprintln(output, "bridge-scrub: remaining=0; verify no old writers remain before activation")
+			if _, err := fmt.Fprintln(output, "bridge-scrub: remaining=0; verify no old writers remain before activation"); err != nil {
+				return fmt.Errorf("bridge-scrub: write output: %w", err)
+			}
 			return nil
 		}
 		if n == 0 {
