@@ -378,6 +378,30 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 	return &Store{pool: pool, now: func() time.Time { return time.Now().UTC() }, fence: refusingFence{}}, nil
 }
 
+// OpenExistingStore opens a previously migrated bridge database for explicit
+// maintenance only. Unlike NewStore, it never executes DDL or attempts to
+// bootstrap schema/indexes. This permits a least-privilege maintenance role.
+func OpenExistingStore(ctx context.Context, connStr string) (*Store, error) {
+	pool, err := pgshared.Open(ctx, connStr)
+	if err != nil {
+		return nil, fmt.Errorf("bridge: maintenance connect: %w", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pgshared.Release(pool)
+		return nil, fmt.Errorf("bridge: maintenance ping: %w", err)
+	}
+	var exists bool
+	if err := pool.QueryRow(ctx, "SELECT to_regclass('bridge_commands') IS NOT NULL").Scan(&exists); err != nil {
+		pgshared.Release(pool)
+		return nil, fmt.Errorf("bridge: maintenance schema check: %w", err)
+	}
+	if !exists {
+		pgshared.Release(pool)
+		return nil, fmt.Errorf("bridge: maintenance schema missing; migrate before scrubbing")
+	}
+	return &Store{pool: pool, now: func() time.Time { return time.Now().UTC() }, fence: refusingFence{}}, nil
+}
+
 // Close releases the pool.
 func (s *Store) Close() {
 	if s != nil && s.pool != nil {
