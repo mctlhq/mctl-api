@@ -370,10 +370,12 @@ func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) 
 
 	var body startDevLoopRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		h.auditOrchestratorDevLoopInvalid(r, user, "")
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
 	if body.IssueURL == "" {
+		h.auditOrchestratorDevLoopInvalid(r, user, "")
 		writeError(w, http.StatusBadRequest, "missing required field: issue_url")
 		return
 	}
@@ -381,7 +383,9 @@ func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) 
 	workflowID, err := temporalclient.WorkflowIDForIssueURL(body.IssueURL)
 	if err != nil {
 		// Caller input (a malformed issue_url) — real 400, not audited, same
-		// as before this change.
+		// as before this change, except for the orchestrator principal,
+		// every one of whose calls is audited (mctl-api#963).
+		h.auditOrchestratorDevLoopInvalid(r, user, body.IssueURL)
 		writeError(w, http.StatusBadRequest, "invalid issue_url: "+err.Error())
 		return
 	}

@@ -1,6 +1,11 @@
 package auth
 
-import "testing"
+import (
+	"bytes"
+	"log/slog"
+	"strings"
+	"testing"
+)
 
 func zitadelMachine(subject string) *Verified {
 	return &Verified{
@@ -53,5 +58,21 @@ func TestOrchestratorDevLoop_OffUnlessFullyAndValidlyConfigured(t *testing.T) {
 				t.Fatalf("mapping on for %q/%q", env[0], env[1])
 			}
 		})
+	}
+}
+
+// A misconfiguration is logged once, not on every OIDC request that judges it.
+func TestOrchestratorDevLoop_MisconfigurationLoggedOnce(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	t.Setenv(orchestratorDevLoopProviderEnv, "zitadel-logonce-test")
+	t.Setenv(orchestratorDevLoopSubjectEnv, "")
+	for i := 0; i < 3; i++ {
+		IsOrchestratorDevLoopIdentity(Identity{Provider: "zitadel-logonce-test"})
+	}
+	if n := strings.Count(buf.String(), "half-configured"); n != 1 {
+		t.Fatalf("logged %d times, want 1:\n%s", n, buf.String())
 	}
 }

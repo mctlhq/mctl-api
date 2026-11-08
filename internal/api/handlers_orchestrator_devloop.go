@@ -33,13 +33,17 @@ const (
 	orchestratorDevLoopStartRoute = "/api/v1/agents/dev-loop/start"
 	// orchestratorDevLoopReposEnv lists the repositories, as "mctlhq/<repo>"
 	// and comma-separated, the orchestrator may start or read a DevLoop for.
-	// Unset or empty refuses every repository.
+	// Unset or empty refuses every repository. Matching is exact and
+	// case-sensitive: the workflow id keeps the issue URL's case, so a
+	// case-folded match would let MCTL-API and mctl-api start two loops for
+	// one issue.
 	orchestratorDevLoopReposEnv = "MCTL_ORCHESTRATOR_DEVLOOP_REPOS"
 
 	codeOrchestratorRouteNotAllowed   = "orchestrator_devloop_route_not_allowed"
 	codeOrchestratorApproveForbidden  = "orchestrator_devloop_approve_forbidden"
 	codeOrchestratorTemporalRequired  = "orchestrator_devloop_temporal_required"
 	codeOrchestratorRepoNotAllowed    = "orchestrator_devloop_repo_not_allowed"
+	codeOrchestratorInvalidRequest    = "orchestrator_devloop_invalid_request"
 	orchestratorDevLoopAuditOperation = "orchestrator-devloop.request"
 )
 
@@ -53,11 +57,11 @@ var (
 	orchestratorArgoInvestigateRe = regexp.MustCompile(`^/api/v1/operations/mctl-agents-investigate(/|$)`)
 )
 
-// orchestratorDevLoopRepos is the configured allow-list, lower-cased.
+// orchestratorDevLoopRepos is the configured allow-list, exactly as written.
 func orchestratorDevLoopRepos() map[string]bool {
 	repos := map[string]bool{}
 	for _, r := range strings.Split(os.Getenv(orchestratorDevLoopReposEnv), ",") {
-		if r = strings.ToLower(strings.TrimSpace(r)); strings.HasPrefix(r, "mctlhq/") && len(r) > len("mctlhq/") {
+		if r = strings.TrimSpace(r); strings.HasPrefix(r, "mctlhq/") && len(r) > len("mctlhq/") {
 			repos[r] = true
 		}
 	}
@@ -67,16 +71,15 @@ func orchestratorDevLoopRepos() map[string]bool {
 // orchestratorDevLoopRepoAllowed reports whether repo (the bare name under
 // mctlhq) is on the allow-list.
 func orchestratorDevLoopRepoAllowed(repo string) bool {
-	return repo != "" && orchestratorDevLoopRepos()["mctlhq/"+strings.ToLower(repo)]
+	return repo != "" && orchestratorDevLoopRepos()["mctlhq/"+repo]
 }
 
 // orchestratorDevLoopWorkflowAllowed reports whether a dev-loop workflow id
 // belongs to an allowed repository: dev-loop-mctlhq-<repo>-<issue>.
 func orchestratorDevLoopWorkflowAllowed(workflowID string) bool {
-	id := strings.ToLower(workflowID)
 	for r := range orchestratorDevLoopRepos() {
 		prefix := "dev-loop-mctlhq-" + strings.TrimPrefix(r, "mctlhq/") + "-"
-		if rest, ok := strings.CutPrefix(id, prefix); ok && rest != "" && strings.Trim(rest, "0123456789") == "" {
+		if rest, ok := strings.CutPrefix(workflowID, prefix); ok && rest != "" && strings.Trim(rest, "0123456789") == "" {
 			return true
 		}
 	}
@@ -110,17 +113,24 @@ func orchestratorDevLoopRefusal(r *http.Request) string {
 	return codeOrchestratorRouteNotAllowed
 }
 
+func isOrchestratorDevLoopStart(r *http.Request) bool {
+	return r.Method == http.MethodPost && r.URL.Path == orchestratorDevLoopStartRoute
+}
+
 var orchestratorDevLoopRefusalText = map[string]string{
 	codeOrchestratorRouteNotAllowed:  "the orchestrator may only call POST " + orchestratorDevLoopStartRoute + ", GET /api/v1/agents/dev-loop/{workflow_id} and GET /api/v1/whoami",
 	codeOrchestratorApproveForbidden: "the orchestrator may not approve a DevLoop: approval is a human admin's decision",
 	codeOrchestratorTemporalRequired: "the orchestrator may start a DevLoop only on the Temporal path (POST " + orchestratorDevLoopStartRoute + ")",
 	codeOrchestratorRepoNotAllowed:   "the repository is not on the orchestrator's DevLoop allow-list",
+	codeOrchestratorInvalidRequest:   "the DevLoop start request is malformed",
 }
 
 // orchestratorDevLoopGate confines the orchestrator DevLoop principal. It
 // runs before any handler, so it also covers /mcp: the agent receipt gate
 // never sees this principal, because no MCP tool call of it is ever served.
-// Every request it judges is audited, admitted or refused.
+// Every request it judges is audited, admitted or refused, except an
+// admitted start: the start handler records that one's real outcome, so the
+// log never shows "allowed" for a start the handler then refuses.
 func (h *Handlers) orchestratorDevLoopGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user := auth.UserFromContext(r.Context())
@@ -129,7 +139,9 @@ func (h *Handlers) orchestratorDevLoopGate(next http.Handler) http.Handler {
 			return
 		}
 		code := orchestratorDevLoopRefusal(r)
-		h.auditOrchestratorDevLoop(r, user, code, "")
+		if code != "" || !isOrchestratorDevLoopStart(r) {
+			h.auditOrchestratorDevLoop(r, user, code, "")
+		}
 		if code != "" {
 			writeErrorCode(w, http.StatusForbidden, code, orchestratorDevLoopRefusalText[code], nil)
 			return
@@ -157,4 +169,12 @@ func (h *Handlers) auditOrchestratorDevLoop(r *http.Request, user *auth.User, co
 		RiskLevel:  string(operations.RiskMedium),
 		Message:    msg,
 	})
+}
+
+// auditOrchestratorDevLoopInvalid records a malformed start of the
+// orchestrator principal, and nothing for any other caller.
+func (h *Handlers) auditOrchestratorDevLoopInvalid(r *http.Request, user *auth.User, issueURL string) {
+	if user.IsOrchestratorDevLoop() {
+		h.auditOrchestratorDevLoop(r, user, codeOrchestratorInvalidRequest, issueURL)
+	}
 }

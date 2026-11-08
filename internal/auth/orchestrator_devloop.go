@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 )
 
 // Orchestrator DevLoop principal (mctl-api#963). The Codex orchestrator on
@@ -44,6 +45,16 @@ const (
 	orchestratorDevLoopSubjectEnv  = "MCTL_ORCHESTRATOR_DEVLOOP_SUBJECT"
 )
 
+// orchestratorDevLoopMisconfigLogged keeps a misconfiguration to one log
+// line: the mapping is judged on every generic OIDC request.
+var orchestratorDevLoopMisconfigLogged sync.Map
+
+func logOrchestratorDevLoopMisconfig(provider, subject, msg string) {
+	if _, seen := orchestratorDevLoopMisconfigLogged.LoadOrStore(provider+"\x00"+subject, true); !seen {
+		slog.Error(msg, "provider_env", orchestratorDevLoopProviderEnv, "subject_env", orchestratorDevLoopSubjectEnv, "provider", provider)
+	}
+}
+
 // orchestratorDevLoopIdentity reads the configured (provider, subject), or
 // false when the mapping is off or misconfigured.
 func orchestratorDevLoopIdentity() (string, string, bool) {
@@ -53,14 +64,12 @@ func orchestratorDevLoopIdentity() (string, string, bool) {
 	case provider == "" && subject == "":
 		return "", "", false
 	case provider == "" || subject == "":
-		slog.Error("orchestrator-devloop identity half-configured; principal disabled",
-			"provider_env", orchestratorDevLoopProviderEnv, "subject_env", orchestratorDevLoopSubjectEnv)
+		logOrchestratorDevLoopMisconfig(provider, subject, "orchestrator-devloop identity half-configured; principal disabled")
 		return "", "", false
 	case reservedProviderNames[provider] || provider == ProviderDex:
 		// Not a federated machine-user namespace: a built-in principal type,
 		// or the legacy Dex slot, which userFromVerified maps before this.
-		slog.Error("orchestrator-devloop provider names a reserved identity namespace; principal disabled",
-			"env", orchestratorDevLoopProviderEnv, "provider", provider)
+		logOrchestratorDevLoopMisconfig(provider, subject, "orchestrator-devloop provider names a reserved identity namespace; principal disabled")
 		return "", "", false
 	}
 	return provider, subject, true

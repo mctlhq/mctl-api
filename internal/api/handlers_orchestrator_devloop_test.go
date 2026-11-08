@@ -55,6 +55,7 @@ func TestOrchestratorDevLoop_GateRefusals(t *testing.T) {
 		{http.MethodGet, "/api/v1/agents/dev-loop/start", codeOrchestratorRouteNotAllowed},
 		{http.MethodGet, "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-1", codeOrchestratorRepoNotAllowed},
 		{http.MethodGet, "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-api-extra-1", codeOrchestratorRepoNotAllowed},
+		{http.MethodGet, "/api/v1/agents/dev-loop/dev-loop-mctlhq-MCTL-API-963", codeOrchestratorRepoNotAllowed},
 		{http.MethodGet, "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-api%2D963", codeOrchestratorRouteNotAllowed},
 	}
 	for _, c := range cases {
@@ -80,7 +81,7 @@ func TestOrchestratorDevLoop_GateRefusals(t *testing.T) {
 // A start for an allowed repository reaches Temporal on the dev-loop path;
 // one for any other repository, or with an empty allow-list, does not.
 func TestOrchestratorDevLoop_StartIsConfinedToTheAllowList(t *testing.T) {
-	t.Setenv(orchestratorDevLoopReposEnv, " mctlhq/MCTL-API , ")
+	t.Setenv(orchestratorDevLoopReposEnv, " mctlhq/mctl-api , ")
 	fake := &fakeDevLoopClient{describeErr: serviceerror.NewNotFound("workflow not found"), workflowID: "dev-loop-mctlhq-mctl-api-963", runID: "run-1"}
 	router, log := orchestratorRouter(t, fake)
 
@@ -98,10 +99,18 @@ func TestOrchestratorDevLoop_StartIsConfinedToTheAllowList(t *testing.T) {
 	if started == nil || started.UserID != auth.OrchestratorDevLoopUserID || started.Status != "succeeded" {
 		t.Fatalf("start audit row: %+v", started)
 	}
+	// The handler's row is the start's only record: the gate writes no
+	// "allowed" row a later refusal could contradict.
+	if n := countOrchestratorRows(log, "allowed"); n != 0 {
+		t.Fatalf("gate wrote %d allowed rows for a start", n)
+	}
 
 	for _, url := range []string{
 		"https://github.com/mctlhq/mctl-telegram/issues/1",
 		"https://github.com/mctlhq/mctl-api-fork/issues/1",
+		// Same issue, other case: a different workflow id, so a case-folded
+		// match would start a second loop for it.
+		"https://github.com/mctlhq/MCTL-API/issues/963",
 	} {
 		rec := serve(router, http.MethodPost, orchestratorDevLoopStartRoute, `{"issue_url":"`+url+`"}`)
 		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), codeOrchestratorRepoNotAllowed) {
@@ -110,6 +119,20 @@ func TestOrchestratorDevLoop_StartIsConfinedToTheAllowList(t *testing.T) {
 	}
 	if fake.startCalls != 1 {
 		t.Fatalf("a refused start reached Temporal: startCalls=%d", fake.startCalls)
+	}
+	if a, d := countOrchestratorRows(log, "allowed"), countOrchestratorRows(log, "denied"); a != 0 || d != 3 {
+		t.Fatalf("refused starts: %d allowed and %d denied rows, want 0 and 3", a, d)
+	}
+
+	// A malformed start is audited too, once, as denied.
+	for _, body := range []string{`not json`, `{}`, `{"issue_url":"https://example.com/x"}`} {
+		rec := serve(router, http.MethodPost, orchestratorDevLoopStartRoute, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: got %d, want 400", body, rec.Code)
+		}
+	}
+	if d := countOrchestratorRows(log, "denied"); d != 6 {
+		t.Fatalf("malformed starts: %d denied rows in all, want 6", d)
 	}
 
 	t.Setenv(orchestratorDevLoopReposEnv, "")
@@ -128,15 +151,22 @@ func TestOrchestratorDevLoop_ReadIsAdmittedAndAudited(t *testing.T) {
 	if rec.Code != http.StatusOK || fake.lastDescribedWorkflow != "dev-loop-mctlhq-mctl-api-963" {
 		t.Fatalf("read: got %d %s, described %q", rec.Code, rec.Body.String(), fake.lastDescribedWorkflow)
 	}
-	allowed := 0
+	if rec := serve(router, http.MethodGet, "/api/v1/whoami", ""); rec.Code == http.StatusForbidden {
+		t.Fatalf("whoami: got %d %s", rec.Code, rec.Body.String())
+	}
+	if n := countOrchestratorRows(log, "allowed"); n != 2 {
+		t.Fatalf("audited admitted requests: got %d, want 2", n)
+	}
+}
+
+func countOrchestratorRows(log *audit.Logger, status string) int {
+	n := 0
 	for _, e := range log.List(100) {
-		if e.Operation == orchestratorDevLoopAuditOperation && e.Status == "allowed" {
-			allowed++
+		if e.Operation == orchestratorDevLoopAuditOperation && e.Status == status && e.UserID == auth.OrchestratorDevLoopUserID {
+			n++
 		}
 	}
-	if allowed != 1 {
-		t.Fatalf("audited admitted reads: got %d, want 1", allowed)
-	}
+	return n
 }
 
 // Defence in depth behind the gate: the approve handler itself refuses the
