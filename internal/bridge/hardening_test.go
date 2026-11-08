@@ -202,7 +202,10 @@ func TestPGResultHasNoLeaseTokenAndLegacyScrub(t *testing.T) {
 	id := enqueue(t, s, tenant, KindQuote)
 	cmd := claimOne(t, s, c, id)
 	body := resultBody(id, cmd)
-	res, _ := ParseResult(body)
+	res, err := ParseResult(body)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.SubmitResult(ctx, c, id, body); err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +217,9 @@ func TestPGResultHasNoLeaseTokenAndLegacyScrub(t *testing.T) {
 		t.Fatalf("stored result leaks token: %s", raw)
 	}
 	var digest string
-	_ = s.pool.QueryRow(ctx, `SELECT result_digest FROM bridge_commands WHERE command_id=$1`, id).Scan(&digest)
+	if err := s.pool.QueryRow(ctx, `SELECT result_digest FROM bridge_commands WHERE command_id=$1`, id).Scan(&digest); err != nil {
+		t.Fatal(err)
+	}
 	if digest != res.Digest() {
 		t.Fatalf("digest changed: %s", digest)
 	}
@@ -224,8 +229,11 @@ func TestPGResultHasNoLeaseTokenAndLegacyScrub(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, err := s.ReadOutcome(ctx, id)
-	if err != nil || strings.Contains(string(out.Result), "lease_token") {
-		t.Fatalf("ReadOutcome leaks: %v %s", err, out.Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out.Result), "lease_token") {
+		t.Fatalf("ReadOutcome leaks: %s", out.Result)
 	}
 	for i := 0; i < 1000; i++ {
 		n, rem, err := s.ScrubLegacyResultBatch(ctx, 50)
@@ -237,7 +245,9 @@ func TestPGResultHasNoLeaseTokenAndLegacyScrub(t *testing.T) {
 		}
 	}
 	var left int
-	_ = s.pool.QueryRow(ctx, `SELECT count(*) FROM bridge_commands WHERE result ? 'lease_token'`).Scan(&left)
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM bridge_commands WHERE result ? 'lease_token'`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
 	if left != 0 {
 		t.Fatalf("%d legacy rows remain", left)
 	}
@@ -255,7 +265,9 @@ func TestPGExpireDueWithoutPollerAndAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 	var status string
-	_ = s.pool.QueryRow(ctx, `SELECT status FROM bridge_commands WHERE command_id=$1`, id).Scan(&status)
+	if err := s.pool.QueryRow(ctx, `SELECT status FROM bridge_commands WHERE command_id=$1`, id).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
 	if status != StatusExpired {
 		t.Fatalf("status %s", status)
 	}
@@ -268,10 +280,79 @@ func TestPGExpireDueWithoutPollerAndAudit(t *testing.T) {
 		t.Fatalf("transition %s -> %s by %s", from, to, actor)
 	}
 	var n int
-	_ = s.pool.QueryRow(ctx, `SELECT count(*) FROM bridge_signal_outbox WHERE command_id=$1 AND result_digest='expired'`, id).Scan(&n)
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM bridge_signal_outbox WHERE command_id=$1 AND result_digest='expired'`, id).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
 	if n != 1 {
 		t.Fatalf("outbox rows %d", n)
 	}
+}
+
+func TestPGLegacyScrubSkipsLockedWriterAndResumes(t *testing.T) {
+	s := pgStore(t)
+	ctx := context.Background()
+	tenant := fmt.Sprintf("scrub-race-%d", time.Now().UnixNano())
+	caller := Caller{ProviderRef: "glovo", Actor: "service:bridge-provider:glovo", Tenants: []string{tenant}}
+	ids := []string{
+		enqueue(t, s, tenant, KindQuote),
+		enqueue(t, s, tenant, KindQuote),
+	}
+	for _, id := range ids {
+		claimed := claimOne(t, s, caller, id)
+		if _, err := s.SubmitResult(ctx, caller, id, resultBody(id, claimed)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.pool.Exec(ctx, `UPDATE bridge_commands
+			SET result=result || '{"lease_token":"lt_legacy"}'::jsonb
+			WHERE command_id=$1`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A concurrent legacy writer holds one result row while the scrub batch
+	// runs. SKIP LOCKED must never block or overwrite the uncommitted write.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `UPDATE bridge_commands
+		SET result=result || '{"lease_token":"lt_racing"}'::jsonb
+		WHERE command_id=$1`, ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	n, _, err := s.ScrubLegacyResultBatch(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n > 1 {
+		t.Fatalf("batch updated %d rows, limit=1", n)
+	}
+	var stillLegacy bool
+	if err := s.pool.QueryRow(ctx, `SELECT result ? 'lease_token' FROM bridge_commands WHERE command_id=$1`, ids[0]).Scan(&stillLegacy); err != nil {
+		t.Fatal(err)
+	}
+	if !stillLegacy {
+		t.Fatal("scrub modified a row locked by a concurrent writer")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Restartable: a subsequent bounded invocation must clean both rows.
+	for attempt := 0; attempt < 20; attempt++ {
+		if _, _, err := s.ScrubLegacyResultBatch(ctx, 100); err != nil {
+			t.Fatal(err)
+		}
+		var count int
+		if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM bridge_commands
+			WHERE command_id = ANY($1) AND result ? 'lease_token'`, ids).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count == 0 {
+			return
+		}
+	}
+	t.Fatal("scrub could not clean previously locked legacy results")
 }
 
 func TestPGExpiredLeasedPermitIsUnknownAndAudited(t *testing.T) {
@@ -348,7 +429,9 @@ func TestPGReclaimAuditRecordsRealPriorStatus(t *testing.T) {
 	for rows.Next() {
 		var f, to string
 		var e int64
-		_ = rows.Scan(&f, &to, &e)
+		if err := rows.Scan(&f, &to, &e); err != nil {
+			t.Fatal(err)
+		}
 		got = append(got, fmt.Sprintf("%s>%s@%d", f, to, e))
 	}
 	want := ">pending@0,pending>leased@1,leased>leased@2"
