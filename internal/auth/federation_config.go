@@ -160,9 +160,10 @@ func ParseOIDCProviders(raw string) ([]OIDCProviderConfigEntry, error) {
 }
 
 // validSubjectAudiences refuses a subject_audiences map that would widen
-// more than one named subject: an empty subject, an empty list or an empty
-// audience. Not on the "dex" slot, whose audience handling is the legacy
-// shim's.
+// more than one named subject or never match: an empty map, an empty or
+// padded subject, an empty list, an empty or padded audience, or a subject
+// claim other than sub. Not on the "dex" slot, whose audience handling is
+// the legacy shim's.
 func validSubjectAudiences(e *OIDCProviderConfigEntry) error {
 	if e.SubjectAudiences == nil {
 		return nil
