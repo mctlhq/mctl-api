@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"sync"
 	"time"
@@ -58,6 +59,8 @@ const (
 	MaxTTL          = 900 * time.Second
 	DefaultLeaseTTL = 60 * time.Second
 	MaxClaimBatch   = 10
+
+	DefaultExpiryBatch = 100
 )
 
 // bridgeSchema is applied on every start, like commerceSchema. It is purely
@@ -113,6 +116,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS bridge_commands_sequence
     ON bridge_commands (execution_id, sequence);
 CREATE INDEX IF NOT EXISTS bridge_commands_claimable
     ON bridge_commands (provider_ref, status, created_at);
+CREATE INDEX IF NOT EXISTS bridge_commands_expiry
+    ON bridge_commands (expires_at) WHERE status IN ('pending','leased');
 
 CREATE TABLE IF NOT EXISTS bridge_command_transitions (
     id           BIGSERIAL   PRIMARY KEY,
@@ -558,43 +563,12 @@ func (s *Store) Claim(ctx context.Context, c Caller, max int, leaseTTL time.Dura
 }
 
 func (s *Store) claimTx(ctx context.Context, tx pgx.Tx, c Caller, max int, leaseTTL time.Duration) ([]Claimed, error) {
-	// Lazy expiry: an expired command that held a write permit has an unknown
-	// effect, never "none".
-	rows, err := tx.Query(ctx, `UPDATE bridge_commands SET status='expired', updated_at=now(),
-			effect_state = CASE WHEN effect_state='permitted' THEN 'unknown' ELSE effect_state END
-		WHERE provider_ref=$1 AND tenant = ANY($2) AND status IN ('pending','leased') AND expires_at <= now()
-		RETURNING command_id, workflow_id, run_id, lease_epoch`, c.ProviderRef, c.Tenants)
-	if err != nil {
-		return nil, fmt.Errorf("bridge: claim expire: %w", err)
-	}
-	type expired struct {
-		id, wf, run string
-		epoch       int64
-	}
-	var exp []expired
-	for rows.Next() {
-		var e expired
-		if err := rows.Scan(&e.id, &e.wf, &e.run, &e.epoch); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("bridge: claim expire scan: %w", err)
-		}
-		exp = append(exp, e)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("bridge: claim expire: %w", err)
-	}
-	for _, e := range exp {
-		if err := addTransition(ctx, tx, e.id, "open", StatusExpired, e.epoch, "system", ""); err != nil {
-			return nil, err
-		}
-		if _, err := tx.Exec(ctx, `INSERT INTO bridge_signal_outbox (command_id, workflow_id, run_id, result_digest)
-			VALUES ($1,$2,$3,'expired') ON CONFLICT (command_id) DO NOTHING`, e.id, e.wf, e.run); err != nil {
-			return nil, fmt.Errorf("bridge: claim expire outbox: %w", err)
-		}
+	// Lazy expiry, scoped to the caller's provider and tenants.
+	if _, err := s.expireTx(ctx, tx, c.ProviderRef, c.Tenants, 0, "system"); err != nil {
+		return nil, err
 	}
 
-	idRows, err := tx.Query(ctx, `SELECT c.command_id FROM bridge_commands c
+	idRows, err := tx.Query(ctx, `SELECT c.command_id, c.status FROM bridge_commands c
 		WHERE c.provider_ref=$1 AND c.tenant = ANY($2) AND c.expires_at > now()
 		  AND (c.status='pending' OR (c.status='leased' AND c.lease_expires_at <= now()))
 		  AND NOT EXISTS (SELECT 1 FROM bridge_commands p WHERE p.execution_id=c.execution_id
@@ -604,10 +578,11 @@ func (s *Store) claimTx(ctx context.Context, tx pgx.Tx, c Caller, max int, lease
 	if err != nil {
 		return nil, fmt.Errorf("bridge: claim select: %w", err)
 	}
-	var ids []string
+	type leaseTarget struct{ id, status string }
+	var ids []leaseTarget
 	for idRows.Next() {
-		var id string
-		if err := idRows.Scan(&id); err != nil {
+		var id leaseTarget
+		if err := idRows.Scan(&id.id, &id.status); err != nil {
 			idRows.Close()
 			return nil, fmt.Errorf("bridge: claim scan: %w", err)
 		}
@@ -619,7 +594,8 @@ func (s *Store) claimTx(ctx context.Context, tx pgx.Tx, c Caller, max int, lease
 	}
 
 	var out []Claimed
-	for _, id := range ids {
+	for _, target := range ids {
+		id := target.id
 		token, err := randURL(24)
 		if err != nil {
 			return nil, err
@@ -644,7 +620,7 @@ func (s *Store) claimTx(ctx context.Context, tx pgx.Tx, c Caller, max int, lease
 		if err != nil {
 			return nil, err
 		}
-		if err := addTransition(ctx, tx, id, StatusPending, StatusLeased, row.LeaseEpoch, c.Actor, ""); err != nil {
+		if err := addTransition(ctx, tx, id, target.status, StatusLeased, row.LeaseEpoch, c.Actor, ""); err != nil {
 			return nil, err
 		}
 		out = append(out, Claimed{CommandID: id, Command: doc})
@@ -775,7 +751,7 @@ func (s *Store) submitTx(ctx context.Context, tx pgx.Tx, c Caller, res *Result, 
 		return nil, fmt.Errorf("%w: an applied effect needs an issued write permit", ErrResultInconsistent)
 	}
 	effect := effectFor(res, row.EffectState)
-	stored, err := json.Marshal(res)
+	stored, err := res.redacted()
 	if err != nil {
 		return nil, err
 	}
@@ -838,7 +814,7 @@ type Outcome struct {
 func (s *Store) ReadOutcome(ctx context.Context, commandID string) (*Outcome, error) {
 	var o Outcome
 	var result []byte
-	err := s.pool.QueryRow(ctx, `SELECT command_id, status, effect_state, result_digest, result FROM bridge_commands WHERE command_id=$1`,
+	err := s.pool.QueryRow(ctx, `SELECT command_id, status, effect_state, result_digest, result - 'lease_token' FROM bridge_commands WHERE command_id=$1`,
 		commandID).Scan(&o.CommandID, &o.Status, &o.EffectState, &o.ResultDigest, &result)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrCommandNotFound
@@ -848,4 +824,118 @@ func (s *Store) ReadOutcome(ctx context.Context, commandID string) (*Outcome, er
 	}
 	o.Result = result
 	return &o, nil
+}
+
+// expireTx moves due pending/leased commands to expired under row locks
+// (FOR UPDATE SKIP LOCKED), recording the locked prior status in the
+// transition and one expired signal-outbox row. A non-empty provider scopes the
+// pass to that provider and the given tenants; an empty provider is the
+// unscoped sweep. limit <= 0 means no limit. An expired command that held a
+// write permit has an unknown effect, never "none".
+func (s *Store) expireTx(ctx context.Context, tx pgx.Tx, provider string, tenants []string, limit int, actor string) (int, error) {
+	rows, err := tx.Query(ctx, `WITH due AS (
+			SELECT command_id, status AS old_status FROM bridge_commands
+			WHERE status IN ('pending','leased') AND expires_at <= now()
+			  AND ($1 = '' OR (provider_ref = $1 AND tenant = ANY($2)))
+			ORDER BY expires_at, command_id
+			LIMIT CASE WHEN $3 > 0 THEN $3 ELSE NULL END
+			FOR UPDATE SKIP LOCKED)
+		UPDATE bridge_commands b SET status='expired', updated_at=now(),
+			effect_state = CASE WHEN b.effect_state='permitted' THEN 'unknown' ELSE b.effect_state END
+		FROM due WHERE b.command_id = due.command_id
+		RETURNING b.command_id, b.workflow_id, b.run_id, b.lease_epoch, due.old_status`, provider, tenants, limit)
+	if err != nil {
+		return 0, fmt.Errorf("bridge: expire: %w", err)
+	}
+	type expired struct {
+		id, wf, run, old string
+		epoch            int64
+	}
+	var exp []expired
+	for rows.Next() {
+		var e expired
+		if err := rows.Scan(&e.id, &e.wf, &e.run, &e.epoch, &e.old); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("bridge: expire scan: %w", err)
+		}
+		exp = append(exp, e)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("bridge: expire: %w", err)
+	}
+	for _, e := range exp {
+		if err := addTransition(ctx, tx, e.id, e.old, StatusExpired, e.epoch, actor, ""); err != nil {
+			return 0, err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO bridge_signal_outbox (command_id, workflow_id, run_id, result_digest)
+			VALUES ($1,$2,$3,'expired') ON CONFLICT (command_id) DO NOTHING`, e.id, e.wf, e.run); err != nil {
+			return 0, fmt.Errorf("bridge: expire outbox: %w", err)
+		}
+	}
+	return len(exp), nil
+}
+
+// ExpireActor is the transition actor of the background sweep.
+const ExpireActor = "system:expiry-sweep"
+
+// ExpireDue expires up to limit due commands across all providers and
+// tenants in one short transaction. Rows locked by a concurrent claim, result,
+// permit or cancel are skipped and picked up by a later pass.
+func (s *Store) ExpireDue(ctx context.Context, limit int) (int, error) {
+	if limit < 1 {
+		limit = DefaultExpiryBatch
+	}
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("bridge: expire begin: %w", err)
+	}
+	n, err := s.expireTx(ctx, tx, "", nil, limit, ExpireActor)
+	if err := finish(ctx, tx, err); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// ExpiryBacklog reports how many commands are past expires_at and still open,
+// and the age in seconds of the oldest of them (0 when none).
+func (s *Store) ExpiryBacklog(ctx context.Context) (count int64, oldestSeconds float64, err error) {
+	err = s.pool.QueryRow(ctx, `SELECT count(*), COALESCE(EXTRACT(EPOCH FROM (now() - min(expires_at))), 0)
+		FROM bridge_commands WHERE status IN ('pending','leased') AND expires_at <= now()`).Scan(&count, &oldestSeconds)
+	if err != nil {
+		return 0, 0, fmt.Errorf("bridge: expiry backlog: %w", err)
+	}
+	return count, oldestSeconds, nil
+}
+
+// ScrubLegacyResultBatch removes lease_token from up to limit stored results
+// written before redaction, under FOR UPDATE SKIP LOCKED in one short
+// transaction. It is idempotent and restartable; it returns the rows changed
+// and the rows still holding a token. It is an operator-invoked maintenance
+// step and is never called from NewStore.
+func (s *Store) ScrubLegacyResultBatch(ctx context.Context, limit int) (scrubbed int, remaining int64, err error) {
+	if limit < 1 {
+		limit = 100
+	}
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	tx, err := s.begin(cctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("bridge: scrub begin: %w", err)
+	}
+	tag, err := tx.Exec(cctx, `UPDATE bridge_commands SET result = result - 'lease_token'
+		WHERE command_id IN (SELECT command_id FROM bridge_commands
+			WHERE result ? 'lease_token' ORDER BY command_id LIMIT $1 FOR UPDATE SKIP LOCKED)`, limit)
+	if err != nil {
+		_ = tx.Rollback(cctx)
+		return 0, 0, fmt.Errorf("bridge: scrub: %w", err)
+	}
+	if err := finish(cctx, tx, nil); err != nil {
+		return 0, 0, err
+	}
+	if err := s.pool.QueryRow(cctx, `SELECT count(*) FROM bridge_commands WHERE result ? 'lease_token'`).Scan(&remaining); err != nil {
+		return int(tag.RowsAffected()), 0, fmt.Errorf("bridge: scrub remaining: %w", err)
+	}
+	slog.Info("bridge legacy result scrub batch", "scrubbed", tag.RowsAffected(), "remaining", remaining)
+	return int(tag.RowsAffected()), remaining, nil
 }

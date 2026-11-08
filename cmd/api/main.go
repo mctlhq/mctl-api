@@ -1026,6 +1026,15 @@ func main() {
 			} else {
 				bridgeStore = bs
 				defer bs.Close()
+				expiryInterval := time.Duration(0)
+				if v := os.Getenv("MCTL_BRIDGE_EXPIRY_SWEEP_INTERVAL"); v != "" {
+					if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+						expiryInterval = d
+					} else {
+						slog.Warn("ignoring invalid MCTL_BRIDGE_EXPIRY_SWEEP_INTERVAL; using default")
+					}
+				}
+				go (&bridge.Expirer{Store: bs, Interval: expiryInterval}).Run(rootCtx)
 				if temporalReconnecting != nil {
 					d := &bridge.Dispatcher{Outbox: bs, Signaler: temporalReconnecting}
 					go d.Run(rootCtx)

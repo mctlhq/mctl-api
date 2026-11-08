@@ -50,6 +50,26 @@ v1alpha1 `outcome` (a refused approval is `outcome=approval_refused` with
 - A lease expiry reclaims the command under `lease_epoch+1` with a new token and
   a rotated private nonce; the old holder gets `lease_stale`.
 - A command past `expires_at` becomes `expired`; a permitted effect becomes `unknown`.
+  Besides the lazy expiry in `Claim` (scoped to the claiming provider's
+  tenants), a background sweep (`Expirer`, actor `system:expiry-sweep`) runs
+  whenever the bridge is enabled, independent of provider polls and of
+  `TEMPORAL_ADDRESS`. Interval 30s (override `MCTL_BRIDGE_EXPIRY_SWEEP_INTERVAL`),
+  100 rows per batch, a finite number of batches per tick, rows locked by
+  another transaction skipped (`FOR UPDATE SKIP LOCKED`). Under a large backlog,
+  long locks or database failures there is no one-interval guarantee; progress
+  is observable through the sweep's counts, backlog and oldest-overdue age, and
+  the logs warn on sustained overdue age or repeated errors.
+- Transition rows record the status the command had under the row lock as
+  `from_status` (`pending -> leased` for a first lease, `leased -> leased` for a
+  reclaim, `pending|leased -> expired` for expiry).
+- The stored `result` never contains `lease_token`; `result_digest` is
+  unchanged (it still covers the full parsed result). `ReadOutcome` strips
+  `lease_token` from rows written before this change. Historical rows are
+  cleaned by the operator-invoked, bounded `Store.ScrubLegacyResultBatch`,
+  never at startup; run it until `remaining` is 0 before activation. The
+  plaintext `bridge_commands.lease_token` column is not changed here: a separate
+  security decision (including backup retention) is required before the first
+  provider credential is issued (mctl-gitops#2457).
 - Commands of one execution are claimable in `sequence` order.
 - Result CAS: `status='leased'` and the stored epoch and private nonce. The
   signal-outbox row is inserted in the same transaction.
