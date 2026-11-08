@@ -105,6 +105,16 @@ type OIDCProviderSpec struct {
 	// proven GitHub identity, which becomes Identity.Customer (customer.go).
 	// A token that fails either check is refused.
 	CustomersOrgID string
+	// SubjectAudiences accepts, for exactly one verified subject each, an
+	// audience the entry's Audiences do not list (mctl-api#963). A ZITADEL
+	// machine user signing in with its own key gets only the project id in
+	// aud, never the client id the entry enforces, and adding the project
+	// id to Audiences would accept it from every client that asks ZITADEL
+	// for the project audience scope, letting any relying party replay its
+	// users' tokens here. Keyed by subject, the audience proves nothing for
+	// anyone else. The signature, issuer and expiry are checked as for every
+	// token; only the audience decision differs.
+	SubjectAudiences map[string][]string
 }
 
 func (s OIDCProviderSpec) withDefaults() OIDCProviderSpec {
@@ -203,11 +213,14 @@ func (p *oidcProvider) Verify(ctx context.Context, raw string) (*Verified, error
 		return nil, fmt.Errorf("invalid %s JWT: %w", p.spec.Name, err)
 	}
 
+	subject, _ := stringClaim(tok.Claims, p.spec.SubjectClaim)
 	switch {
 	case p.spec.SkipAudienceCheck:
 		federationAudienceCheckSkipped.WithLabelValues(p.spec.Name).Inc()
 	case audienceMatches(tok.Audience, p.spec.Audiences):
 		// Matched; nothing to count.
+	case audienceMatches(tok.Audience, p.spec.SubjectAudiences[subject]):
+		// An audience granted to this one subject (SubjectAudiences).
 	case p.spec.AudienceEnforcement == AudienceEnforce:
 		federationAudienceRejected.WithLabelValues(p.spec.Name).Inc()
 		return nil, fmt.Errorf("token audience %v not in configured audiences %v", tok.Audience, p.spec.Audiences)
@@ -215,7 +228,6 @@ func (p *oidcProvider) Verify(ctx context.Context, raw string) (*Verified, error
 		federationAudienceMismatch.WithLabelValues(p.spec.Name).Inc()
 	}
 
-	subject, _ := stringClaim(tok.Claims, p.spec.SubjectClaim)
 	var display string
 	for _, c := range p.spec.DisplayClaims {
 		if v, ok := stringClaim(tok.Claims, c); ok && v != "" {
