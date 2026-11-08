@@ -157,6 +157,8 @@ func (u *User) Identity() (Identity, bool) {
 		return Identity{Provider: ProviderService, Subject: u.ID, Display: u.ID, Kind: KindService}, true
 	case u.orchestratorDevLoop:
 		return Identity{Provider: u.oidcProviderName, Issuer: u.oidcIssuer, Subject: u.oidcSubject, Display: OrchestratorDevLoopUserID, Kind: KindService}, true
+	case u.bridgeProvider != "":
+		return Identity{Provider: ProviderService, Subject: u.ID, Display: u.ID, Kind: KindService}, true
 	case u.ci:
 		return Identity{Provider: ProviderGitHubActions, Issuer: GitHubActionsIssuer, Subject: u.ciRepositoryID, Display: u.ID, Kind: KindService}, true
 	case u.dev:

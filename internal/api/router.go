@@ -290,6 +290,15 @@ type Options struct {
 	// strongest allowed verification. A provider's authority comes from
 	// here and from its token, never from a request body.
 	SecurityProviders map[string]auth.SecurityProviderConfig
+	// BridgeEnabled turns on the /api/v1/bridge routes (MCTL_BRIDGE_ENABLED,
+	// mctl-api#962). Off by default: the routes answer 404.
+	BridgeEnabled bool
+	// Bridge is the command-bridge store. With BridgeEnabled and a nil Bridge
+	// the routes answer 503.
+	Bridge BridgeService
+	// BridgeProviders is the server-side bridge-provider configuration
+	// (MCTL_BRIDGE_PROVIDERS), keyed by ref: the tenant upper bound of each.
+	BridgeProviders map[string]auth.BridgeProviderConfig
 	// CodeScanningWebhookSecret is the dedicated HMAC secret of
 	// POST /api/v1/security/webhooks/github-code-scanning (mctl-api#802). It
 	// must be at least CodeScanningMinSecretLen long and differ from
@@ -574,6 +583,9 @@ func NewRouter(opts Options) http.Handler {
 		// A security provider reaches the observation ingest route and
 		// nothing else (mctl-api#774).
 		r.Use(securityProviderGate)
+		// A bridge provider reaches the bridge routes and nothing else
+		// (mctl-api#962).
+		r.Use(bridgeProviderGate)
 		// The registry publisher reaches the registry publication routes and
 		// nothing else (mctlhq/mctl-agents#470).
 		r.Use(registryPublisherGate)
@@ -845,6 +857,23 @@ func NewRouter(opts Options) http.Handler {
 				})))
 				r.Post("/security/observations", h.IngestSecurityObservations)
 			})
+
+			// Command bridge (mctl-api#962): dark unless MCTL_BRIDGE_ENABLED.
+			// Provider principals only, with a per-provider limiter.
+			if opts.BridgeEnabled {
+				r.Route("/bridge", func(r chi.Router) {
+					r.Use(requireBridgeProvider)
+					r.Use(httprate.Limit(bridgeClaimPerMin, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+						if user := auth.UserFromContext(r.Context()); user != nil {
+							return "bridge:" + user.ID, nil
+						}
+						return keyByTrustedIP(r)
+					})))
+					r.Post("/commands/claim", h.BridgeClaim)
+					r.Post("/commands/{command_id}/result", h.BridgeResult)
+					r.Post("/commands/{command_id}/write-permit", h.BridgeWritePermit)
+				})
+			}
 
 			// SecurityFinding v1 reads and lifecycle writes (mctl-api#774).
 			r.Get("/security/findings", h.ListSecurityFindings)
