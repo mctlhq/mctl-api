@@ -88,11 +88,18 @@ v1alpha1 `outcome` (a refused approval is `outcome=approval_refused` with
   retention) is required before the first provider credential is issued
   (mctl-gitops#2457).
 
+- Commands of one execution are claimable in `sequence` order.
+- Result CAS: `status='leased'` and the stored epoch and private nonce. The
+  signal-outbox row is inserted in the same transaction.
+- Replay of the same server-computed digest returns `replayed: true`; a
+  different digest after completion is `result_conflict`.
+
 ### Operator-only legacy JSONB scrub (activation prerequisite)
 
 Run only under a separately approved maintenance change and limited DB
 credentials, after confirming old writers cannot reintroduce token-bearing
-results. **Never** invoke from API startup or a deployment hook. Supply the
+results. The schema and indexes must already be migrated: this CLI uses
+`OpenExistingStore` to confirm the table exists and **does not execute DDL**. **Never** invoke from API startup or a deployment hook. Supply the
 database URL through a scoped secret named
 `MCTL_BRIDGE_SCRUB_DATABASE_URL` (not command-line arguments) and keep it
 out of logs and version control:
@@ -117,12 +124,6 @@ and independently query `SELECT count(*) FROM bridge_commands WHERE result
 scrub **does not** erase plaintext `bridge_commands.lease_token` nor any
 previous backup, audit/log export or snapshot. These retain separate
 security-owner and data-retention decisions.
-- Commands of one execution are claimable in `sequence` order.
-- Result CAS: `status='leased'` and the stored epoch and private nonce. The
-  signal-outbox row is inserted in the same transaction.
-- Replay of the same server-computed digest returns `replayed: true`; a
-  different digest after completion is `result_conflict`.
-
 ## Error codes
 
 | Code | HTTP |
