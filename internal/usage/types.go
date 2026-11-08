@@ -371,15 +371,23 @@ func (r *Record) validateCorrelation() error {
 	if r.TemporalRunID != "" && !executionIDPattern.MatchString(r.TemporalRunID) {
 		return fmt.Errorf("%w: temporal_run_id %q is not a valid execution id", ErrInvalidRecord, r.TemporalRunID)
 	}
-	for name, v := range map[string]*int64{"issue_number": r.IssueNumber, "pr_number": r.PRNumber} {
-		if v == nil {
+	// Ordered slice, not a map: the order is fixed so that a record with both
+	// numbers invalid always yields the same error.
+	for _, f := range []struct {
+		name string
+		v    *int64
+	}{
+		{"issue_number", r.IssueNumber},
+		{"pr_number", r.PRNumber},
+	} {
+		if f.v == nil {
 			continue
 		}
-		if *v <= 0 {
-			return fmt.Errorf("%w: %s must be positive", ErrInvalidRecord, name)
+		if *f.v <= 0 {
+			return fmt.Errorf("%w: %s must be positive", ErrInvalidRecord, f.name)
 		}
 		if r.TargetRepo == "" {
-			return fmt.Errorf("%w: %s requires target_repo", ErrInvalidRecord, name)
+			return fmt.Errorf("%w: %s requires target_repo", ErrInvalidRecord, f.name)
 		}
 	}
 	return nil
