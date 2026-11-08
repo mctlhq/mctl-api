@@ -315,8 +315,10 @@ func TestPGOutboxRetrySignal(t *testing.T) {
 	if secs < 3500 || secs > 3601 {
 		t.Fatalf("next_attempt_at is %.0fs ahead, want about 3600", secs)
 	}
-	if got, _ := s.LeaseSignals(ctx, 5, time.Minute); len(got) != 0 {
-		t.Fatal("row leasable before its retry time")
+	if got, err := s.LeaseSignals(ctx, 5, time.Minute); err != nil {
+		t.Fatalf("lease before retry time: %v", err)
+	} else if len(got) != 0 {
+		t.Fatalf("row leasable before its retry time: %v", ids(got))
 	}
 	if _, err := s.pool.Exec(ctx, `UPDATE bridge_signal_outbox SET next_attempt_at = now() - interval '1 second' WHERE command_id='rt'`); err != nil {
 		t.Fatal(err)
