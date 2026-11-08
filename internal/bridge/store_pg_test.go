@@ -247,7 +247,13 @@ func TestPGReclaimAfterPermitMarksEffectUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("result: %v", err)
 	}
-	if out.EffectState == EffectNotPerformed {
-		t.Fatalf("ambiguous effect recorded as not_performed")
+	if out.EffectState != EffectUnknown {
+		t.Fatalf("effect state = %q, want unknown", out.EffectState)
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT effect_state FROM bridge_commands WHERE command_id=$1`, id).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "unknown" {
+		t.Fatalf("stored effect_state = %q, want unknown", state)
 	}
 }

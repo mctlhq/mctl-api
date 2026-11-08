@@ -711,6 +711,10 @@ func effectFor(r *Result, prior string) string {
 	case "unknown":
 		return EffectUnknown
 	}
+	if prior == EffectUnknown {
+		// A reclaimed lease may hide a write the previous holder performed.
+		return EffectUnknown
+	}
 	if r.Outcome == "approval_refused" || prior == EffectPermitted {
 		return EffectNotPerformed
 	}
