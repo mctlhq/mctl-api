@@ -26,6 +26,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -440,9 +441,33 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		// that read only "error" (the MCP tools' doRequest, shell clients)
 		// would otherwise report a bare "validation failed". The prefix is
 		// unchanged for anything that matches on it.
+		//
+		// Audited like the other refusals in this handler (mctl-api#760). This
+		// runs before the grant is bound or spent and before Submit, so an
+		// invalid request consumes nothing and reaches no executor.
+		auditParams := redactSecrets(op, input)
+		// redactSecrets keys on the parameter name; a non-secret field that
+		// carries a secret's value would still record it, so match on value too.
+		for k, v := range auditParams {
+			for _, s := range secretValues(op, input, false) {
+				if v == s {
+					auditParams[k] = "[REDACTED]"
+				}
+			}
+		}
+		auditParams["code"] = codeValidationFailed
+		h.logAudit(r, audit.Entry{
+			UserID:     user.ID,
+			Operation:  opName,
+			Parameters: auditParams,
+			Status:     "denied",
+			RiskLevel:  string(op.RiskLevel),
+			Message:    codeValidationFailed + ": " + strings.Join(scrubSecretValues(op, input, errs), "; "),
+		})
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 			"error":            "validation failed: " + strings.Join(errs, "; "),
 			"validationErrors": errs,
+			"code":             codeValidationFailed,
 		})
 		return
 	}
@@ -737,6 +762,63 @@ func extractTenantParam(op operations.Operation, input map[string]string) string
 		}
 	}
 	return ""
+}
+
+// codeValidationFailed is the stable machine-readable code of an
+// ExecuteOperation request refused by Registry.ValidateInput (mctl-api#760).
+const codeValidationFailed = "validation_failed"
+
+// minSecretLineValueLen keeps a short "=" value of a secret block (true, 1)
+// from being scrubbed out of the reasons, where it would also hit unrelated
+// words such as the enum text "true, false".
+const minSecretLineValueLen = 4
+
+// secretValues lists the submitted values of the operation's Secret
+// parameters, longest first. withLines adds the value after "=" on each line
+// of a KEY=value block (when at least minSecretLineValueLen long).
+func secretValues(op operations.Operation, input map[string]string, withLines bool) []string {
+	var secrets []string
+	for i := range op.Parameters {
+		p := &op.Parameters[i]
+		if !p.Secret {
+			continue
+		}
+		v := input[p.Name]
+		if v == "" {
+			continue
+		}
+		secrets = append(secrets, v)
+		if !withLines {
+			continue
+		}
+		for _, line := range strings.Split(v, "\n") {
+			if _, val, ok := strings.Cut(strings.TrimSpace(line), "="); ok && len(val) >= minSecretLineValueLen {
+				secrets = append(secrets, val)
+			}
+		}
+	}
+	sort.Slice(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
+	return secrets
+}
+
+// scrubSecretValues returns reasons with every submitted value of a Secret
+// parameter replaced by [REDACTED]. A validation reason may echo a submitted
+// value (the reserved-service message does), and the audit Message must not
+// carry what the audit Parameters redact. Whole values and each "=" value of a
+// multi-line KEY=value block are scrubbed, longest first.
+func scrubSecretValues(op operations.Operation, input map[string]string, reasons []string) []string {
+	secrets := secretValues(op, input, true)
+	if len(secrets) == 0 {
+		return reasons
+	}
+	out := make([]string, len(reasons))
+	for i, reason := range reasons {
+		for _, s := range secrets {
+			reason = strings.ReplaceAll(reason, s, "[REDACTED]")
+		}
+		out[i] = reason
+	}
+	return out
 }
 
 func redactSecrets(op operations.Operation, input map[string]string) map[string]string {
