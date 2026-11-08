@@ -50,23 +50,34 @@ func run(ctx context.Context, args []string, getenv func(string) string, output 
 	if dbURL == "" {
 		return errors.New("bridge-scrub: MCTL_BRIDGE_SCRUB_DATABASE_URL is required")
 	}
-	store, err := bridge.NewStore(ctx, dbURL)
+	store, err := bridge.OpenExistingStore(ctx, dbURL)
 	if err != nil {
 		return fmt.Errorf("bridge-scrub: open store: %w", err)
 	}
 	defer store.Close()
+	return scrubBatches(ctx, store, output, *limit, *maxBatches)
+}
 
+// legacyScrubber makes the bounded maintenance loop testable independently of
+// credentials and a live database. Production supplies a pre-migrated Store.
+type legacyScrubber interface {
+	ScrubLegacyResultBatch(context.Context, int) (int, int64, error)
+}
+
+func scrubBatches(ctx context.Context, store legacyScrubber, output io.Writer, limit, maxBatches int) error {
 	total := 0
 	var remaining int64
-	for i := 1; i <= *maxBatches; i++ {
+	for i := 1; i <= maxBatches; i++ {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("bridge-scrub: cancelled after %d rows: %w", total, err)
 		}
-		n, left, err := store.ScrubLegacyResultBatch(ctx, *limit)
+		n, left, err := store.ScrubLegacyResultBatch(ctx, limit)
+		// A batch may commit its update before the remaining-count query fails.
+		// Include its committed rows in the failure message for accurate recovery.
+		total += n
 		if err != nil {
 			return fmt.Errorf("bridge-scrub: batch %d failed (processed %d rows): %w", i, total, err)
 		}
-		total += n
 		remaining = left
 		if _, err := fmt.Fprintf(output, "batch=%d scrubbed=%d total_scrubbed=%d remaining=%d\n", i, n, total, remaining); err != nil {
 			return fmt.Errorf("bridge-scrub: write output: %w", err)
