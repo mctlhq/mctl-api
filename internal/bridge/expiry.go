@@ -86,14 +86,23 @@ func (e *Expirer) RunOnce(ctx context.Context) (int, error) {
 		maxBatches = defaultExpiryMaxBatch
 	}
 	total := 0
-	for i := 0; i < maxBatches; i++ {
-		n, err := e.Store.ExpireDue(ctx, batch)
-		if err != nil {
+	recordError := func(err error) (int, error) {
+		// Shutdown cancellation is expected, not a failed expiry sweep.
+		if ctx.Err() == nil {
 			e.errCount.Add(1)
 			if c := e.consecErrs.Add(1); c >= consecutiveErrorsAlert {
-				slog.Error("bridge expiry sweep failing persistently", "consecutive_errors", c)
+				slog.Error("bridge expiry sweep failing persistently", "consecutive_errors", c, "error", err)
 			}
+		}
+		return total, err
+	}
+	for i := 0; i < maxBatches; i++ {
+		if err := ctx.Err(); err != nil {
 			return total, err
+		}
+		n, err := e.Store.ExpireDue(ctx, batch)
+		if err != nil {
+			return recordError(err)
 		}
 		total += n
 		e.processed.Add(int64(n))
@@ -101,14 +110,18 @@ func (e *Expirer) RunOnce(ctx context.Context) (int, error) {
 			break
 		}
 	}
+	// A failed backlog query must not quietly overwrite the previous healthy
+	// snapshot, clear consecutive errors, or claim this sweep succeeded.
+	cnt, oldest, err := e.Store.ExpiryBacklog(ctx)
+	if err != nil {
+		return recordError(err)
+	}
+	e.backlog.Store(cnt)
+	e.oldestOverdu.Store(int64(oldest))
 	e.consecErrs.Store(0)
 	e.lastSuccess.Store(time.Now().Unix())
-	if cnt, oldest, err := e.Store.ExpiryBacklog(ctx); err == nil {
-		e.backlog.Store(cnt)
-		e.oldestOverdu.Store(int64(oldest))
-		if oldest > overdueWarnSeconds {
-			slog.Warn("bridge expiry backlog overdue", "backlog", cnt, "oldest_overdue_seconds", int64(oldest))
-		}
+	if oldest > overdueWarnSeconds {
+		slog.Warn("bridge expiry backlog overdue", "backlog", cnt, "oldest_overdue_seconds", int64(oldest))
 	}
 	if total > 0 {
 		slog.Info("bridge expiry sweep", "expired", total)
@@ -125,6 +138,9 @@ func (e *Expirer) Run(ctx context.Context) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		if _, err := e.RunOnce(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("bridge expiry sweep failed", "error", err)
 		}
