@@ -16,6 +16,7 @@ package api_test
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -207,6 +208,17 @@ func TestCIDeploy_RefusesEveryParameterOutsideTheAllowlist(t *testing.T) {
 	}
 }
 
+// The refusal lists every offending parameter in a stable order, whatever the
+// map iteration gives.
+func TestCIDeploy_ListsDisallowedParametersSorted(t *testing.T) {
+	f := newCIFixture(t, defaultRepos())
+	body := ciBody()
+	for _, p := range []string{"port", "host", "env_vars", "clear_env", "image_tag"} {
+		body[p] = "x"
+	}
+	f.refused(t, body, http.StatusForbidden, "parameters not allowed for CI: clear_env, env_vars, host, image_tag, port")
+}
+
 func TestCIDeploy_RefusesOtherOperations(t *testing.T) {
 	// Behind the route gate this is unreachable; called directly on the
 	// handler path it is refused on its own.
@@ -315,6 +327,55 @@ func TestCIDeploy_DenialRecordsWhatWasAsked(t *testing.T) {
 	}
 	if _, leaked := e.Parameters["secret_env_vars"]; leaked {
 		t.Fatal("a refused secret was written to the audit log")
+	}
+}
+
+// A refused dockerfile_path is the thing that was refused, so the denial row
+// must carry it verbatim, next to the other identifying fields, and still
+// never the secret.
+func TestCIDeploy_DeniedDockerfilePathIsAudited(t *testing.T) {
+	const sentinel = "SECRET-SENTINEL-532"
+	const path = "../../etc/Dockerfile"
+	f := newCIFixture(t, defaultRepos())
+	body := ciBody()
+	body["dockerfile_path"] = path
+	w := postAs(t, f.router, "/api/v1/operations/deploy-service/execute", body, ciUser())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400; body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "ci_deploy_denied") {
+		t.Fatalf("body %s does not carry code ci_deploy_denied", w.Body.String())
+	}
+	if len(f.exec.submitted) != 0 {
+		t.Fatalf("a workflow was submitted: %v", f.exec.submitted)
+	}
+	entries := f.audit.List(10)
+	if len(entries) != 1 || entries[0].Status != "denied" {
+		t.Fatalf("want exactly one denied audit entry, got %+v", entries)
+	}
+	e := entries[0]
+	if e.Parameters["dockerfile_path"] != path {
+		t.Fatalf("dockerfile_path not recorded verbatim: %v", e.Parameters)
+	}
+
+	// The same bad path alongside a secret is refused (earlier, for the
+	// parameter) and the secret reaches neither the audit row nor the response.
+	g := newCIFixture(t, defaultRepos())
+	body["secret_env_vars"] = "TOKEN=" + sentinel
+	w = postAs(t, g.router, "/api/v1/operations/deploy-service/execute", body, ciUser())
+	if w.Code != http.StatusForbidden || len(g.exec.submitted) != 0 {
+		t.Fatalf("status %d, submitted %v; body: %s", w.Code, g.exec.submitted, w.Body.String())
+	}
+	entries = g.audit.List(10)
+	if len(entries) != 1 || entries[0].Status != "denied" {
+		t.Fatalf("want exactly one denied audit entry, got %+v", entries)
+	}
+	e = entries[0]
+	if _, leaked := e.Parameters["secret_env_vars"]; leaked {
+		t.Fatal("a refused secret was written to the audit log")
+	}
+	if strings.Contains(fmt.Sprint(e.Parameters), sentinel) || strings.Contains(e.Message, sentinel) || strings.Contains(w.Body.String(), sentinel) {
+		t.Fatal("the secret sentinel reached the audit entry or the response")
 	}
 }
 
