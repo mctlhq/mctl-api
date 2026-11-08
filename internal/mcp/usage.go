@@ -71,7 +71,7 @@ func (s *Server) toolGetUsageSummary() (mcplib.Tool, server.ToolHandlerFunc) {
 
 Costs are three separate numbers and are never added together: provider_reported_cost, calculated_cost (a list-price estimate, neither provider-billed nor invoice spend) and invoice_reconciled_cost. A null cost means not recorded, not zero.
 
-"total" (sums of the returned buckets) is present only when truncated is false; a truncated list is clipped by record count and gets total_unavailable_reason instead. If the ledger is unavailable the call fails with usage UNKNOWN, not zero. A missing stage bucket means no rows were recorded for it: producer coverage is incomplete (mctl-agents#507).`),
+"total" (sums of the returned buckets) is present only when truncated is false; a truncated list is clipped (see truncated_by) and gets total_unavailable_reason instead. When a summed field is reported by only some buckets, total_coverage gives buckets_reporting of the total bucket count for it. If the ledger is unavailable the call fails with usage UNKNOWN, not zero. A missing stage bucket means no rows were recorded for it: producer coverage is incomplete (mctl-agents#507).`),
 		mcplib.WithString("group_by",
 			mcplib.Description("Bucket dimension; default devloop_stage. Aliases: stage, model."),
 			mcplib.Enum(usageGroupByValues()...)),
@@ -111,11 +111,11 @@ Costs are three separate numbers and are never added together: provider_reported
 				continue
 			}
 			n, ok := raw.(float64)
-			max := float64(math.MaxInt32)
+			upper := float64(math.MaxInt32)
 			if name == "limit" {
-				max = usage.MaxQueryLimit
+				upper = usage.MaxQueryLimit
 			}
-			if !ok || n < 1 || n != math.Trunc(n) || n > max {
+			if !ok || n < 1 || n != math.Trunc(n) || n > upper {
 				if name == "limit" {
 					return mcplib.NewToolResultError("limit must be an integer in 1.." + strconv.Itoa(usage.MaxQueryLimit)), nil
 				}
@@ -128,7 +128,7 @@ Costs are three separate numbers and are never added together: provider_reported
 		if errResult != nil {
 			return errResult, nil
 		}
-		if v := strings.TrimSpace(rawGB); v != "" {
+		if v := strings.ToLower(strings.TrimSpace(rawGB)); v != "" {
 			switch v {
 			case "stage":
 				v = string(usage.GroupByStage)
@@ -162,56 +162,85 @@ Costs are three separate numbers and are never added together: provider_reported
 	return tool, handler
 }
 
-// usageSummaryOut is the tool's output; the API fields are re-emitted as
-// received.
-type usageSummaryOut struct {
-	GroupBy                json.RawMessage              `json:"group_by"`
-	Buckets                []map[string]json.RawMessage `json:"buckets"`
-	Truncated              bool                         `json:"truncated"`
-	TruncatedBy            json.RawMessage              `json:"truncated_by,omitempty"`
-	Limit                  json.RawMessage              `json:"limit,omitempty"`
-	Total                  map[string]json.RawMessage   `json:"total,omitempty"`
-	TotalUnavailableReason string                       `json:"total_unavailable_reason,omitempty"`
-	CostSemantics          map[string]string            `json:"cost_semantics"`
-	Note                   string                       `json:"note,omitempty"`
+// usageCoverage records that a summed field was reported by only some buckets.
+type usageCoverage struct {
+	BucketsReporting int `json:"buckets_reporting"`
+	Of               int `json:"of"`
 }
 
-func buildUsageSummary(body []byte) ([]byte, error) {
-	var in struct {
-		GroupBy     json.RawMessage              `json:"group_by"`
-		Buckets     []map[string]json.RawMessage `json:"buckets"`
-		Truncated   bool                         `json:"truncated"`
-		TruncatedBy json.RawMessage              `json:"truncated_by"`
-		Limit       json.RawMessage              `json:"limit"`
+// usageTruncationReason names the actual truncation axis and limit from the
+// API response; a missing axis or limit is left out rather than guessed.
+func usageTruncationReason(truncatedBy, limit json.RawMessage) string {
+	axis := "an unknown axis"
+	var s string
+	if err := json.Unmarshal(truncatedBy, &s); err == nil && s != "" {
+		axis = s
 	}
+	at := ""
+	if l := strings.TrimSpace(string(limit)); l != "" && l != "null" {
+		at = " at limit " + l
+	}
+	return fmt.Sprintf("bucket list truncated by %s%s; a sum of the returned buckets would understate usage. Narrow the filter or raise limit.", axis, at)
+}
+
+// buildUsageSummary re-emits every top-level API key as received, so a new
+// API caveat is never dropped. The computed keys always win over an API key of
+// the same name: buckets (normalised to []), truncated, total,
+// total_unavailable_reason, total_coverage, cost_semantics and note.
+func buildUsageSummary(body []byte) ([]byte, error) {
+	var in map[string]json.RawMessage
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	if err := dec.Decode(&in); err != nil {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
-	out := usageSummaryOut{
-		GroupBy:       in.GroupBy,
-		Buckets:       in.Buckets,
-		Truncated:     in.Truncated,
-		Limit:         in.Limit,
-		CostSemantics: usageCostSemantics,
+	if in == nil {
+		in = map[string]json.RawMessage{}
 	}
-	if out.Buckets == nil {
-		out.Buckets = []map[string]json.RawMessage{}
+	var buckets []map[string]json.RawMessage
+	if raw := in["buckets"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &buckets); err != nil {
+			return nil, fmt.Errorf("decoding buckets: %w", err)
+		}
 	}
-	if len(in.TruncatedBy) > 0 && string(in.TruncatedBy) != "null" {
-		out.TruncatedBy = in.TruncatedBy
+	if buckets == nil {
+		buckets = []map[string]json.RawMessage{}
 	}
-	if in.Truncated {
-		out.TotalUnavailableReason = fmt.Sprintf("bucket list truncated by record_count at limit %s; a sum of the returned buckets would understate usage. Narrow the filter or raise limit.", string(in.Limit))
+	var truncated bool
+	if raw := in["truncated"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &truncated); err != nil {
+			return nil, fmt.Errorf("decoding truncated: %w", err)
+		}
+	}
+
+	out := make(map[string]any, len(in)+6)
+	for k, v := range in {
+		out[k] = v
+	}
+	// Computed keys must not be overridden by the API.
+	for _, k := range []string{"total", "total_unavailable_reason", "total_coverage", "note"} {
+		delete(out, k)
+	}
+	if tb, ok := in["truncated_by"]; ok && (len(tb) == 0 || string(tb) == "null") {
+		delete(out, "truncated_by")
+	}
+	out["buckets"] = buckets
+	out["truncated"] = truncated
+	out["cost_semantics"] = usageCostSemantics
+	if truncated {
+		out["total_unavailable_reason"] = usageTruncationReason(in["truncated_by"], in["limit"])
 	} else {
-		total, err := sumUsageBuckets(out.Buckets)
+		total, coverage, err := sumUsageBuckets(buckets)
 		if err != nil {
 			return nil, err
 		}
-		out.Total = total
-		if len(out.Buckets) == 0 {
-			out.Note = "no ledger records matched this filter; this is not evidence of zero spend for uninstrumented producers"
+		out["total"] = total
+		if len(coverage) > 0 {
+			out["total_coverage"] = coverage
+			out["note"] = "total_coverage lists fields reported by only some buckets; their total sums the reporting buckets only"
+		}
+		if len(buckets) == 0 {
+			out["note"] = "no ledger records matched this filter; this is not evidence of zero spend for uninstrumented producers"
 		}
 	}
 	return json.Marshal(out)
@@ -224,8 +253,14 @@ func isNullJSON(raw json.RawMessage, present bool) bool {
 // sumUsageBuckets sums the returned buckets. Tokens are int64 sums, costs are
 // summed separately in exact decimal arithmetic; a field absent from every
 // bucket stays null.
-func sumUsageBuckets(buckets []map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+func sumUsageBuckets(buckets []map[string]json.RawMessage) (map[string]json.RawMessage, map[string]usageCoverage, error) {
 	total := map[string]json.RawMessage{}
+	coverage := map[string]usageCoverage{}
+	note := func(f string, reporting int) {
+		if reporting > 0 && reporting < len(buckets) {
+			coverage[f] = usageCoverage{BucketsReporting: reporting, Of: len(buckets)}
+		}
+	}
 	var count int64
 	for _, b := range buckets {
 		raw, ok := b["count"]
@@ -234,7 +269,7 @@ func sumUsageBuckets(buckets []map[string]json.RawMessage) (map[string]json.RawM
 		}
 		n, err := strconv.ParseInt(string(raw), 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("bucket count %q: %w", raw, err)
+			return nil, nil, fmt.Errorf("bucket count %q: %w", raw, err)
 		}
 		count += n
 	}
@@ -243,6 +278,7 @@ func sumUsageBuckets(buckets []map[string]json.RawMessage) (map[string]json.RawM
 	for _, f := range usageTokenFields {
 		var sum int64
 		seen := false
+		reporting := 0
 		for _, b := range buckets {
 			raw, ok := b[f]
 			if isNullJSON(raw, ok) {
@@ -250,11 +286,13 @@ func sumUsageBuckets(buckets []map[string]json.RawMessage) (map[string]json.RawM
 			}
 			n, err := strconv.ParseInt(string(raw), 10, 64)
 			if err != nil {
-				return nil, fmt.Errorf("bucket %s %q: %w", f, raw, err)
+				return nil, nil, fmt.Errorf("bucket %s %q: %w", f, raw, err)
 			}
 			sum += n
 			seen = true
+			reporting++
 		}
+		note(f, reporting)
 		if seen {
 			total[f] = json.RawMessage(strconv.FormatInt(sum, 10))
 		} else {
@@ -264,6 +302,7 @@ func sumUsageBuckets(buckets []map[string]json.RawMessage) (map[string]json.RawM
 	for _, f := range usageCostFields {
 		sum := new(big.Rat)
 		seen := false
+		reporting := 0
 		for _, b := range buckets {
 			raw, ok := b[f]
 			if isNullJSON(raw, ok) {
@@ -271,11 +310,13 @@ func sumUsageBuckets(buckets []map[string]json.RawMessage) (map[string]json.RawM
 			}
 			r, ok := new(big.Rat).SetString(string(raw))
 			if !ok {
-				return nil, fmt.Errorf("bucket %s %q is not a number", f, raw)
+				return nil, nil, fmt.Errorf("bucket %s %q is not a number", f, raw)
 			}
 			sum.Add(sum, r)
 			seen = true
+			reporting++
 		}
+		note(f, reporting)
 		if !seen {
 			total[f] = json.RawMessage("null")
 			continue
@@ -286,5 +327,5 @@ func sumUsageBuckets(buckets []map[string]json.RawMessage) (map[string]json.RawM
 		}
 		total[f] = json.RawMessage(s)
 	}
-	return total, nil
+	return total, coverage, nil
 }
