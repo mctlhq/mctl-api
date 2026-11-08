@@ -47,6 +47,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth/clientstore"
 	"github.com/mctlhq/mctl-api/internal/auth/flowstore"
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
+	"github.com/mctlhq/mctl-api/internal/bridge"
 	"github.com/mctlhq/mctl-api/internal/commerce"
 	"github.com/mctlhq/mctl-api/internal/dburl"
 	"github.com/mctlhq/mctl-api/internal/decisions"
@@ -1003,6 +1004,41 @@ func main() {
 		temporalReconnecting = rc
 		defer rc.Close()
 	}
+	// Command bridge (mctl-api#962). Dark by default: nothing below runs
+	// unless MCTL_BRIDGE_ENABLED=true, and no provider credential is issued
+	// by this change. The bridge shares the platform Postgres like the
+	// commerce ledger.
+	var bridgeStore *bridge.Store
+	bridgeEnabled := os.Getenv("MCTL_BRIDGE_ENABLED") == "true"
+	if bridgeEnabled {
+		bridgeDBURL := postgresURL(os.Getenv("COMMERCE_DB_URL"))
+		if bridgeDBURL == "" {
+			bridgeDBURL = postgresURL(os.Getenv("AUDIT_DB_URL"))
+		}
+		if bridgeDBURL == "" {
+			slog.Error("MCTL_BRIDGE_ENABLED is set but no COMMERCE_DB_URL or AUDIT_DB_URL; /api/v1/bridge routes will return 503")
+		} else {
+			bs, bsErr := initStore(initCtx, storeFailures, "command bridge", func(ctx context.Context) (*bridge.Store, error) {
+				return bridge.NewStore(ctx, bridgeDBURL)
+			})
+			if bsErr != nil {
+				slog.Error("command bridge store init failed; /api/v1/bridge routes will return 503", "error", bsErr)
+			} else {
+				bridgeStore = bs
+				defer bs.Close()
+				if temporalReconnecting != nil {
+					d := &bridge.Dispatcher{Outbox: bs, Signaler: temporalReconnecting}
+					go d.Run(rootCtx)
+				} else {
+					slog.Warn("command bridge enabled without TEMPORAL_ADDRESS; the result-signal dispatcher is not started")
+				}
+			}
+		}
+	}
+	var bridgeService mctlapi.BridgeService
+	if bridgeStore != nil {
+		bridgeService = bridgeStore
+	}
 	temporalState := func() string {
 		if temporalReconnecting == nil {
 			return "not_configured"
@@ -1269,6 +1305,9 @@ func main() {
 		Evidence:                       evidenceStore,
 		SecurityFindings:               securityFindingsStore,
 		SecurityProviders:              securityProviders,
+		BridgeEnabled:                  bridgeEnabled,
+		Bridge:                         bridgeService,
+		BridgeProviders:                auth.LoadBridgeProviders(),
 		CodeScanningWebhookSecret:      codeScanningSecret,
 		CodeScanningConfig:             codeScanningConfig,
 		CodeScanningIngester:           codeScanningIngester,

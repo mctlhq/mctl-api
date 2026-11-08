@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mctlhq/mctl-api/internal/bridge"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
@@ -270,6 +271,27 @@ func (c *Client) SignalApprove(ctx context.Context, workflowID string, payload m
 func (c *Client) SignalAbandon(ctx context.Context, workflowID, runID string, payload map[string]string) error {
 	if err := c.temporal.SignalWorkflow(ctx, workflowID, runID, AbandonSignalName, payload); err != nil {
 		return fmt.Errorf("temporalclient: signal %s on %s: %w", AbandonSignalName, workflowID, err)
+	}
+	return nil
+}
+
+// BridgeResultSignalName is the signal the bridge dispatcher sends to the
+// workflow that enqueued a command, once its result is durably recorded
+// (mctl-api#962). The payload carries only the command id and the result
+// digest, so the workflow can dedupe and then read the outcome back.
+const BridgeResultSignalName = "bridge-result"
+
+// SignalBridgeResult delivers a recorded bridge result to the stored
+// workflow/run only. A Temporal NotFound is returned wrapped in
+// bridge.ErrSignalTargetNotFound so the dispatcher records it as terminal
+// "unknown" rather than success.
+func (c *Client) SignalBridgeResult(ctx context.Context, workflowID, runID, commandID, resultDigest string) error {
+	payload := map[string]string{"command_id": commandID, "result_digest": resultDigest}
+	if err := c.temporal.SignalWorkflow(ctx, workflowID, runID, BridgeResultSignalName, payload); err != nil {
+		if IsNotFound(err) {
+			return fmt.Errorf("temporalclient: signal %s on %s: %w", BridgeResultSignalName, workflowID, bridge.ErrSignalTargetNotFound)
+		}
+		return fmt.Errorf("temporalclient: signal %s on %s: %w", BridgeResultSignalName, workflowID, err)
 	}
 	return nil
 }

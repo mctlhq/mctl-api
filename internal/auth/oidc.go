@@ -79,6 +79,10 @@ type User struct {
 	// reason as service: it is how the caller authenticated, not a claim.
 	securityProvider string
 
+	// bridgeProvider is the configured ref of a bridge-provider principal
+	// (mctl-api#962). Unexported for the same reason as service.
+	bridgeProvider string
+
 	// registryPublisher is set only on the registry-publisher principal,
 	// authenticated by MCTL_REGISTRY_PUBLISHER_TOKEN (mctlhq/mctl-agents#470).
 	// Unexported for the same reason as service.
@@ -623,6 +627,9 @@ func (u *User) HasPermission(permission string) bool {
 		return u.evidenceWriter || u.IsAdmin()
 	case PermissionSecurityIngest:
 		return u.securityProvider != "" || u.IsAdmin()
+	case PermissionBridgeProvider:
+		// Only the bridge provider itself: not an admin, not a service.
+		return u.bridgeProvider != ""
 	case PermissionSecurityRemediate:
 		// Held by the direct service principal and, through the agent
 		// branch above, by an agent run minted with it. Not by a
@@ -1260,6 +1267,7 @@ func federationKillSwitchOn(v string) bool {
 // every existing caller of Middleware -- including every test in this
 // package -- exercises unchanged.
 func defaultFederationRegistry(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier, oauth *OAuthServer, surfaces map[string]string, usageWriter, evidenceWriter, registryPublisher, supportProducer string, securityProviders map[string]string) *Registry {
+	bridgeProviders := bridgeProviderTokens()
 	static := []Provider{
 		newServiceTokenProvider(func() string { return strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN")) }),
 		newSurfaceProvider(func() map[string]string { return surfaces }),
@@ -1268,6 +1276,7 @@ func defaultFederationRegistry(validator *GitHubValidator, resolver TenantResolv
 		newRegistryPublisherProvider(func() string { return registryPublisher }),
 		newSupportIncidentProducerProvider(func() string { return supportProducer }),
 		newSecurityProviderProvider(func() map[string]string { return securityProviders }),
+		newBridgeProviderProvider(func() map[string]string { return bridgeProviders }),
 	}
 	var jwtProviders []Provider
 	if oauth != nil && oauth.BaseURL != "" {
@@ -1345,6 +1354,8 @@ func userFromVerified(v *Verified) *User {
 		return NewSupportIncidentProducerUser()
 	case v.Identity.Provider == ProviderService && strings.HasPrefix(v.Identity.Subject, SecurityProviderUserPrefix):
 		return NewSecurityProviderUser(strings.TrimPrefix(v.Identity.Subject, SecurityProviderUserPrefix))
+	case v.Identity.Provider == ProviderService && strings.HasPrefix(v.Identity.Subject, BridgeProviderUserPrefix):
+		return NewBridgeProviderUser(strings.TrimPrefix(v.Identity.Subject, BridgeProviderUserPrefix))
 	case v.Identity.Provider == ProviderGitHub:
 		u := NewGitHubUser(v.Identity.Display, v.Claims.Groups)
 		if v.Identity.Subject != "" {

@@ -169,6 +169,17 @@ func (r *Reconnecting) SignalAbandon(ctx context.Context, workflowID, runID stri
 	return c.SignalAbandon(ctx, workflowID, runID, payload)
 }
 
+// SignalBridgeResult delegates to the live client; while connecting it
+// answers the usual unavailable error, which the bridge dispatcher treats as
+// transient and retries.
+func (r *Reconnecting) SignalBridgeResult(ctx context.Context, workflowID, runID, commandID, resultDigest string) error {
+	c := r.current.Load()
+	if c == nil {
+		return r.unavailable()
+	}
+	return c.SignalBridgeResult(ctx, workflowID, runID, commandID, resultDigest)
+}
+
 func (r *Reconnecting) DescribeDevLoop(ctx context.Context, workflowID string) (string, error) {
 	c := r.current.Load()
 	if c == nil {
