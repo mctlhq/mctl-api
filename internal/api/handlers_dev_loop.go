@@ -127,6 +127,22 @@ func startDevLoop(ctx context.Context, c DevLoopClient, issueURL, workflowID str
 	return startDevLoopAfterNotFound(ctx, c, issueURL, workflowID)
 }
 
+// startDevLoopWithoutRestart is startDevLoop without restartIfAbandoned, the
+// composition ExecuteRoadmapWave uses: an abandoned loop reports
+// already_exists instead of starting again. The orchestrator principal
+// (mctl-api#963) starts through it, because an abandon is a person's
+// decision that an automated re-triage must not silently undo; a human admin
+// restarts the loop if it should run again.
+func startDevLoopWithoutRestart(ctx context.Context, c DevLoopClient, issueURL, workflowID string) devLoopStartResult {
+	dctx, cancel := context.WithTimeout(ctx, devLoopDescribeTimeout)
+	result := classifyDevLoop(dctx, c, workflowID)
+	cancel()
+	if result.Outcome != "" {
+		return result
+	}
+	return startDevLoopAfterNotFound(ctx, c, issueURL, workflowID)
+}
+
 // restartIfAbandoned decides what an already_exists classification means
 // for the single-issue route (mctl-api#640). An operator's abandon is not a
 // verdict on the issue: since the legacy approver relay was turned off
@@ -338,6 +354,8 @@ func (h *Handlers) requireDevLoopRead(w http.ResponseWriter, r *http.Request) bo
 func (h *Handlers) requireDevLoopStart(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
 	if user := auth.UserFromContext(r.Context()); user.IsOrchestratorDevLoop() {
 		if msg := h.temporalState(); msg != "" {
+			// The gate left this start's record to the handler.
+			h.auditOrchestratorDevLoop(r, user, codeOrchestratorUnavailable, "")
 			writeError(w, http.StatusServiceUnavailable, msg)
 			return nil, false
 		}
@@ -403,7 +421,11 @@ func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) 
 
 	auditParams := map[string]string{"issue_url": body.IssueURL}
 
-	result := startDevLoop(r.Context(), h.opts.TemporalClient, body.IssueURL, workflowID)
+	start := startDevLoop
+	if user.IsOrchestratorDevLoop() {
+		start = startDevLoopWithoutRestart
+	}
+	result := start(r.Context(), h.opts.TemporalClient, body.IssueURL, workflowID)
 	auditParams["outcome"] = result.Outcome
 
 	switch result.Outcome {

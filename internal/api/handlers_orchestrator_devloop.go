@@ -44,6 +44,7 @@ const (
 	codeOrchestratorTemporalRequired  = "orchestrator_devloop_temporal_required"
 	codeOrchestratorRepoNotAllowed    = "orchestrator_devloop_repo_not_allowed"
 	codeOrchestratorInvalidRequest    = "orchestrator_devloop_invalid_request"
+	codeOrchestratorUnavailable       = "orchestrator_devloop_unavailable"
 	orchestratorDevLoopAuditOperation = "orchestrator-devloop.request"
 )
 
@@ -123,6 +124,7 @@ var orchestratorDevLoopRefusalText = map[string]string{
 	codeOrchestratorTemporalRequired: "the orchestrator may start a DevLoop only on the Temporal path (POST " + orchestratorDevLoopStartRoute + ")",
 	codeOrchestratorRepoNotAllowed:   "the repository is not on the orchestrator's DevLoop allow-list",
 	codeOrchestratorInvalidRequest:   "the DevLoop start request is malformed",
+	codeOrchestratorUnavailable:      "the DevLoop control plane is not available",
 }
 
 // orchestratorDevLoopGate confines the orchestrator DevLoop principal. It

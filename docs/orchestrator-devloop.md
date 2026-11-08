@@ -39,11 +39,21 @@ Repositories match exactly and case-sensitively: the workflow id keeps the
 issue URL's case, so `mctlhq/MCTL-API` is refused rather than starting a second
 loop beside `mctlhq/mctl-api`'s.
 
-Every request writes exactly one record of its outcome. A refusal, a read and
+Every request the API reaches past authentication and the gate writes exactly
+one record of its outcome; a 429 from the rate limiter, which runs after the
+gate, is not audited. A refusal, a read and
 `whoami` write an `orchestrator-devloop.request` row (`allowed` or `denied`,
 with the code). An admitted start writes no gate row; the handler records it:
 the usual `dev-loop-start` row when it reaches Temporal, or a `denied`
-`orchestrator-devloop.request` row when it is refused or malformed.
+`orchestrator-devloop.request` row when it is refused, malformed or the control
+plane is unavailable.
+
+## Abandoned loops
+
+The orchestrator never restarts a DevLoop a person abandoned. Its start uses
+the same composition as a roadmap wave: an abandoned loop answers
+`already_exists` and nothing starts. An admin's start through the same route
+still restarts a loop abandoned before implement (mctl-api#640).
 
 ## Receipt gate
 

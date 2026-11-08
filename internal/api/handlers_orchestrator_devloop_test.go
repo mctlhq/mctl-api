@@ -12,6 +12,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	mctlmcp "github.com/mctlhq/mctl-api/internal/mcp"
+	"github.com/mctlhq/mctl-api/internal/temporalclient"
 )
 
 func orchestratorUser() *auth.User {
@@ -68,8 +69,9 @@ func TestOrchestratorDevLoop_GateRefusals(t *testing.T) {
 		t.Fatalf("a refused request reached Temporal: %+v", fake)
 	}
 	denied := 0
-	for _, e := range log.List(100) {
-		if e.Operation == orchestratorDevLoopAuditOperation && e.Status == "denied" && e.UserID == auth.OrchestratorDevLoopUserID && e.Parameters["code"] != "" {
+	entries := log.List(100)
+	for i := range entries {
+		if e := &entries[i]; e.Operation == orchestratorDevLoopAuditOperation && e.Status == "denied" && e.UserID == auth.OrchestratorDevLoopUserID && e.Parameters["code"] != "" {
 			denied++
 		}
 	}
@@ -90,10 +92,10 @@ func TestOrchestratorDevLoop_StartIsConfinedToTheAllowList(t *testing.T) {
 		t.Fatalf("allowed start: got %d %s, startCalls=%d", rec.Code, rec.Body.String(), fake.startCalls)
 	}
 	var started *audit.Entry
-	for _, e := range log.List(100) {
-		if e.Operation == "dev-loop-start" {
-			e := e
-			started = &e
+	entries := log.List(100)
+	for i := range entries {
+		if entries[i].Operation == "dev-loop-start" {
+			started = &entries[i]
 		}
 	}
 	if started == nil || started.UserID != auth.OrchestratorDevLoopUserID || started.Status != "succeeded" {
@@ -161,8 +163,9 @@ func TestOrchestratorDevLoop_ReadIsAdmittedAndAudited(t *testing.T) {
 
 func countOrchestratorRows(log *audit.Logger, status string) int {
 	n := 0
-	for _, e := range log.List(100) {
-		if e.Operation == orchestratorDevLoopAuditOperation && e.Status == status && e.UserID == auth.OrchestratorDevLoopUserID {
+	entries := log.List(100)
+	for i := range entries {
+		if e := &entries[i]; e.Operation == orchestratorDevLoopAuditOperation && e.Status == status && e.UserID == auth.OrchestratorDevLoopUserID {
 			n++
 		}
 	}
@@ -180,5 +183,53 @@ func TestOrchestratorDevLoop_ApproveHandlerRefusesIt(t *testing.T) {
 	h.ApproveDevLoopWorkflow(rec, req)
 	if rec.Code != http.StatusForbidden || fake.lastApprovedWorkflow != "" {
 		t.Fatalf("approve: got %d %s, approved %q", rec.Code, rec.Body.String(), fake.lastApprovedWorkflow)
+	}
+}
+
+// An abandoned loop is a person's decision: the orchestrator's start reports
+// it as already_exists and never restarts it, while an admin's still does.
+func TestOrchestratorDevLoop_NeverRestartsAnAbandonedLoop(t *testing.T) {
+	t.Setenv(orchestratorDevLoopReposEnv, "mctlhq/mctl-api")
+	abandoned := func() *fakeDevLoopClient {
+		return &fakeDevLoopClient{
+			describeExec: &temporalclient.DevLoopExecution{Status: "Completed", RunID: "run-old"},
+			workflowID:   "dev-loop-mctlhq-mctl-api-963", runID: "run-start", restartRunID: "run-new",
+			ended: "abandoned: operator withdrew it",
+		}
+	}
+	body := `{"issue_url":"https://github.com/mctlhq/mctl-api/issues/963"}`
+
+	fake := abandoned()
+	router, _ := orchestratorRouter(t, fake)
+	rec := serve(router, http.MethodPost, orchestratorDevLoopStartRoute, body)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), devLoopOutcomeAlreadyExists) || fake.restartCalls != 0 || fake.startCalls != 0 {
+		t.Fatalf("orchestrator: got %d %s, restarts=%d starts=%d", rec.Code, rec.Body.String(), fake.restartCalls, fake.startCalls)
+	}
+
+	fake = abandoned()
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: audit.NewLogger()}}
+	req := httptest.NewRequest(http.MethodPost, orchestratorDevLoopStartRoute, bytes.NewBufferString(body))
+	rec = httptest.NewRecorder()
+	h.StartDevLoopWorkflow(rec, adminCtx(req))
+	if fake.restartCalls != 1 {
+		t.Fatalf("admin control: restarts=%d, want 1 (%d %s)", fake.restartCalls, rec.Code, rec.Body.String())
+	}
+}
+
+// With no control plane the start answers 503 and is still audited once.
+func TestOrchestratorDevLoop_UnavailableStartIsAudited(t *testing.T) {
+	t.Setenv(orchestratorDevLoopReposEnv, "mctlhq/mctl-api")
+	log := audit.NewLogger()
+	router := NewRouter(Options{
+		AuthMiddleware: injectUser(orchestratorUser()),
+		MCPServer:      mctlmcp.NewServer("http://127.0.0.1:1", ""),
+		AuditLog:       log,
+	})
+	rec := serve(router, http.MethodPost, orchestratorDevLoopStartRoute, `{"issue_url":"https://github.com/mctlhq/mctl-api/issues/963"}`)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("got %d %s, want 503", rec.Code, rec.Body.String())
+	}
+	if n := countOrchestratorRows(log, "denied"); n != 1 {
+		t.Fatalf("denied rows: %d, want 1", n)
 	}
 }
