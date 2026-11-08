@@ -28,9 +28,11 @@ func validDeployBody() map[string]string {
 
 func deniedEntries(f *roleFixture) []audit.Entry {
 	var out []audit.Entry
-	for _, e := range f.audit.List(1000) {
+	entries := f.audit.List(1000)
+	for i := range entries {
+		e := &entries[i]
 		if e.Status == "denied" {
-			out = append(out, e)
+			out = append(out, *e)
 		}
 	}
 	return out
