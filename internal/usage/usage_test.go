@@ -417,6 +417,27 @@ func TestCorrelationShapesAreValidatedAtIngest(t *testing.T) {
 	}
 }
 
+func TestCorrelationErrorIsDeterministic(t *testing.T) {
+	cases := []struct {
+		name string
+		rec  Record
+		want string
+	}{
+		{"both non-positive", Record{SessionID: "s", ModelKey: "m", TargetRepo: "mctlhq/x", IssueNumber: i64(0), PRNumber: i64(-1)}, "issue_number must be positive"},
+		{"both without repo", Record{SessionID: "s", ModelKey: "m", IssueNumber: i64(12), PRNumber: i64(13)}, "issue_number requires target_repo"},
+		{"only pr invalid", Record{SessionID: "s", ModelKey: "m", TargetRepo: "mctlhq/x", IssueNumber: i64(5), PRNumber: i64(0)}, "pr_number must be positive"},
+	}
+	for _, c := range cases {
+		for i := 0; i < 50; i++ {
+			r := c.rec
+			err := r.Validate()
+			if err == nil || !errors.Is(err, ErrInvalidRecord) || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("%s: iteration %d: got %v, want %q", c.name, i, err, c.want)
+			}
+		}
+	}
+}
+
 // The execution id is correlation, never identity: two deliveries of one
 // result that disagree on it must still collapse to one row.
 func TestExecutionIDIsNotPartOfTheDedupeKey(t *testing.T) {
