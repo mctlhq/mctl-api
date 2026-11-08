@@ -26,7 +26,6 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
-	"sort"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -448,13 +447,7 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		auditParams := redactSecrets(op, input)
 		// redactSecrets keys on the parameter name; a non-secret field that
 		// carries a secret's value would still record it, so match on value too.
-		for k, v := range auditParams {
-			for _, s := range secretValues(op, input, false) {
-				if v == s {
-					auditParams[k] = "[REDACTED]"
-				}
-			}
-		}
+		redactSecretFragments(op, input, auditParams)
 		auditParams["code"] = codeValidationFailed
 		h.logAudit(r, audit.Entry{
 			UserID:     user.ID,
@@ -768,57 +761,79 @@ func extractTenantParam(op operations.Operation, input map[string]string) string
 // ExecuteOperation request refused by Registry.ValidateInput (mctl-api#760).
 const codeValidationFailed = "validation_failed"
 
-// minSecretLineValueLen keeps a short "=" value of a secret block (true, 1)
-// from being scrubbed out of the reasons, where it would also hit unrelated
-// words such as the enum text "true, false".
-const minSecretLineValueLen = 4
+// reasonWithheld replaces a validation reason that would echo a secret
+// fragment in the audit row.
+const reasonWithheld = "[REDACTED: reason withheld, it echoes a secret value]"
 
-// secretValues lists the submitted values of the operation's Secret
-// parameters, longest first. withLines adds the value after "=" on each line
-// of a KEY=value block (when at least minSecretLineValueLen long).
-func secretValues(op operations.Operation, input map[string]string, withLines bool) []string {
-	var secrets []string
+// secretFragments lists every piece of the operation's Secret parameters that
+// must not reach the validation-denied audit row: the whole value, each
+// non-empty line, and the value after the first "=" of each line (the usual
+// KEY=value form, any length). Nothing is exempted for being short.
+func secretFragments(op operations.Operation, input map[string]string) []string {
+	var out []string
+	add := func(s string) {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
 	for i := range op.Parameters {
 		p := &op.Parameters[i]
 		if !p.Secret {
 			continue
 		}
 		v := input[p.Name]
-		if v == "" {
-			continue
-		}
-		secrets = append(secrets, v)
-		if !withLines {
-			continue
-		}
+		add(v)
+		add(strings.TrimSpace(v))
 		for _, line := range strings.Split(v, "\n") {
-			if _, val, ok := strings.Cut(strings.TrimSpace(line), "="); ok && len(val) >= minSecretLineValueLen {
-				secrets = append(secrets, val)
+			line = strings.TrimSpace(line)
+			add(line)
+			if _, val, ok := strings.Cut(line, "="); ok {
+				add(strings.TrimSpace(val))
 			}
 		}
 	}
-	sort.Slice(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
-	return secrets
+	return out
 }
 
-// scrubSecretValues returns reasons with every submitted value of a Secret
-// parameter replaced by [REDACTED]. A validation reason may echo a submitted
-// value (the reserved-service message does), and the audit Message must not
-// carry what the audit Parameters redact. Whole values and each "=" value of a
-// multi-line KEY=value block are scrubbed, longest first.
+func containsAny(s string, fragments []string) bool {
+	for _, f := range fragments {
+		if strings.Contains(s, f) {
+			return true
+		}
+	}
+	return false
+}
+
+// scrubSecretValues returns reasons where any reason containing a secret
+// fragment is replaced whole by a generic text. A validation reason may echo a
+// submitted value (the reserved-service message does); a short fragment cannot
+// be cut out of prose reliably, so the reason is withheld instead. Reasons
+// without a match are kept verbatim.
 func scrubSecretValues(op operations.Operation, input map[string]string, reasons []string) []string {
-	secrets := secretValues(op, input, true)
-	if len(secrets) == 0 {
+	fragments := secretFragments(op, input)
+	if len(fragments) == 0 {
 		return reasons
 	}
 	out := make([]string, len(reasons))
 	for i, reason := range reasons {
-		for _, s := range secrets {
-			reason = strings.ReplaceAll(reason, s, "[REDACTED]")
+		if containsAny(reason, fragments) {
+			reason = reasonWithheld
 		}
 		out[i] = reason
 	}
 	return out
+}
+
+// redactSecretFragments blanks every audit parameter value that contains a
+// fragment of a Secret parameter; redactSecrets already blanked the secret
+// fields themselves by name.
+func redactSecretFragments(op operations.Operation, input, params map[string]string) {
+	fragments := secretFragments(op, input)
+	for k, v := range params {
+		if containsAny(v, fragments) {
+			params[k] = "[REDACTED]"
+		}
+	}
 }
 
 func redactSecrets(op operations.Operation, input map[string]string) map[string]string {

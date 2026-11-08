@@ -145,12 +145,95 @@ func TestExecuteOperation_ValidationReasonDoesNotLeakSecretValue(t *testing.T) {
 	if len(denied) != 1 {
 		t.Fatalf("denied rows = %d, want 1", len(denied))
 	}
-	if !strings.Contains(denied[0].Message, "reserved for platform use") {
-		t.Fatalf("message = %q: the echoing reason was expected so the scrub is exercised", denied[0].Message)
+	if !strings.HasPrefix(denied[0].Message, "validation_failed: ") || !strings.Contains(denied[0].Message, "reason withheld") {
+		t.Fatalf("message = %q: the echoing reason was expected to be withheld", denied[0].Message)
+	}
+	if !strings.Contains(w.Body.String(), "reserved for platform use") {
+		t.Errorf("response must keep the full reason: %s", w.Body.String())
 	}
 	assertNoSentinel(t, "echoed reason", denied[0])
 	if len(f.exec.submitted) != 0 {
 		t.Fatalf("executor invoked: %v", f.exec.submitted)
+	}
+}
+
+// A normal secret is KEY=value (or several lines of it), not the bare value.
+// The value echoed by another field and by the reserved-service reason must
+// not reach the audit Message or Parameters, whatever its length.
+func TestExecuteOperation_ValidationAuditScrubsKeyValueSecretFragments(t *testing.T) {
+	cases := map[string]struct {
+		secret   string
+		fragment string
+	}{
+		"long KEY=value":    {"API_KEY=" + secretSentinel, secretSentinel},
+		"multi-line block":  {"A=first\nAPI_KEY=" + secretSentinel + "\nZ=last", secretSentinel},
+		"short value":       {"K=ab", "ab"},
+		"short multi-line":  {"A=xy\nB=zq", "zq"},
+		"single char value": {"K=q", "q"},
+		"CRLF multi-line":   {"A=1\r\nB=" + secretSentinel, secretSentinel},
+		"value with equals": {"TOKEN=abc=def", "abc=def"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newRoleFixture(t)
+			body := validDeployBody()
+			body["team_name"] = "tenant"
+			body["component_name"] = tc.fragment
+			body["secret_env_vars"] = tc.secret
+
+			w := postAs(t, f.router, "/api/v1/operations/deploy-service/execute", body, adminUser)
+			assertStatus(t, w, http.StatusBadRequest)
+			var resp map[string]interface{}
+			mustJSON(t, w.Body.Bytes(), &resp)
+			if resp["code"] != "validation_failed" {
+				t.Fatalf("code = %v; body: %s", resp["code"], w.Body.String())
+			}
+			if len(f.exec.submitted) != 0 {
+				t.Fatalf("executor invoked: %v", f.exec.submitted)
+			}
+			if total := len(f.audit.List(1000)); total != 1 {
+				t.Fatalf("audit rows = %d, want exactly 1", total)
+			}
+			denied := deniedEntries(f)
+			if len(denied) != 1 {
+				t.Fatalf("denied rows = %d, want 1", len(denied))
+			}
+			e := denied[0]
+			if !strings.HasPrefix(e.Message, "validation_failed: ") {
+				t.Errorf("message = %q, want validation_failed prefix", e.Message)
+			}
+			if strings.Contains(e.Message, tc.fragment) {
+				t.Errorf("secret fragment %q leaked into audit Message: %q", tc.fragment, e.Message)
+			}
+			for k, v := range e.Parameters {
+				if k != "code" && strings.Contains(v, tc.fragment) {
+					t.Errorf("secret fragment %q leaked into audit Parameters[%q] = %q", tc.fragment, k, v)
+				}
+			}
+			if e.Parameters["code"] != "validation_failed" || e.Parameters["secret_env_vars"] != "[REDACTED]" {
+				t.Errorf("parameters = %v", e.Parameters)
+			}
+			if e.Parameters["team_name"] != "tenant" {
+				t.Errorf("unrelated parameter altered: %v", e.Parameters)
+			}
+		})
+	}
+}
+
+// Where no secret is involved the raw reasons stay readable.
+func TestExecuteOperation_ValidationAuditKeepsReasonWithoutSecretMatch(t *testing.T) {
+	f := newRoleFixture(t)
+	body := validDeployBody()
+	body["component_name"] = "Bad_Name!"
+	body["secret_env_vars"] = "K=zzqq"
+	w := postAs(t, f.router, "/api/v1/operations/deploy-service/execute", body, adminUser)
+	assertStatus(t, w, http.StatusBadRequest)
+	denied := deniedEntries(f)
+	if len(denied) != 1 || !strings.Contains(denied[0].Message, "component_name: must match pattern") {
+		t.Fatalf("reason not preserved: %+v", denied)
+	}
+	if denied[0].Parameters["component_name"] != "Bad_Name!" {
+		t.Errorf("parameters = %v", denied[0].Parameters)
 	}
 }
 
