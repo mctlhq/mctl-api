@@ -80,13 +80,14 @@ func TestSubjectAudiencesParsedAndValidated(t *testing.T) {
 		}
 	}
 	for name, raw := range map[string]string{
-		"empty map":      `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_audiences":{}}]`,
-		"empty subject":  `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_audiences":{"":["p"]}}]`,
-		"padded subject": `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_audiences":{" s":["p"]}}]`,
-		"no audience":    `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_audiences":{"s":[]}}]`,
-		"blank audience": `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_audiences":{"s":[" "]}}]`,
-		"dex slot":       `[{"name":"dex","issuer":"https://dex","audiences":["c"],"subject_audiences":{"s":["p"]}}]`,
-		"mutable claim":  `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_claim":"email","subject_audiences":{"s":["p"]}}]`,
+		"empty map":       `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_audiences":{}}]`,
+		"empty subject":   `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_audiences":{"":["p"]}}]`,
+		"padded subject":  `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_audiences":{" s":["p"]}}]`,
+		"no audience":     `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_audiences":{"s":[]}}]`,
+		"blank audience":  `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_audiences":{"s":[" "]}}]`,
+		"padded audience": `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_audiences":{"s":[" p"]}}]`,
+		"dex slot":        `[{"name":"dex","issuer":"https://dex","audiences":["c"],"subject_audiences":{"s":["p"]}}]`,
+		"mutable claim":   `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_claim":"email","subject_audiences":{"s":["p"]}}]`,
 	} {
 		if _, err := ParseOIDCProviders(raw); err == nil || !strings.Contains(err.Error(), "subject") {
 			t.Errorf("%s: want a subject_audiences refusal, got %v", name, err)

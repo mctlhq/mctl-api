@@ -187,8 +187,10 @@ func validSubjectAudiences(e *OIDCProviderConfigEntry) error {
 			return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q grants subject %q no audience", e.Name, subject)
 		}
 		for _, a := range auds {
-			if strings.TrimSpace(a) == "" {
-				return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q grants subject %q an empty audience", e.Name, subject)
+			if strings.TrimSpace(a) == "" || a != strings.TrimSpace(a) {
+				// Matched exactly against the token's aud: a padded value
+				// would pass here and never match at runtime.
+				return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q grants subject %q an empty or padded audience", e.Name, subject)
 			}
 		}
 	}
