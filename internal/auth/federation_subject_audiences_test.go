@@ -68,6 +68,17 @@ func TestSubjectAudiencesParsedAndValidated(t *testing.T) {
 	if got := entries[0].spec().SubjectAudiences[saMachine]; len(got) != 1 || got[0] != saProjectID {
 		t.Fatalf("subject_audiences did not reach the spec: %v", got)
 	}
+	// subject_claim email is valid on its own, and sub stated explicitly is
+	// the default: only the combination of a mutable claim and
+	// subject_audiences is refused.
+	for _, raw := range []string{
+		`[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_claim":"email"}]`,
+		`[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_claim":"sub","subject_audiences":{"s":["p"]}}]`,
+	} {
+		if _, err := ParseOIDCProviders(raw); err != nil {
+			t.Fatalf("valid entry refused: %s: %v", raw, err)
+		}
+	}
 	for name, raw := range map[string]string{
 		"empty map":      `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_audiences":{}}]`,
 		"empty subject":  `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_audiences":{"":["p"]}}]`,
@@ -75,6 +86,7 @@ func TestSubjectAudiencesParsedAndValidated(t *testing.T) {
 		"no audience":    `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_audiences":{"s":[]}}]`,
 		"blank audience": `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_audiences":{"s":[" "]}}]`,
 		"dex slot":       `[{"name":"dex","issuer":"https://dex","audiences":["c"],"subject_audiences":{"s":["p"]}}]`,
+		"mutable claim":  `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_claim":"email","subject_audiences":{"s":["p"]}}]`,
 	} {
 		if _, err := ParseOIDCProviders(raw); err == nil || !strings.Contains(err.Error(), "subject") {
 			t.Errorf("%s: want a subject_audiences refusal, got %v", name, err)

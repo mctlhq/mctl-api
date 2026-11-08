@@ -173,6 +173,12 @@ func validSubjectAudiences(e *OIDCProviderConfigEntry) error {
 	if len(e.SubjectAudiences) == 0 {
 		return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q has an empty subject_audiences (omit it instead)", e.Name)
 	}
+	if c := strings.TrimSpace(e.SubjectClaim); c != "" && c != "sub" {
+		// The map is keyed by the subject claim. Only `sub` is the issuer's
+		// immutable identifier; a claim like email or preferred_username can
+		// be taken by another user, who would inherit the extra audience.
+		return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q may set subject_audiences only with the default subject claim sub", e.Name)
+	}
 	for subject, auds := range e.SubjectAudiences {
 		if strings.TrimSpace(subject) == "" || subject != strings.TrimSpace(subject) {
 			return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q has a subject_audiences key that is empty or padded", e.Name)
