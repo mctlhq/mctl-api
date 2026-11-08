@@ -124,6 +124,17 @@ func WorkflowIDForIssueURL(issueURL string) (string, error) {
 	return fmt.Sprintf("dev-loop-mctlhq-%s-%s", repo, issueNumber), nil
 }
 
+// RepoForIssueURL returns the repository name (under mctlhq) of an issue URL
+// WorkflowIDForIssueURL accepts, so a caller can judge the repository the
+// workflow id is derived from.
+func RepoForIssueURL(issueURL string) (string, error) {
+	m := issueURLPattern.FindStringSubmatch(issueURL)
+	if m == nil {
+		return "", fmt.Errorf("%w: %q", ErrInvalidIssueURL, issueURL)
+	}
+	return m[1], nil
+}
+
 // WorkflowIDForProposalRef derives a DevLoopWorkflow id from the
 // `proposal_ref` a lifecycle ownership record carries.
 //

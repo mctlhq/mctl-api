@@ -89,6 +89,11 @@ type User struct {
 	// (mctl-api#830). Unexported for the same reason as service.
 	supportIncidentProducer bool
 
+	// orchestratorDevLoop is set only on the orchestrator DevLoop principal,
+	// a configured federated machine identity (mctl-api#963). Unexported for
+	// the same reason as service.
+	orchestratorDevLoop bool
+
 	// ci is set only on a GitHub Actions OIDC principal (mctl-api#530):
 	// one CI job of ciRepository, whose immutable repository id is
 	// ciRepositoryID. It carries no groups; the API confines it to one
@@ -1375,6 +1380,10 @@ func userFromVerified(v *Verified) *User {
 		return u
 	case v.Identity.Provider == ProviderDex:
 		return &User{ID: v.Identity.Display, Groups: v.Claims.Groups, dexIssuer: v.Identity.Issuer, dexSubject: v.Identity.Subject}
+	case IsOrchestratorDevLoopIdentity(v.Identity):
+		// Ahead of the generic OIDC user, and with none of its claims: the
+		// machine user's groups never reach this principal (mctl-api#963).
+		return NewOrchestratorDevLoopUser(v.Identity)
 	default:
 		return &User{
 			ID: v.Identity.Display, Groups: v.Claims.Groups,

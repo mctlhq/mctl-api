@@ -319,7 +319,9 @@ func (h *Handlers) requireTemporalAdmin(w http.ResponseWriter, r *http.Request) 
 // of the shepherd scope, whose sweep reads dev-loop liveness. It guards only
 // the read: every other dev-loop route stays admin-only.
 func (h *Handlers) requireDevLoopRead(w http.ResponseWriter, r *http.Request) bool {
-	if user := auth.UserFromContext(r.Context()); user != nil && user.AgentScopeName() == auth.AgentScopeShepherd {
+	// The orchestrator principal reaches this read only for a workflow of an
+	// allowed repository: orchestratorDevLoopGate has judged the path.
+	if user := auth.UserFromContext(r.Context()); user != nil && (user.AgentScopeName() == auth.AgentScopeShepherd || user.IsOrchestratorDevLoop()) {
 		if msg := h.temporalState(); msg != "" {
 			writeError(w, http.StatusServiceUnavailable, msg)
 			return false
@@ -328,6 +330,20 @@ func (h *Handlers) requireDevLoopRead(w http.ResponseWriter, r *http.Request) bo
 	}
 	_, ok := h.requireTemporalAdmin(w, r)
 	return ok
+}
+
+// requireDevLoopStart admits what requireTemporalAdmin admits, plus the
+// orchestrator DevLoop principal (mctl-api#963), whose repository the
+// handler then checks against its allow-list.
+func (h *Handlers) requireDevLoopStart(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
+	if user := auth.UserFromContext(r.Context()); user.IsOrchestratorDevLoop() {
+		if msg := h.temporalState(); msg != "" {
+			writeError(w, http.StatusServiceUnavailable, msg)
+			return nil, false
+		}
+		return user, true
+	}
+	return h.requireTemporalAdmin(w, r)
 }
 
 type startDevLoopRequest struct {
@@ -347,7 +363,7 @@ type startDevLoopRequest struct {
 // would be a lie (issue #287, portfolio#7): this handler describes before it
 // starts, via the shared startDevLoop, and reports the real outcome.
 func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
-	user, ok := h.requireTemporalAdmin(w, r)
+	user, ok := h.requireDevLoopStart(w, r)
 	if !ok {
 		return
 	}
@@ -368,6 +384,17 @@ func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) 
 		// as before this change.
 		writeError(w, http.StatusBadRequest, "invalid issue_url: "+err.Error())
 		return
+	}
+
+	if user.IsOrchestratorDevLoop() {
+		// The orchestrator starts loops only for allowed repositories
+		// (mctl-api#963). The URL already parsed above, so this cannot fail.
+		if repo, _ := temporalclient.RepoForIssueURL(body.IssueURL); !orchestratorDevLoopRepoAllowed(repo) {
+			h.auditOrchestratorDevLoop(r, user, codeOrchestratorRepoNotAllowed, body.IssueURL)
+			writeErrorCode(w, http.StatusForbidden, codeOrchestratorRepoNotAllowed,
+				orchestratorDevLoopRefusalText[codeOrchestratorRepoNotAllowed], nil)
+			return
+		}
 	}
 
 	auditParams := map[string]string{"issue_url": body.IssueURL}
