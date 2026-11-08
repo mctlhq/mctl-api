@@ -274,8 +274,12 @@ func pgCmdState(t *testing.T, s *Store, id string) string {
 	if err := s.pool.QueryRow(ctx, `SELECT status, effect_state FROM bridge_commands WHERE command_id=$1`, id).Scan(&st, &eff); err != nil {
 		t.Fatal(err)
 	}
-	_ = s.pool.QueryRow(ctx, `SELECT count(*) FROM bridge_signal_outbox WHERE command_id=$1`, id).Scan(&outbox)
-	_ = s.pool.QueryRow(ctx, `SELECT count(*) FROM bridge_write_permits WHERE command_id=$1`, id).Scan(&permits)
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM bridge_signal_outbox WHERE command_id=$1`, id).Scan(&outbox); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM bridge_write_permits WHERE command_id=$1`, id).Scan(&permits); err != nil {
+		t.Fatal(err)
+	}
 	return fmt.Sprintf("%s/%s/outbox=%d/permits=%d", st, eff, outbox, permits)
 }
 
