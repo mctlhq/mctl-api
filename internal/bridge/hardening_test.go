@@ -66,13 +66,21 @@ func TestRedactedResultOmitsLeaseTokenAndDigestIsStable(t *testing.T) {
 }
 
 type fakeSweeper struct {
-	due     int
-	calls   int
-	failing bool
+	due            int
+	calls          int
+	failing        bool
+	backlogFailing bool
+	ticks          chan struct{}
 }
 
 func (f *fakeSweeper) ExpireDue(_ context.Context, limit int) (int, error) {
 	f.calls++
+	if f.ticks != nil {
+		select {
+		case f.ticks <- struct{}{}:
+		default:
+		}
+	}
 	if f.failing {
 		return 0, errors.New("db down")
 	}
@@ -82,6 +90,9 @@ func (f *fakeSweeper) ExpireDue(_ context.Context, limit int) (int, error) {
 }
 
 func (f *fakeSweeper) ExpiryBacklog(context.Context) (int64, float64, error) {
+	if f.backlogFailing {
+		return 0, 0, errors.New("backlog query failed")
+	}
 	return int64(f.due), 0, nil
 }
 
@@ -115,6 +126,71 @@ func TestExpirerReportsErrors(t *testing.T) {
 	}
 	if st := e.Stats(); st.Errors != 3 || st.ConsecutiveErrors != 3 {
 		t.Fatalf("stats %+v", st)
+	}
+}
+
+func TestExpirerBacklogErrorsAreVisible(t *testing.T) {
+	f := &fakeSweeper{backlogFailing: true}
+	e := &Expirer{Store: f}
+	if _, err := e.RunOnce(context.Background()); err == nil || !strings.Contains(err.Error(), "backlog query failed") {
+		t.Fatalf("expected backlog failure, got %v", err)
+	}
+	st := e.Stats()
+	if st.Errors != 1 || st.ConsecutiveErrors != 1 || !st.LastSuccess.IsZero() {
+		t.Fatalf("backlog failure was reported as success: %+v", st)
+	}
+	// After a fully successful sweep the consecutive-error streak resets.
+	f.backlogFailing = false
+	if _, err := e.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if st := e.Stats(); st.ConsecutiveErrors != 0 || st.LastSuccess.IsZero() {
+		t.Fatalf("successful retry did not clear consecutive errors: %+v", st)
+	}
+}
+
+func TestExpirerRunTicksAndStopsCleanly(t *testing.T) {
+	f := &fakeSweeper{ticks: make(chan struct{}, 4)}
+	e := &Expirer{Store: f, Interval: 5 * time.Millisecond}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.Run(ctx)
+	}()
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	// The first call is immediate; the second proves the ticker actually fires.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-f.ticks:
+		case <-deadline.C:
+			cancel()
+			<-done
+			t.Fatal("expirer did not run a scheduled sweep tick")
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expirer did not stop on context cancellation")
+	}
+	if f.calls < 2 {
+		t.Fatalf("expirer executed %d sweep calls, need at least two", f.calls)
+	}
+	if st := e.Stats(); st.Errors != 0 || st.ConsecutiveErrors != 0 {
+		t.Fatalf("clean shutdown counted as failure: %+v", st)
+	}
+
+	cancelled, cancelBefore := context.WithCancel(context.Background())
+	cancelBefore()
+	before := e.Stats()
+	if _, err := e.RunOnce(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled RunOnce: %v", err)
+	}
+	if after := e.Stats(); after.Errors != before.Errors || after.ConsecutiveErrors != before.ConsecutiveErrors {
+		t.Fatalf("cancelled RunOnce counted as failure: before=%+v after=%+v", before, after)
 	}
 }
 
@@ -195,6 +271,60 @@ func TestPGExpireDueWithoutPollerAndAudit(t *testing.T) {
 	_ = s.pool.QueryRow(ctx, `SELECT count(*) FROM bridge_signal_outbox WHERE command_id=$1 AND result_digest='expired'`, id).Scan(&n)
 	if n != 1 {
 		t.Fatalf("outbox rows %d", n)
+	}
+}
+
+func TestPGExpiredLeasedPermitIsUnknownAndAudited(t *testing.T) {
+	s := pgStore(t)
+	ctx := context.Background()
+	s.SetFence(allowFence{})
+	tenant := fmt.Sprintf("expiry-permit-%d", time.Now().UnixNano())
+	caller := Caller{ProviderRef: "glovo", Actor: "service:bridge-provider:glovo", Tenants: []string{tenant}}
+	id := enqueue(t, s, tenant, KindPlaceOrderFake)
+	var claim struct {
+		LeaseToken string `json:"lease_token"`
+	}
+	if err := json.Unmarshal(claimOne(t, s, caller, id), &claim); err != nil {
+		t.Fatal(err)
+	}
+	if claim.LeaseToken == "" {
+		t.Fatal("claim did not provide a lease token")
+	}
+	if _, err := s.IssueWritePermit(ctx, caller, id, claim.LeaseToken); err != nil {
+		t.Fatalf("issue permit: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE bridge_commands SET expires_at = now() - interval '1 minute' WHERE command_id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ExpireDue(ctx, 1000); err != nil {
+		t.Fatal(err)
+	}
+	var status, effect string
+	if err := s.pool.QueryRow(ctx, `SELECT status, effect_state FROM bridge_commands WHERE command_id=$1`, id).Scan(&status, &effect); err != nil {
+		t.Fatal(err)
+	}
+	if status != StatusExpired || effect != "unknown" {
+		t.Fatalf("after expiry: status=%q effect_state=%q, want expired/unknown", status, effect)
+	}
+	var from, to, actor string
+	if err := s.pool.QueryRow(ctx, `SELECT from_status, to_status, actor FROM bridge_command_transitions
+		WHERE command_id=$1 ORDER BY id DESC LIMIT 1`, id).Scan(&from, &to, &actor); err != nil {
+		t.Fatal(err)
+	}
+	if from != StatusLeased || to != StatusExpired || actor != ExpireActor {
+		t.Fatalf("expiry audit: %q -> %q by %q", from, to, actor)
+	}
+	var transitions, outbox int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM bridge_command_transitions
+		WHERE command_id=$1 AND from_status='leased' AND to_status='expired'`, id).Scan(&transitions); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM bridge_signal_outbox
+		WHERE command_id=$1 AND result_digest='expired'`, id).Scan(&outbox); err != nil {
+		t.Fatal(err)
+	}
+	if transitions != 1 || outbox != 1 {
+		t.Fatalf("expiry artifacts: transitions=%d outbox=%d; want 1 each", transitions, outbox)
 	}
 }
 
