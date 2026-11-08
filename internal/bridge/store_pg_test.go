@@ -218,3 +218,36 @@ func TestPGWritePermit(t *testing.T) {
 		t.Fatalf("applied result: %v %+v", err, out)
 	}
 }
+
+func TestPGReclaimAfterPermitMarksEffectUnknown(t *testing.T) {
+	s := pgStore(t)
+	ctx := context.Background()
+	tenant := fmt.Sprintf("t-%d", time.Now().UnixNano())
+	c := Caller{ProviderRef: "glovo", Actor: "a", Tenants: []string{tenant}}
+	id := enqueue(t, s, tenant, KindPlaceOrderFake)
+	old := claimOne(t, s, c, id)
+	var d map[string]any
+	_ = json.Unmarshal(old, &d)
+	s.SetFence(allowFence{})
+	if _, err := s.IssueWritePermit(ctx, c, id, d["lease_token"].(string)); err != nil {
+		t.Fatalf("permit: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE bridge_commands SET lease_expires_at=now()-interval '1 second' WHERE command_id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	fresh := claimOne(t, s, c, id)
+	var state string
+	if err := s.pool.QueryRow(ctx, `SELECT effect_state FROM bridge_commands WHERE command_id=$1`, id).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "unknown" {
+		t.Fatalf("effect_state after reclaim = %q, want unknown", state)
+	}
+	out, err := s.SubmitResult(ctx, c, id, resultBody(id, fresh))
+	if err != nil {
+		t.Fatalf("result: %v", err)
+	}
+	if out.EffectState == EffectNotPerformed {
+		t.Fatalf("ambiguous effect recorded as not_performed")
+	}
+}

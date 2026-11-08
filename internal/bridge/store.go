@@ -149,9 +149,9 @@ CREATE TABLE IF NOT EXISTS bridge_write_permits (
     approval_ref  TEXT        NOT NULL,
     fence_ref     TEXT        NOT NULL,
     lease_epoch   BIGINT      NOT NULL,
-    issued_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT bridge_write_permits_operation_key UNIQUE (operation_key)
+    issued_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE bridge_write_permits DROP CONSTRAINT IF EXISTS bridge_write_permits_operation_key;
 `
 
 var (
@@ -633,7 +633,8 @@ func (s *Store) claimTx(ctx context.Context, tx pgx.Tx, c Caller, max int, lease
 			return nil, err
 		}
 		row, err := scanCmd(tx.QueryRow(ctx, `UPDATE bridge_commands SET
-				status='leased', lease_epoch=lease_epoch+1, lease_nonce=$2, lease_id=$3, lease_token=$4, leased_by=$5,
+				status='leased', lease_epoch=lease_epoch+1,
+				effect_state=CASE WHEN effect_state='permitted' THEN 'unknown' ELSE effect_state END, lease_nonce=$2, lease_id=$3, lease_token=$4, leased_by=$5,
 				lease_expires_at=LEAST(now() + ($6 * interval '1 second'), expires_at), updated_at=now()
 			WHERE command_id=$1 RETURNING `+cmdCols, id, nonce, leaseID, "lt_"+token, c.Actor, int(leaseTTL/time.Second)))
 		if err != nil {

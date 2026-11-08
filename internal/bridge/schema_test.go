@@ -39,7 +39,7 @@ func TestVendoredSchemasMatchProvenance(t *testing.T) {
 
 func fixture(t *testing.T, name string) []byte {
 	t.Helper()
-	b, err := os.ReadFile("schema/testdata/" + name)
+	b, err := os.ReadFile("schema/testdata/" + name) // #nosec G304 -- test fixture name
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,8 @@ func TestResultFixtures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("valid result refused: %v", err)
 	}
-	if r.Digest() == "" || r.Digest() != r.Digest() {
+	d1, d2 := r.Digest(), r.Digest()
+	if d1 == "" || d1 != d2 {
 		t.Fatal("digest unstable")
 	}
 	if _, err := ParseResult(fixture(t, "result.extra-field.json")); Code(err) != "invalid_document" {
