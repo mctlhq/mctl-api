@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mctl.ai/schemas/automation/v1/automation-error.schema.json",
+  "title": "automation-error.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["error"],
+  "properties": {
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {"enum": ["automation_invalid", "automation_unknown_field", "automation_server_owned_field", "automation_template_not_allowed", "automation_trigger_unsupported", "automation_time_ambiguous", "automation_support_constraint", "automation_not_found", "automation_version_conflict", "automation_idempotency_key_reused", "automation_occurrence_duplicate", "automation_identity_unlinked", "automation_policy_drift", "automation_budget_exhausted", "automation_approval_required", "automation_approval_not_reusable", "automation_paused", "automation_authority_unavailable"]},
+        "message": {"type": "string", "maxLength": 512}
+      }
+    }
+  }
+}

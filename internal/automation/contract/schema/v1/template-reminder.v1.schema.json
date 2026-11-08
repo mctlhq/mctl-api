@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mctl.ai/schemas/automation/v1/template-reminder.v1.schema.json",
+  "title": "reminder.v1 params",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["text"],
+  "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 2048}}
+}

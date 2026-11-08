@@ -1,0 +1,1 @@
+{"idempotency_key":"k1","template_id":"reminder.v1","params":{"text":"hi"},"trigger":{"kind":"dependency","depends_on":"au_123e4567-e89b-12d3-a456-426614174000"}}

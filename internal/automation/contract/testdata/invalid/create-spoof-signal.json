@@ -1,0 +1,1 @@
+{"idempotency_key":"k1","template_id":"reminder.v1","params":{"text":"hi"},"trigger":{"kind":"at","instant":"2026-12-01T10:00:00Z"},"signal":"x"}

@@ -1,0 +1,1 @@
+{"idempotency_key":"k2","template_id":"support.diagnostic-followup.v1","params":{"question_ref":"q"},"trigger":{"kind":"at","instant":"2026-12-01T10:00:00Z"},"ttl_seconds":60,"max_fires":1,"impersonate_owner":"owner"}

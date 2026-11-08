@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mctl.ai/schemas/automation/v1/automation-create-request.schema.json",
+  "title": "AutomationDefinition create request (client-writable fields only)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["idempotency_key", "template_id", "params", "trigger"],
+  "properties": {
+    "schema_version": {"const": "automation/v1"},
+    "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 128},
+    "name": {"type": "string", "maxLength": 128},
+    "template_id": {"type": "string", "minLength": 1, "maxLength": 64},
+    "params": {"type": "object"},
+    "trigger": {"$ref": "https://mctl.ai/schemas/automation/v1/trigger.schema.json"},
+    "policies": {"$ref": "https://mctl.ai/schemas/automation/v1/policies.schema.json"},
+    "ttl_seconds": {"type": "integer", "minimum": 1},
+    "max_fires": {"type": "integer", "minimum": 1},
+    "auth_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+    "requested_capabilities": {"type": "array", "maxItems": 16, "items": {"type": "string", "maxLength": 64}},
+    "delegate": {"type": "string", "maxLength": 128},
+    "impersonate_owner": {"type": "string", "maxLength": 128}
+  }
+}

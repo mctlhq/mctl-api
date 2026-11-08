@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mctl.ai/schemas/automation/v1/automation-patch.schema.json",
+  "title": "AutomationDefinition patch (JSON Merge Patch over client-writable fields)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["expected_version"],
+  "properties": {
+    "schema_version": {"const": "automation/v1"},
+    "expected_version": {"type": "integer", "minimum": 1},
+    "name": {"type": "string", "maxLength": 128},
+    "params": {"type": "object"},
+    "trigger": {"$ref": "https://mctl.ai/schemas/automation/v1/trigger.schema.json"},
+    "policies": {"$ref": "https://mctl.ai/schemas/automation/v1/policies.schema.json"},
+    "ttl_seconds": {"type": "integer", "minimum": 1},
+    "max_fires": {"type": "integer", "minimum": 1}
+  }
+}

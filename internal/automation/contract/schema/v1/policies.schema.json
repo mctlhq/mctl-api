@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mctl.ai/schemas/automation/v1/policies.schema.json",
+  "title": "Automation policies",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "overlap": {"enum": ["skip", "buffer_one", "allow_all"]},
+    "catch_up": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": {"enum": ["none", "latest_only"]},
+        "window_seconds": {"type": "integer", "minimum": 1, "maximum": 86400}
+      }
+    },
+    "fanout": {"enum": ["single"]},
+    "cancellation": {"enum": ["cancel_open_runs", "let_open_runs_finish"]}
+  }
+}
