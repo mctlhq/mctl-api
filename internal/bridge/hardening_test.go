@@ -293,11 +293,11 @@ func TestPGLegacyScrubSkipsLockedWriterAndResumes(t *testing.T) {
 	ctx := context.Background()
 	tenant := fmt.Sprintf("scrub-race-%d", time.Now().UnixNano())
 	caller := Caller{ProviderRef: "glovo", Actor: "service:bridge-provider:glovo", Tenants: []string{tenant}}
-	ids := []string{
-		enqueue(t, s, tenant, KindQuote),
-		enqueue(t, s, tenant, KindQuote),
-	}
-	for _, id := range ids {
+	ids := make([]string, 0, 2)
+	for i := 0; i < 2; i++ {
+		// Claim and finish each command before enqueuing the next: Claim()
+		// may lease the entire tenant batch in one call.
+		id := enqueue(t, s, tenant, KindQuote)
 		claimed := claimOne(t, s, caller, id)
 		if _, err := s.SubmitResult(ctx, caller, id, resultBody(id, claimed)); err != nil {
 			t.Fatal(err)
@@ -307,6 +307,7 @@ func TestPGLegacyScrubSkipsLockedWriterAndResumes(t *testing.T) {
 			WHERE command_id=$1`, id); err != nil {
 			t.Fatal(err)
 		}
+		ids = append(ids, id)
 	}
 
 	// A concurrent legacy writer holds one result row while the scrub batch
