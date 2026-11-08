@@ -816,6 +816,10 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 				params["host"] = "auto"
 			}
 		}
+		// The registry's host pattern is lowercase with no root dot.
+		if h := params["host"]; h != "" {
+			params["host"] = normalizeDomain(h)
+		}
 		// When update-config explicitly passes empty env_vars/secret_env_vars,
 		// use __CLEAR__ sentinel so the workflow clears existing values
 		if params["action"] == "update-config" || params["action"] == "deploy" {
@@ -1687,6 +1691,7 @@ func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) 
 		}
 		team, _ := args["team"].(string)
 		service, _ := args["service"].(string)
+		team, service = normalizeIdentifier(team), normalizeIdentifier(service)
 		domain, _ := args["domain"].(string)
 
 		// Prefer deleting the registered row: DELETE /api/v1/domains/{id}
@@ -1758,10 +1763,17 @@ func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) 
 	return tool, handler
 }
 
+// normalizeIdentifier mirrors normalizeIdentifier in internal/api: trim and
+// lowercase a team or service name.
+func normalizeIdentifier(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
 // normalizeDomain mirrors normalizeHostname in internal/api: lowercase,
 // trim surrounding whitespace, strip a root dot. Every hostname this
-// package submits to a domain workflow goes through it, because the
-// registry patterns on those parameters accept only that form.
+// package submits to a workflow (domain workflows and the deploy-service
+// host) goes through it, because the registry patterns on those parameters
+// accept only that form.
 func normalizeDomain(domain string) string {
 	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
 }
@@ -1791,6 +1803,7 @@ func (s *Server) toolVerifyDomain() (mcplib.Tool, server.ToolHandlerFunc) {
 		args := req.GetArguments()
 		team, _ := args["team"].(string)
 		service, _ := args["service"].(string)
+		team, service = normalizeIdentifier(team), normalizeIdentifier(service)
 		// List domains to find IDs, then verify each
 		path := "/api/v1/domains?team=" + url.QueryEscape(team) + "&service=" + url.QueryEscape(service)
 		body, err := s.apiGet(ctx, path)

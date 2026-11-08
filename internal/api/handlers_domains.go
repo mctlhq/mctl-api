@@ -131,7 +131,7 @@ func normalizeIdentifier(s string) string {
 
 // hostnameLabelPattern matches one DNS label: 1-63 lowercase alphanumerics
 // or hyphens, no leading or trailing hyphen.
-var hostnameLabelPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+var hostnameLabelPattern = regexp.MustCompile("^" + operations.HostnameLabelPattern + "$")
 
 // teamServicePattern matches the same team_name/service_name pattern the
 // operations registry declares for add-custom-domain and
