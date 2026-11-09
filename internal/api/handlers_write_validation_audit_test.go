@@ -288,21 +288,21 @@ func TestExecuteOperation_ValidationAuditIgnoresWhitespaceOnlySecret(t *testing.
 	}
 }
 
-// A raw base64 token ending in "=" padding is not an assignment: its trailing
-// "=" must not become a universal secret fragment that blanks every unrelated
-// KEY=value parameter. The raw value itself stays protected, and a real
-// TOKEN=<padded base64> keeps protecting its whole value.
+// A genuine KEY=<padded base64> assignment protects its whole padded value
+// without inventing a universal "=" fragment: the value after the first "="
+// is "YWJjZA==", not "=", so unrelated KEY=value parameters stay readable.
+// (The earlier bare-token cases "YWJjZA==" / "YWJjZQ=" assumed a bare token is
+// not an assignment; under the documented secret_env_vars parser, Cut yields
+// key "YWJjZA" and value "=", indistinguishable from a real "K==". That
+// expectation was unauthorized and is characterized below instead.)
 func TestExecuteOperation_ValidationAuditPaddedBase64SecretDoesNotInventEqualsFragment(t *testing.T) {
 	cases := map[string]struct {
 		secret string
 		leak   string // must not appear in Message or any Parameter
 	}{
-		"bare padded base64":          {"YWJjZA==", "YWJjZA=="},
-		"bare single-pad base64":      {"YWJjZQ=", "YWJjZQ="},
-		"KEY=padded base64":           {"TOKEN=YWJjZA==", "YWJjZA=="},
-		"KEY=single-pad base64":       {"TOKEN=YWJjZQ=", "YWJjZQ="},
-		"value with internal equals":  {"TOKEN=abc=def", "abc=def"},
-		"multi-line with padded line": {"A=zq9\nYWJjZA==", "YWJjZA=="},
+		"KEY=padded base64":          {"TOKEN=YWJjZA==", "YWJjZA=="},
+		"KEY=single-pad base64":      {"TOKEN=YWJjZQ=", "YWJjZQ="},
+		"value with internal equals": {"TOKEN=abc=def", "abc=def"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -386,6 +386,99 @@ func TestExecuteOperation_ValidationAuditShortSecretSuppressionIsConservativePol
 	}
 	if !strings.Contains(w.Body.String(), "component_name") {
 		t.Errorf("HTTP response must keep the full reason: %s", w.Body.String())
+	}
+}
+
+// Genuine assignments whose value is only "=" characters (K==, K===) are real
+// secrets under the KEY=value contract. Their "="/"==" value must not echo
+// into declared non-secret parameters or reasons: they are blanked/withheld
+// conservatively, even though that also hides unrelated values containing "=".
+// A bare token such as "YWJjZA==" parses identically (value "="), and there is
+// no reliable heuristic to tell it apart, so it gets the same protection.
+func TestExecuteOperation_ValidationAuditEqualsOnlyValueIsProtected(t *testing.T) {
+	cases := map[string]string{
+		"K==":                 "K==",
+		"K===":                "K===",
+		"multiline real":      "A=first\nK==\nZ=last",
+		"multiline triple":    "A=first\r\nK===\nZ=last",
+		"bare padded (ambig)": "YWJjZA==",
+		"line with padded":    "A=zq9\nYWJjZA==",
+	}
+	// "bare single-pad" YWJjZQ= parses to an empty value (no "=" fragment); only
+	// its whole line is protected, so it is not part of this "=" value table.
+	for name, secret := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newRoleFixture(t)
+			body := validDeployBody()
+			body["component_name"] = "Bad_Name!"
+			body["env_vars"] = "A=b\nMODE=fast\nX==y" // declared non-secret, echoes "=" and "=="
+			body["secret_env_vars"] = secret
+
+			w := postAs(t, f.router, "/api/v1/operations/deploy-service/execute", body, adminUser)
+			assertStatus(t, w, http.StatusBadRequest)
+			var resp map[string]interface{}
+			mustJSON(t, w.Body.Bytes(), &resp)
+			if resp["code"] != "validation_failed" {
+				t.Fatalf("code = %v; body: %s", resp["code"], w.Body.String())
+			}
+			if len(f.exec.submitted) != 0 {
+				t.Fatalf("executor invoked: %v", f.exec.submitted)
+			}
+			if total := len(f.audit.List(1000)); total != 1 {
+				t.Fatalf("audit rows = %d, want exactly 1", total)
+			}
+			denied := deniedEntries(f)
+			if len(denied) != 1 {
+				t.Fatalf("denied rows = %d, want 1", len(denied))
+			}
+			e := denied[0]
+			if e.Parameters["secret_env_vars"] != "[REDACTED]" {
+				t.Errorf("secret parameter = %q, want [REDACTED]", e.Parameters["secret_env_vars"])
+			}
+			if v := e.Parameters["env_vars"]; v != "[REDACTED]" {
+				t.Errorf("env_vars = %q: the \"=\" value echo must be blanked", v)
+			}
+			if !strings.HasPrefix(e.Message, "validation_failed: ") {
+				t.Errorf("message = %q", e.Message)
+			}
+			if !strings.Contains(w.Body.String(), "component_name") {
+				t.Errorf("HTTP response must keep the full reason: %s", w.Body.String())
+			}
+		})
+	}
+}
+
+// A declared parameter echoed in a reason: with a "==" value secret the reason
+// is withheld whole. Uses the reserved-service reason, which echoes the name.
+func TestExecuteOperation_ValidationAuditEqualsOnlyValueWithholdsEchoingReason(t *testing.T) {
+	for _, secret := range []string{"K==", "K===", "A=1\nK=="} {
+		f := newRoleFixture(t)
+		body := validDeployBody()
+		body["team_name"] = "tenant"
+		body["component_name"] = "x=="
+		body["secret_env_vars"] = secret
+
+		w := postAs(t, f.router, "/api/v1/operations/deploy-service/execute", body, adminUser)
+		assertStatus(t, w, http.StatusBadRequest)
+		if len(f.exec.submitted) != 0 {
+			t.Fatalf("executor invoked: %v", f.exec.submitted)
+		}
+		denied := deniedEntries(f)
+		if len(denied) != 1 || len(f.audit.List(1000)) != 1 {
+			t.Fatalf("secret %q: want exactly one denied row, got %+v", secret, denied)
+		}
+		e := denied[0]
+		if strings.Contains(e.Message, "x==") {
+			t.Errorf("secret %q: \"==\" echo leaked into Message: %q", secret, e.Message)
+		}
+		if v := e.Parameters["component_name"]; strings.Contains(v, "==") {
+			t.Errorf("secret %q: component_name = %q leaked", secret, v)
+		}
+		var resp map[string]interface{}
+		mustJSON(t, w.Body.Bytes(), &resp)
+		if resp["code"] != "validation_failed" {
+			t.Errorf("code = %v", resp["code"])
+		}
 	}
 }
 

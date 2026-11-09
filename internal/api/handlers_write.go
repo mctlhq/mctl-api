@@ -768,7 +768,8 @@ const reasonWithheld = "[REDACTED: reason withheld, it echoes a secret value]"
 // secretFragments lists every piece of the operation's Secret parameters that
 // must not reach the validation-denied audit row: the whole value, each
 // non-empty line, and the value after the first "=" of each line (the usual
-// KEY=value form, any length). Nothing is exempted for being short, but a
+// KEY=value form, any length, including "=" itself). Nothing is exempted for
+// being short or for its characters, but a
 // whitespace-only fragment is skipped: it carries no secret and would match
 // ordinary reasons and unrelated parameters.
 func secretFragments(op operations.Operation, input map[string]string) []string {
@@ -789,14 +790,18 @@ func secretFragments(op operations.Operation, input map[string]string) []string 
 		for _, line := range strings.Split(v, "\n") {
 			line = strings.TrimSpace(line)
 			add(line)
+			// secret_env_vars is newline-separated KEY=value; the value is
+			// everything after the first "=". No character heuristic reliably
+			// separates a bare token such as "YWJjZA==" (Cut gives key "YWJjZA",
+			// value "=") from a genuine assignment such as "K==", so no value is
+			// exempted for its shape (only whitespace-only ones, in add). A value
+			// of "=" therefore withholds any reason and blanks any audit
+			// parameter containing "=": conservative on purpose, like a
+			// one-character value. KEY=<padded base64> protects the whole padded
+			// value; arbitrary transformed or unpadded forms of a secret are not
+			// promised.
 			if _, val, ok := strings.Cut(line, "="); ok {
-				// A raw base64 token ends in "=" padding, which Cut reads as an
-				// empty key and the value "=". That is not a secret value and
-				// would blank every unrelated KEY=value field. The whole line
-				// added above still protects the raw token.
-				if val = strings.TrimSpace(val); strings.Trim(val, "=") != "" {
-					add(val)
-				}
+				add(strings.TrimSpace(val))
 			}
 		}
 	}
