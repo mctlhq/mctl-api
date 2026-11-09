@@ -550,8 +550,9 @@ func NewRouter(opts Options) http.Handler {
 		if opts.AuthMiddleware != nil {
 			r.Use(opts.AuthMiddleware)
 		}
-		// A support-audience token reaches only the routes mctl-support
-		// relays. First, so no other gate sees it on a route it may not
+		// A Glovo-audience token reaches no route in this slice. A
+		// support-audience token reaches only the routes mctl-support
+		// relays. Both gates run first, so no other gate sees it on a route it may not
 		// reach; this group also mounts /mcp.
 		r.Use(h.glovoAudienceGate)
 		r.Use(h.supportAudienceGate)

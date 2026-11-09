@@ -26,7 +26,7 @@ var Default = Gate{Open: false}
 // Authorize returns nil only for an open gate and a Glovo-audience caller
 // with a resolved principal. Closed: not_ready for everyone. Admin status
 // grants nothing.
-func (g Gate) Authorize(u *auth.User) *Error {
+func (g Gate) Authorize(u *auth.User) error {
 	if !g.Open {
 		return &Error{Code: CodeNotReady, Description: "the glovo facade is not ready"}
 	}
