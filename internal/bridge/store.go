@@ -676,6 +676,12 @@ func tokenEqual(stored, presented string) bool {
 
 // leaseLive checks that row is leased under presented token and the lease has
 // not run out. It does not read the clock for completed rows.
+//
+// Precedence: cancelled > stored-expired > not leased (stale) > wrong token
+// (stale) > command TTL elapsed (expired) > lease deadline elapsed (stale).
+// The token is checked before the TTL so a non-holder cannot probe a command's
+// TTL state. A row still stored as leased whose TTL has passed (the sweep only
+// runs inside Claim) is reported as expired, not stale.
 func (s *Store) leaseLive(row *cmdRow, token string) error {
 	switch row.Status {
 	case StatusCancelled:
@@ -689,7 +695,10 @@ func (s *Store) leaseLive(row *cmdRow, token string) error {
 		return ErrLeaseStale
 	}
 	now := s.now()
-	if row.LeaseExpiresAt == nil || !row.LeaseExpiresAt.After(now) || !row.ExpiresAt.After(now) {
+	if !row.ExpiresAt.After(now) {
+		return ErrCommandExpired
+	}
+	if row.LeaseExpiresAt == nil || !row.LeaseExpiresAt.After(now) {
 		return ErrLeaseStale
 	}
 	return nil

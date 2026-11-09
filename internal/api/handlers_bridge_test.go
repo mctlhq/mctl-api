@@ -167,7 +167,7 @@ func TestBridgeHandlersMapTypedErrorsAndRedactAudit(t *testing.T) {
 		t.Errorf("permit: %d", w.Code)
 	}
 	for err, want := range map[error]int{
-		bridge.ErrLeaseStale: 409, bridge.ErrResultConflict: 409, bridge.ErrCommandCancelled: 409, bridge.ErrCommandNotFound: 404,
+		bridge.ErrLeaseStale: 409, bridge.ErrCommandExpired: 409, bridge.ErrResultConflict: 409, bridge.ErrCommandCancelled: 409, bridge.ErrCommandNotFound: 404,
 		bridge.ErrWriteFenceUnavailable: 503, bridge.ErrWriteFenceRefused: 403, bridge.ErrResultInconsistent: 422,
 	} {
 		fb.err = err

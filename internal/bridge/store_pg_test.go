@@ -257,3 +257,109 @@ func TestPGReclaimAfterPermitMarksEffectUnknown(t *testing.T) {
 		t.Fatalf("stored effect_state = %q, want unknown", state)
 	}
 }
+
+func pgExpiredFixture(t *testing.T, s *Store, c Caller, kind string) (id, token string) {
+	t.Helper()
+	id = enqueue(t, s, c.Tenants[0], kind)
+	var d map[string]any
+	_ = json.Unmarshal(claimOne(t, s, c, id), &d)
+	return id, d["lease_token"].(string)
+}
+
+func pgCmdState(t *testing.T, s *Store, id string) string {
+	t.Helper()
+	var st, eff string
+	var outbox, permits int
+	ctx := context.Background()
+	if err := s.pool.QueryRow(ctx, `SELECT status, effect_state FROM bridge_commands WHERE command_id=$1`, id).Scan(&st, &eff); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM bridge_signal_outbox WHERE command_id=$1`, id).Scan(&outbox); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM bridge_write_permits WHERE command_id=$1`, id).Scan(&permits); err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("%s/%s/outbox=%d/permits=%d", st, eff, outbox, permits)
+}
+
+func TestPGExpiredCommandTTL(t *testing.T) {
+	s := pgStore(t)
+	ctx := context.Background()
+	s.SetFence(allowFence{})
+	tenant := fmt.Sprintf("t-%d", time.Now().UnixNano())
+	c := Caller{ProviderRef: "glovo", Actor: "a", Tenants: []string{tenant}}
+	id, tok := pgExpiredFixture(t, s, c, KindPlaceOrderFake)
+	cmd := claimedBody(t, s, id)
+	if _, err := s.pool.Exec(ctx, `UPDATE bridge_commands SET expires_at=now()-interval '2 hours', lease_expires_at=now()-interval '1 hour' WHERE command_id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	before := pgCmdState(t, s, id)
+	if _, err := s.SubmitResult(ctx, c, id, resultBody(id, cmd)); Code(err) != "command_expired" {
+		t.Fatalf("submit: %v", err)
+	}
+	if _, err := s.IssueWritePermit(ctx, c, id, tok); Code(err) != "command_expired" {
+		t.Fatalf("permit: %v", err)
+	}
+	if after := pgCmdState(t, s, id); after != before {
+		t.Fatalf("state changed: %s -> %s", before, after)
+	}
+}
+
+// claimedBody rebuilds the claimed command JSON (with its lease token) from the row.
+func claimedBody(t *testing.T, s *Store, id string) json.RawMessage {
+	t.Helper()
+	var exec, tok string
+	if err := s.pool.QueryRow(context.Background(), `SELECT execution_id, lease_token FROM bridge_commands WHERE command_id=$1`, id).Scan(&exec, &tok); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(map[string]any{"execution_id": exec, "lease_token": tok})
+	return b
+}
+
+func TestPGExpiredLeaseAndStaleToken(t *testing.T) {
+	s := pgStore(t)
+	ctx := context.Background()
+	s.SetFence(allowFence{})
+	tenant := fmt.Sprintf("t-%d", time.Now().UnixNano())
+	c := Caller{ProviderRef: "glovo", Actor: "a", Tenants: []string{tenant}}
+
+	// Lease deadline passed, command TTL live: lease_stale.
+	id, tok := pgExpiredFixture(t, s, c, KindPlaceOrderFake)
+	cmd := claimedBody(t, s, id)
+	if _, err := s.pool.Exec(ctx, `UPDATE bridge_commands SET lease_expires_at=now()-interval '1 hour' WHERE command_id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SubmitResult(ctx, c, id, resultBody(id, cmd)); Code(err) != "lease_stale" {
+		t.Fatalf("submit with expired lease: %v", err)
+	}
+	if _, err := s.IssueWritePermit(ctx, c, id, tok); Code(err) != "lease_stale" {
+		t.Fatalf("permit with expired lease: %v", err)
+	}
+
+	// Forged token on an expired command: lease_stale, TTL not disclosed.
+	id2, _ := pgExpiredFixture(t, s, c, KindPlaceOrderFake)
+	if _, err := s.pool.Exec(ctx, `UPDATE bridge_commands SET expires_at=now()-interval '2 hours', lease_expires_at=now()-interval '1 hour' WHERE command_id=$1`, id2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.IssueWritePermit(ctx, c, id2, "lt_forged0123456789abc"); Code(err) != "lease_stale" {
+		t.Fatalf("forged permit on expired command: %v", err)
+	}
+	forged := resultBody(id2, claimedBody(t, s, id2))
+	var m map[string]any
+	_ = json.Unmarshal(forged, &m)
+	m["lease_token"] = "lt_forged0123456789abc"
+	forged, _ = json.Marshal(m)
+	if _, err := s.SubmitResult(ctx, c, id2, forged); Code(err) != "lease_stale" {
+		t.Fatalf("forged result on expired command: %v", err)
+	}
+
+	// Valid token on a live command succeeds.
+	id3, tok3 := pgExpiredFixture(t, s, c, KindPlaceOrderFake)
+	if _, err := s.IssueWritePermit(ctx, c, id3, tok3); err != nil {
+		t.Fatalf("valid permit: %v", err)
+	}
+	if _, err := s.SubmitResult(ctx, c, id3, resultBody(id3, claimedBody(t, s, id3))); err != nil {
+		t.Fatalf("valid result: %v", err)
+	}
+}
