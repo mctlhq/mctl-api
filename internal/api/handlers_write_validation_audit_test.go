@@ -288,6 +288,127 @@ func TestExecuteOperation_ValidationAuditIgnoresWhitespaceOnlySecret(t *testing.
 	}
 }
 
+// A raw base64 token ending in "=" padding is not an assignment: its trailing
+// "=" must not become a universal secret fragment that blanks every unrelated
+// KEY=value parameter. The raw value itself stays protected, and a real
+// TOKEN=<padded base64> keeps protecting its whole value.
+func TestExecuteOperation_ValidationAuditPaddedBase64SecretDoesNotInventEqualsFragment(t *testing.T) {
+	cases := map[string]struct {
+		secret string
+		leak   string // must not appear in Message or any Parameter
+	}{
+		"bare padded base64":          {"YWJjZA==", "YWJjZA=="},
+		"bare single-pad base64":      {"YWJjZQ=", "YWJjZQ="},
+		"KEY=padded base64":           {"TOKEN=YWJjZA==", "YWJjZA=="},
+		"KEY=single-pad base64":       {"TOKEN=YWJjZQ=", "YWJjZQ="},
+		"value with internal equals":  {"TOKEN=abc=def", "abc=def"},
+		"multi-line with padded line": {"A=zq9\nYWJjZA==", "YWJjZA=="},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newRoleFixture(t)
+			body := validDeployBody()
+			body["component_name"] = "Bad_Name!" // reason that never echoes a value
+			body["env_vars"] = "A=b\nMODE=fast"  // unrelated, contains '='
+			body["secret_env_vars"] = tc.secret
+
+			w := postAs(t, f.router, "/api/v1/operations/deploy-service/execute", body, adminUser)
+			assertStatus(t, w, http.StatusBadRequest)
+			var resp map[string]interface{}
+			mustJSON(t, w.Body.Bytes(), &resp)
+			if resp["code"] != "validation_failed" {
+				t.Fatalf("code = %v; body: %s", resp["code"], w.Body.String())
+			}
+			if len(f.exec.submitted) != 0 {
+				t.Fatalf("executor invoked: %v", f.exec.submitted)
+			}
+			if total := len(f.audit.List(1000)); total != 1 {
+				t.Fatalf("audit rows = %d, want exactly 1", total)
+			}
+			denied := deniedEntries(f)
+			if len(denied) != 1 {
+				t.Fatalf("denied rows = %d, want 1", len(denied))
+			}
+			e := denied[0]
+			if strings.Contains(e.Message, "reason withheld") || !strings.Contains(e.Message, "component_name: must match pattern") {
+				t.Errorf("safe reason withheld: %q", e.Message)
+			}
+			if e.Parameters["env_vars"] != "A=b\nMODE=fast" {
+				t.Errorf("unrelated env_vars falsely redacted: %q", e.Parameters["env_vars"])
+			}
+			if e.Parameters["component_name"] != "Bad_Name!" {
+				t.Errorf("component_name altered: %q", e.Parameters["component_name"])
+			}
+			if e.Parameters["secret_env_vars"] != "[REDACTED]" {
+				t.Errorf("secret parameter = %q, want [REDACTED]", e.Parameters["secret_env_vars"])
+			}
+			if strings.Contains(e.Message, tc.leak) {
+				t.Errorf("secret %q leaked into Message: %q", tc.leak, e.Message)
+			}
+			for k, v := range e.Parameters {
+				if k != "secret_env_vars" && strings.Contains(v, tc.leak) {
+					t.Errorf("secret %q leaked into Parameters[%q] = %q", tc.leak, k, v)
+				}
+			}
+		})
+	}
+}
+
+// Designed policy, not a regression (P2): a short secret value such as
+// DEBUG=1 is matched as a substring, so an unrelated parameter or reason that
+// merely contains it is blanked/withheld. The audit row favors no leak over
+// detail, because a genuine one-character secret can be embedded anywhere. The
+// declared secret stays masked, the response is unchanged, and no value leaks.
+func TestExecuteOperation_ValidationAuditShortSecretSuppressionIsConservativePolicy(t *testing.T) {
+	f := newRoleFixture(t)
+	body := validDeployBody() // git_tag "v1.0.0" contains "1"
+	body["component_name"] = "Bad_Name!"
+	body["secret_env_vars"] = "DEBUG=1"
+
+	w := postAs(t, f.router, "/api/v1/operations/deploy-service/execute", body, adminUser)
+	assertStatus(t, w, http.StatusBadRequest)
+	if len(f.exec.submitted) != 0 {
+		t.Fatalf("executor invoked: %v", f.exec.submitted)
+	}
+	denied := deniedEntries(f)
+	if len(denied) != 1 || len(f.audit.List(1000)) != 1 {
+		t.Fatalf("want exactly one denied row, got %+v", denied)
+	}
+	e := denied[0]
+	if e.Parameters["secret_env_vars"] != "[REDACTED]" {
+		t.Errorf("secret parameter = %q, want [REDACTED]", e.Parameters["secret_env_vars"])
+	}
+	if e.Parameters["git_tag"] != "[REDACTED]" {
+		t.Errorf("git_tag = %q: the short-secret substring is expected to be suppressed", e.Parameters["git_tag"])
+	}
+	if e.Parameters["team_name"] != "tests" {
+		t.Errorf("parameter without the fragment altered: %v", e.Parameters)
+	}
+	if !strings.Contains(w.Body.String(), "component_name") {
+		t.Errorf("HTTP response must keep the full reason: %s", w.Body.String())
+	}
+}
+
+// The raw padded secret echoed by another parameter is still blanked whole.
+func TestExecuteOperation_ValidationAuditPaddedBase64EchoIsBlanked(t *testing.T) {
+	for _, secret := range []string{"YWJjZA==", "TOKEN=YWJjZA=="} {
+		f := newRoleFixture(t)
+		body := validDeployBody()
+		body["component_name"] = "Bad_Name!"
+		body["env_vars"] = "X=" + "YWJjZA=="
+		body["secret_env_vars"] = secret
+		w := postAs(t, f.router, "/api/v1/operations/deploy-service/execute", body, adminUser)
+		assertStatus(t, w, http.StatusBadRequest)
+		denied := deniedEntries(f)
+		if len(denied) != 1 {
+			t.Fatalf("denied rows = %d, want 1", len(denied))
+		}
+		if v := denied[0].Parameters["env_vars"]; v != "[REDACTED]" {
+			t.Errorf("secret %q: env_vars echo = %q, want [REDACTED]", secret, v)
+		}
+	}
+}
+
 // Valid input and existing authorization refusals keep their own behavior:
 // no extra denied row from the validation path.
 func TestExecuteOperation_NoValidationDeniedRowOnSuccessOrOtherRefusals(t *testing.T) {

@@ -790,7 +790,13 @@ func secretFragments(op operations.Operation, input map[string]string) []string 
 			line = strings.TrimSpace(line)
 			add(line)
 			if _, val, ok := strings.Cut(line, "="); ok {
-				add(strings.TrimSpace(val))
+				// A raw base64 token ends in "=" padding, which Cut reads as an
+				// empty key and the value "=". That is not a secret value and
+				// would blank every unrelated KEY=value field. The whole line
+				// added above still protects the raw token.
+				if val = strings.TrimSpace(val); strings.Trim(val, "=") != "" {
+					add(val)
+				}
 			}
 		}
 	}
