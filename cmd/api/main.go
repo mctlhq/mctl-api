@@ -1333,6 +1333,7 @@ func main() {
 		AllowedOrigins:                 cfg.AllowedOrigins,
 		OAuthServer:                    oauthServer,
 		IdentityLink:                   identityLinkOptions(cfg, principalStore, principalCache, oauthServer, ghValidator),
+		DevLoopDecide:                  devLoopDecideOptions(cfg, principalResolver, principalAuthz),
 		OAuthUpstream:                  cfg.oauthUpstreamMode(),
 		OAuthZitadel:                   oauthZitadelOptions(cfg, principalStore, oauthServer),
 		SurfaceZitadel:                 surfaceZitadelOptions(cfg),
@@ -1654,6 +1655,12 @@ type config struct {
 	ZitadelLinkClientID     string
 	ZitadelLinkClientSecret string
 	ZitadelLinkProvider     string
+	// ZITADEL client of the DevLoop decide page (mctl-api#964): a
+	// confidential web app whose ID token proves the person deciding. Both
+	// empty keeps the page off; it resolves the person under
+	// ZitadelLinkProvider, the entry their ZITADEL bearer is verified by.
+	DevLoopDecideClientID     string
+	DevLoopDecideClientSecret string
 	// The ZITADEL clients whose ID tokens the portal may present to
 	// surface-principals/zitadel: the mctl-web site's (MCTL_WEB_CLIENT_ID,
 	// creating a workspace) and the portal's (ZITADEL_PORTAL_CLIENT_ID,
@@ -1837,6 +1844,8 @@ func loadConfig() config {
 		ZitadelLinkClientID:                 os.Getenv("ZITADEL_LINK_CLIENT_ID"),
 		ZitadelLinkClientSecret:             os.Getenv("ZITADEL_LINK_CLIENT_SECRET"),
 		ZitadelLinkProvider:                 envOr("ZITADEL_LINK_PROVIDER", "zitadel"),
+		DevLoopDecideClientID:               os.Getenv("DEVLOOP_DECIDE_CLIENT_ID"),
+		DevLoopDecideClientSecret:           os.Getenv("DEVLOOP_DECIDE_CLIENT_SECRET"),
 		OAuthJWTSecret:                      os.Getenv("OAUTH_JWT_SECRET"),
 		OAuthAllowedRedirectURIs:            oauthRedirectURIs,
 		OAuthPreregisteredClientsRaw:        os.Getenv("OAUTH_PREREGISTERED_CLIENTS"),
@@ -2963,6 +2972,53 @@ func identityLinkOptions(cfg config, store *principals.Store, cache *principals.
 		return gh.ValidateIdentity(ctx, token)
 	}
 	slog.Info("identity link browser flow enabled", "provider", opts.ProviderName, "issuer", opts.Issuer)
+	return opts
+}
+
+// devLoopDecideOptions configures the DevLoop decide page (mctl-api#964),
+// or returns nil (page off, 503) with one log line saying what is missing.
+// Both client variables empty is the page deliberately off, and silent.
+func devLoopDecideOptions(cfg config, pr auth.PrincipalResolver, authz *auth.PrincipalAuthz) *mctlapi.DevLoopDecideOptions {
+	if cfg.DevLoopDecideClientID == "" && cfg.DevLoopDecideClientSecret == "" {
+		return nil
+	}
+	opts := &mctlapi.DevLoopDecideOptions{
+		ClientID: cfg.DevLoopDecideClientID, ClientSecret: cfg.DevLoopDecideClientSecret,
+		BaseURL: cfg.SelfURL, Principals: pr, Authz: authz,
+	}
+	var missing []string
+	if cfg.DevLoopDecideClientID == "" || cfg.DevLoopDecideClientSecret == "" {
+		missing = append(missing, "DEVLOOP_DECIDE_CLIENT_ID and DEVLOOP_DECIDE_CLIENT_SECRET (both)")
+	}
+	if cfg.SelfURL == "" {
+		missing = append(missing, "SELF_URL")
+	}
+	if pr == nil {
+		missing = append(missing, "the principal store")
+	}
+	if authz == nil {
+		// Outside principal mode a federated user has no admin bit at all,
+		// so nobody could decide: say so instead of serving a page that
+		// refuses everyone.
+		missing = append(missing, "TENANT_AUTHZ_MODE=principal")
+	}
+	if cfg.FederationDisabled {
+		missing = append(missing, "the federation registry (MCTL_FEDERATION_DISABLED is on)")
+	} else if entries, err := auth.ParseOIDCProviders(cfg.OIDCProvidersRaw); err == nil {
+		for i := range entries {
+			if entries[i].Name == cfg.ZitadelLinkProvider {
+				opts.ProviderName, opts.Issuer = entries[i].Name, entries[i].Issuer
+			}
+		}
+	}
+	if opts.Issuer == "" && !cfg.FederationDisabled {
+		missing = append(missing, "an MCTL_OIDC_PROVIDERS entry named "+cfg.ZitadelLinkProvider)
+	}
+	if len(missing) > 0 {
+		slog.Error("devloop decide page disabled", "missing", strings.Join(missing, "; "))
+		return nil
+	}
+	slog.Info("devloop decide page enabled", "provider", opts.ProviderName, "issuer", opts.Issuer)
 	return opts
 }
 

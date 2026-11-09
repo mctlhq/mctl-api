@@ -571,36 +571,45 @@ func TestDeploymentRendersZitadelLinkSecretEnv(t *testing.T) {
 	}
 }
 
-// oauthZitadelSecret (mctl-api#467) follows zitadelLinkSecret exactly: one
-// secretKeyRef per key, optional, refused next to a literal, and inert when
-// empty.
+// oauthZitadelSecret (mctl-api#467) and devLoopDecideSecret (mctl-api#964)
+// follow zitadelLinkSecret exactly: one secretKeyRef per key, optional,
+// refused next to a literal, and inert when empty.
 func TestDeploymentOAuthZitadelSecret(t *testing.T) {
+	testClientSecretValue(t, "oauthZitadelSecret", "OAUTH_ZITADEL_CLIENT_ID", "OAUTH_ZITADEL_CLIENT_SECRET")
+}
+
+func TestDeploymentDevLoopDecideSecret(t *testing.T) {
+	testClientSecretValue(t, "devLoopDecideSecret", "DEVLOOP_DECIDE_CLIENT_ID", "DEVLOOP_DECIDE_CLIENT_SECRET")
+}
+
+func testClientSecretValue(t *testing.T, value, idKey, secretKey string) {
+	t.Helper()
 	helmPath := requireHelm(t)
-	for _, key := range []string{"OAUTH_ZITADEL_CLIENT_ID", "OAUTH_ZITADEL_CLIENT_SECRET"} {
+	for _, key := range []string{idKey, secretKey} {
 		// #nosec G204 -- helmPath is resolved via exec.LookPath("helm"), and the
 		// arguments are fixed literals.
 		cmd := exec.Command(helmPath, "template", "mctl-api", ".",
-			"--set", "oauthZitadelSecret=mctl-api-oidc-zitadel",
+			"--set", value+"=mctl-api-oidc-zitadel",
 			"--set-string", "env."+key+"=literal",
 		)
 		var out bytes.Buffer
 		cmd.Stdout = &out
 		cmd.Stderr = &out
 		if err := cmd.Run(); err == nil || !strings.Contains(out.String(), "not both") {
-			t.Errorf("%s: want a 'not both' failure next to oauthZitadelSecret, got err=%v\n%s", key, err, out.String())
+			t.Errorf("%s: want a 'not both' failure next to %s, got err=%v\n%s", key, value, err, out.String())
 		}
 	}
 
 	_, defaultOut := renderDeployment(t)
-	_, emptyOut := renderDeployment(t, "--set", "oauthZitadelSecret=")
+	_, emptyOut := renderDeployment(t, "--set", value+"=")
 	if !bytes.Equal(defaultOut, emptyOut) {
-		t.Error("empty oauthZitadelSecret should render byte-identical output to the default")
+		t.Errorf("empty %s should render byte-identical output to the default", value)
 	}
 
-	d, _ := renderDeployment(t, "--set", "oauthZitadelSecret=mctl-api-oidc-zitadel",
-		"--set-string", "env.OAUTH_ZITADEL_CLIENT_ID=")
+	d, _ := renderDeployment(t, "--set", value+"=mctl-api-oidc-zitadel",
+		"--set-string", "env."+idKey+"=")
 	c := mainContainer(t, d)
-	for _, name := range []string{"OAUTH_ZITADEL_CLIENT_ID", "OAUTH_ZITADEL_CLIENT_SECRET"} {
+	for _, name := range []string{idKey, secretKey} {
 		if n := countEnv(c, name); n != 1 {
 			t.Fatalf("expected exactly one %s env entry, got %d", name, n)
 		}
@@ -688,6 +697,7 @@ func TestHelmLintCleanAcrossOptionalValues(t *testing.T) {
 		{"--set", "oidcProvidersSecret=mctl-api-oidc-zitadel"},
 		{"--set", "zitadelLinkSecret=mctl-api-oidc-zitadel"},
 		{"--set", "oauthZitadelSecret=mctl-api-oidc-zitadel"},
+		{"--set", "devLoopDecideSecret=mctl-api-oidc-zitadel"},
 		{"--set", "envFromOptionalSecrets={mctl-api-zitadel-hook}"},
 	}
 	for _, extra := range cases {
@@ -740,13 +750,16 @@ func TestIngressRoutesIdentityLinkPath(t *testing.T) {
 			if len(ing.Spec.Rules) == 0 {
 				t.Fatalf("no ingress rules rendered:\n%s", out)
 			}
-			for _, r := range ing.Spec.Rules {
-				found := false
-				for _, p := range r.HTTP.Paths {
-					found = found || p.Path == "/identity"
-				}
-				if !found {
-					t.Errorf("host %s has no /identity path", r.Host)
+			// /devloop: the DevLoop decide page (mctlhq/mctl-api#964).
+			for _, want := range []string{"/identity", "/devloop"} {
+				for _, r := range ing.Spec.Rules {
+					found := false
+					for _, p := range r.HTTP.Paths {
+						found = found || p.Path == want
+					}
+					if !found {
+						t.Errorf("host %s has no %s path", r.Host, want)
+					}
 				}
 			}
 		})
