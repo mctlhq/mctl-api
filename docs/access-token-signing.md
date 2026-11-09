@@ -16,6 +16,7 @@ optional and publishes a JWKS at `/.well-known/jwks.json`, advertised as
 | `OAUTH_JWT_ACCEPT_HS256` | `true` | `false` refuses every HS256 token before any HMAC; refused at boot while the signing alg is HS256 |
 | `OAUTH_JWT_REQUIRE_AUD` | `false` | `true` ends the grace for aud-less HS256 tokens |
 | `OAUTH_SUPPORT_RESOURCE` | `https://support.mctl.ai` | RFC 8707 resource of the support agent; set empty to disable it; refused at boot unless an absolute https URL that is not the API audience, base URL or `/mcp` |
+| `GLOVO_MCP_RESOURCE` | empty (disabled) | RFC 8707 resource of the Glovo MCP facade (intended `https://glovo.mctl.ai/mcp`); refused at boot unless an absolute https URL that is neither the API nor `OAUTH_SUPPORT_RESOURCE`. No Glovo token is minted yet; see `docs/glovo-auth.md` |
 
 `OAUTH_JWT_SECRET` stays required even after HS256 is drained: refresh-token
 derivation (`deriveSuccessorRefreshToken`) uses it as key material.

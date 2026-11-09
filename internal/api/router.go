@@ -553,6 +553,7 @@ func NewRouter(opts Options) http.Handler {
 		// A support-audience token reaches only the routes mctl-support
 		// relays. First, so no other gate sees it on a route it may not
 		// reach; this group also mounts /mcp.
+		r.Use(h.glovoAudienceGate)
 		r.Use(h.supportAudienceGate)
 		// A surface principal's ceiling counts every call it makes, so it
 		// runs before the gate: the gate turns a relay call into the linked

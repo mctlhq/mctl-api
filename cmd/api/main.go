@@ -215,6 +215,11 @@ func main() {
 			stopSignals()
 			os.Exit(1)
 		}
+		if err := configureGlovoResource(oauthServer, os.LookupEnv); err != nil {
+			slog.Error("invalid configuration", "error", err)
+			stopSignals()
+			os.Exit(1)
+		}
 		// Unset/0 = strict mode off: a stale checkout is used and alerted on
 		// via the gauge above, not failed (mctl-api#411, README.md
 		// "Authorization group freshness"). GroupsDegradedGrace is
@@ -3183,6 +3188,17 @@ func configureSupportResource(o *auth.OAuthServer, lookup func(string) (string, 
 		o.SupportResource = strings.TrimSpace(v)
 	}
 	return o.ValidateSupportResource()
+}
+
+// configureGlovoResource sets the Glovo facade's RFC 8707 resource from
+// GLOVO_MCP_RESOURCE (unset or empty: disabled) and refuses an invalid one.
+// Call it after configureSupportResource.
+func configureGlovoResource(o *auth.OAuthServer, lookup func(string) (string, bool)) error {
+	o.GlovoResource = ""
+	if v, ok := lookup("GLOVO_MCP_RESOURCE"); ok {
+		o.GlovoResource = strings.TrimSpace(v)
+	}
+	return o.ValidateGlovoResource()
 }
 
 // reviewConfigFromEnv reads REVIEW_REQUEST_TTL and REVIEW_POOL_MAX. Empty
