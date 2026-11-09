@@ -491,6 +491,47 @@ off only after a full natural DevLoop cycle (the Saturday cron and one
 issue-triggered loop) with mctl-agents#636 deployed records actor and
 subject separately and zero legacy relays.
 
+### Deciding from a link (#964)
+
+A notification (Telegram, e-mail) may carry a URL button to
+`/devloop/decide/{workflow_id}?grant=<aar_>&cd=<context_digest>&xd=<content_digest>`,
+the binding of `GET .../dev-loop/{workflow_id}/approval`. The link carries
+no secret and grants nothing; whoever sends it attests nothing.
+
+1. `GET` shows what the link names and changes nothing, so a link preview
+   or a prefetch creates no state. Its button POSTs to
+   `/devloop/decide/start`.
+2. The start sets a `__Host-mctl_devloop_decide` cookie (HttpOnly, Secure,
+   SameSite=Lax) and sends the browser to ZITADEL with PKCE, a nonce,
+   `prompt=login` and `max_age=0`. At most three unfinished sign-ins per
+   source address, a thousand in all, ten minutes each, in memory like
+   identity linking.
+3. `/devloop/decide/callback` requires the same browser, verifies the ID
+   token for the decide client, its nonce and a fresh `auth_time`, and
+   resolves the person under the `ZITADEL_LINK_PROVIDER` entry exactly as
+   their ZITADEL bearer would be (`auth.UserForSignIn`: principal attached,
+   principal mode applied). Unlike the middleware it fails closed when the
+   principal cannot be resolved. Only a human admin goes on.
+4. The grant is read as that person. If the newest grant is not the one the
+   link names, or its context or content digest moved, or it is no longer
+   pending, the page offers no decision.
+5. Approve or Reject POSTs to `/devloop/decide/confirm` with a one-time
+   CSRF token. The person is resolved again, then the decision runs through
+   the API's own handlers, in process, as them: Approve is
+   `POST .../dev-loop/{workflow_id}/approve` with the link's binding,
+   Reject is a `deny` of the grant through
+   `POST /api/v1/action-approvals/{id}/decision`. Every gate above
+   (human admin, binding, decision context, audit) decides; the page adds a
+   `dev-loop-decide-page` audit entry of its own.
+
+Configuration: `DEVLOOP_DECIDE_CLIENT_ID` and `DEVLOOP_DECIDE_CLIENT_SECRET`,
+a confidential ZITADEL web client (PKCE, bearer access tokens, ID token
+userinfo assertion) whose redirect URI is `<SELF_URL>/devloop/decide/callback`.
+Both empty keeps the page off (503). It also needs the principal store,
+`TENANT_AUTHZ_MODE=principal` (outside it a federated user has no admin bit,
+so nobody could decide) and the `ZITADEL_LINK_PROVIDER` entry in
+`MCTL_OIDC_PROVIDERS`; with any missing it logs one line and stays off.
+
 ## Surface actors and human-input respondents by principal (#629)
 
 Two human paths used to key on a verified GitHub login, which refused a

@@ -42,6 +42,8 @@ ingress:
     # Browser half of ZITADEL identity linking (/identity/link/zitadel*,
     # mctlhq/mctl-api#435).
     - /identity
+    # DevLoop decide page (/devloop/decide/*, mctlhq/mctl-api#964).
+    - /devloop
     - /api
     - /mcp
 
@@ -254,6 +256,14 @@ zitadelLinkSecret: ""
 # or both (mctlhq/mctl-api#467). Optional keys: under the default
 # OAUTH_UPSTREAM=github nothing reads them.
 oauthZitadelSecret: ""
+
+# Optional: Secret holding DEVLOOP_DECIDE_CLIENT_ID and
+# DEVLOOP_DECIDE_CLIENT_SECRET, the confidential ZITADEL client of the DevLoop
+# decide page (docs/principals.md, mctlhq/mctl-api#964). In production the
+# zitadel-iac Job writes both into the same Secret as MCTL_OIDC_PROVIDERS.
+# Optional, so absent keys leave the page off (503) rather than failing the
+# pod.
+devLoopDecideSecret: ""
 
 # Optional: mount a versioned usage rate card from a ConfigMap.
 #

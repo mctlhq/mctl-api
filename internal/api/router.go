@@ -125,6 +125,9 @@ type Options struct {
 	// IdentityLink configures explicit identity linking (mctl-api#435,
 	// handlers_identity_link.go). Nil disables it (503).
 	IdentityLink *IdentityLinkOptions
+	// DevLoopDecide configures the DevLoop decide page (mctl-api#964,
+	// handlers_devloop_decide.go). Nil disables it (503).
+	DevLoopDecide *DevLoopDecideOptions
 	// OAuthUpstream is where /oauth/authorize signs people in
 	// (OAUTH_UPSTREAM, mctl-api#467); the zero value is GitHub.
 	OAuthUpstream OAuthUpstreamMode
@@ -388,6 +391,7 @@ type Options struct {
 type Handlers struct {
 	opts           Options
 	identityLink   *identityLinker
+	devLoopDecide  *devLoopDecider
 	oauthZitadel   *oauthZitadel
 	surfaceZitadel *surfaceZitadel
 	// principalSets memoizes shadow mode's principal-keyed tenant sets;
@@ -403,6 +407,9 @@ func NewRouter(opts Options) http.Handler {
 	}
 	if opts.IdentityLink != nil {
 		h.identityLink = newIdentityLinker(opts.IdentityLink)
+	}
+	if opts.DevLoopDecide != nil {
+		h.devLoopDecide = newDevLoopDecider(opts.DevLoopDecide)
 	}
 	if opts.OAuthZitadel != nil {
 		h.oauthZitadel = &oauthZitadel{opts: opts.OAuthZitadel, lazyOIDCProvider: lazyOIDCProvider{issuer: opts.OAuthZitadel.Issuer}}
@@ -486,6 +493,12 @@ func NewRouter(opts Options) http.Handler {
 		r.Get(linkStartPath, h.handleIdentityLinkStart)
 		r.Get(linkCallbackPath, h.handleIdentityLinkCallback)
 		r.Post(linkConfirmPath, h.handleIdentityLinkConfirm)
+		// DevLoop decide page (mctl-api#964). Public like linking: the
+		// person signs in inside the flow, and only then may decide.
+		r.Post(decideStartPath, h.handleDevLoopDecideStart)
+		r.Get(decideCallbackPath, h.handleDevLoopDecideCallback)
+		r.Post(decideConfirmPath, h.handleDevLoopDecideConfirm)
+		r.Get(decidePathPrefix+"{workflow_id}", h.handleDevLoopDecidePage)
 	})
 	r.Group(func(r chi.Router) {
 		// Keyed by IP, so every process of one desktop MCP client shares the

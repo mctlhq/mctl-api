@@ -77,3 +77,42 @@ func TestIdentityLinkOptionsGating(t *testing.T) {
 		})
 	}
 }
+
+// The DevLoop decide page (mctl-api#964) is on only with every part it needs,
+// and off, silently, with no client configured.
+func TestDevLoopDecideOptionsGating(t *testing.T) {
+	const providers = `[{"name":"zitadel","issuer":"https://auth.example","audiences":["api"]}]`
+	full := func() config {
+		return config{
+			SelfURL: "https://api.example", OIDCProvidersRaw: providers, ZitadelLinkProvider: "zitadel",
+			DevLoopDecideClientID: "id", DevLoopDecideClientSecret: "secret",
+		}
+	}
+	var pr auth.PrincipalResolver = principals.NewResolver(&principals.Store{}, nil, false)
+	authz := &auth.PrincipalAuthz{Admins: map[string]bool{}}
+
+	o := devLoopDecideOptions(full(), pr, authz)
+	if o == nil || o.ProviderName != "zitadel" || o.Issuer != "https://auth.example" || o.ClientID != "id" ||
+		o.ClientSecret != "secret" || o.BaseURL != "https://api.example" || o.Principals != pr || o.Authz != authz {
+		t.Fatalf("full config: %+v, want the page on", o)
+	}
+	off := map[string]func(*config, *auth.PrincipalResolver, **auth.PrincipalAuthz){
+		"no client at all": func(c *config, _ *auth.PrincipalResolver, _ **auth.PrincipalAuthz) {
+			c.DevLoopDecideClientID, c.DevLoopDecideClientSecret = "", ""
+		},
+		"id without secret":   func(c *config, _ *auth.PrincipalResolver, _ **auth.PrincipalAuthz) { c.DevLoopDecideClientSecret = "" },
+		"no self URL":         func(c *config, _ *auth.PrincipalResolver, _ **auth.PrincipalAuthz) { c.SelfURL = "" },
+		"no principal store":  func(_ *config, p *auth.PrincipalResolver, _ **auth.PrincipalAuthz) { *p = nil },
+		"not principal mode":  func(_ *config, _ *auth.PrincipalResolver, a **auth.PrincipalAuthz) { *a = nil },
+		"federation disabled": func(c *config, _ *auth.PrincipalResolver, _ **auth.PrincipalAuthz) { c.FederationDisabled = true },
+		"no provider entry":   func(c *config, _ *auth.PrincipalResolver, _ **auth.PrincipalAuthz) { c.ZitadelLinkProvider = "other" },
+		"malformed providers": func(c *config, _ *auth.PrincipalResolver, _ **auth.PrincipalAuthz) { c.OIDCProvidersRaw = "{" },
+	}
+	for name, mutate := range off {
+		c, p, a := full(), pr, authz
+		mutate(&c, &p, &a)
+		if o := devLoopDecideOptions(c, p, a); o != nil {
+			t.Errorf("%s: %+v, want nil", name, o)
+		}
+	}
+}
