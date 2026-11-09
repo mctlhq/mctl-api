@@ -1,0 +1,6 @@
+glovo.glovo_audit_events: INSERT,SELECT
+glovo.glovo_connect_requests: DELETE,INSERT,SELECT,UPDATE
+glovo.glovo_connections: INSERT,SELECT,UPDATE
+glovo.glovo_installs: INSERT,SELECT,UPDATE
+glovo.glovo_pilot_allowlist: DELETE,INSERT,SELECT
+glovo.glovo_schema_version: SELECT
