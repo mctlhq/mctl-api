@@ -227,8 +227,14 @@ func TestApprove_LegacyRelayWithoutADigestIsRefusedAndCounted(t *testing.T) {
 		t.Errorf("%d legacy_relay entries for a refused relay, want 0", n)
 	}
 	denied := entriesFor(logger, "mctl-agents-approve")
-	if len(denied) != 1 || denied[0].Status != "denied" || denied[0].Parameters["code"] != "approval_content_unbound" {
-		t.Fatalf("want one denied entry with code approval_content_unbound, got %+v", denied)
+	if len(denied) != 1 || denied[0].Status != "denied" || denied[0].RefusalCode != "approval_content_unbound" {
+		t.Fatalf("want one denied entry with refusal code approval_content_unbound, got %+v", denied)
+	}
+	if v, ok := denied[0].Parameters["code"]; ok {
+		t.Errorf("refusal code leaked into Parameters[code] = %q", v)
+	}
+	if len(denied[0].Parameters) != 5 {
+		t.Errorf("parameters = %v, want exactly the five sanitized legacy-relay keys", denied[0].Parameters)
 	}
 	want := map[string]string{
 		"approver": "mashkovd", "calling_principal": auth.ServiceUserID,
@@ -411,8 +417,16 @@ func assertDigestRefusal(t *testing.T, w *httptest.ResponseRecorder, exec *fakeE
 		t.Fatalf("a workflow was submitted: %v", exec.submittedParams)
 	}
 	denied := entriesFor(logger, "mctl-agents-approve")
-	if len(denied) != 1 || denied[0].Status != "denied" || denied[0].Parameters["code"] != wantCode {
-		t.Fatalf("want one denied audit entry with code %s, got %+v", wantCode, denied)
+	if len(denied) != 1 || denied[0].Status != "denied" || denied[0].RefusalCode != wantCode {
+		t.Fatalf("want one denied audit entry with refusal code %s, got %+v", wantCode, denied)
+	}
+	if v, ok := denied[0].Parameters["code"]; ok {
+		t.Errorf("refusal code leaked into Parameters[code] = %q", v)
+	}
+	var resp map[string]interface{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if _, ok := resp["error"].(string); !ok || resp["code"] != wantCode {
+		t.Errorf("response contract changed: %s", w.Body.String())
 	}
 	if denied[0].UserID != adminUser.ID || denied[0].Parameters["slug"] != "issue-722" {
 		t.Errorf("audit entry does not name the caller and proposal: %+v", denied[0])

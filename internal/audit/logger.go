@@ -41,6 +41,13 @@ type Entry struct {
 	ClientIP  string `json:"clientIp,omitempty"`
 	UserAgent string `json:"userAgent,omitempty"`
 	RequestID string `json:"requestId,omitempty"`
+	// RefusalCode is the server's typed refusal code (validation_failed,
+	// approval_content_unbound, ...) on a row written for a refused request.
+	// It is metadata about the refusal, kept outside Parameters so it can never
+	// collide with, or overwrite, a submitted parameter of the same name.
+	// "" on every other row, including all rows written before the field
+	// existed, and then omitted from JSON.
+	RefusalCode string `json:"refusalCode,omitempty"`
 	// PrincipalID is UserID's canonical principal id (prn_…) and
 	// ViaPrincipalID the relaying surface's, when a surface relayed the
 	// request (mctl-api#373). Phase 1 records them in the database only; they

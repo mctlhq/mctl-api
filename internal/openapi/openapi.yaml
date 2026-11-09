@@ -227,6 +227,14 @@ components:
           type: string
         requestId:
           type: string
+        refusalCode:
+          type: string
+          description: >-
+            Typed code the server refused the request with (for example
+            validation_failed or approval_content_unbound). Present only on
+            rows written for a refusal that records one; absent on every other
+            row and on rows written before this field existed. It is separate
+            from parameters, which hold only the sanitized submitted inputs.
 
     ResourceUsage:
       type: object

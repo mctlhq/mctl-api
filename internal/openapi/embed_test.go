@@ -117,6 +117,35 @@ func TestNoRequestBodyComposesAClosedSchema(t *testing.T) {
 	}
 }
 
+// AuditEntry documents refusalCode as an optional string: rows that are not
+// refusals, and rows written before the field existed, omit it.
+func TestAuditEntryDocumentsOptionalRefusalCode(t *testing.T) {
+	var doc struct {
+		Components struct {
+			Schemas map[string]struct {
+				Required   []string       `yaml:"required"`
+				Properties map[string]any `yaml:"properties"`
+			} `yaml:"schemas"`
+		} `yaml:"components"`
+	}
+	if err := yaml.Unmarshal(Spec, &doc); err != nil {
+		t.Fatal(err)
+	}
+	s := doc.Components.Schemas["AuditEntry"]
+	p, ok := s.Properties["refusalCode"].(map[string]any)
+	if !ok {
+		t.Fatalf("AuditEntry lacks refusalCode: %+v", s.Properties)
+	}
+	if p["type"] != "string" {
+		t.Errorf("refusalCode type = %v, want string", p["type"])
+	}
+	for _, r := range s.Required {
+		if r == "refusalCode" {
+			t.Errorf("refusalCode must be optional, but is required")
+		}
+	}
+}
+
 // The wave execute schema is exactly the handler's body.
 func TestRoadmapWaveExecuteSchemaMatchesTheBody(t *testing.T) {
 	var doc struct {

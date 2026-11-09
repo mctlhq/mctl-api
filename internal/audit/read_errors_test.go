@@ -55,6 +55,32 @@ func TestScanAuditEntry_UnreadableParameters(t *testing.T) {
 	}
 }
 
+// The scan maps the refusal_code column (the 13th selected value) onto
+// Entry.RefusalCode, leaves Parameters["code"] alone, and treats a NULL or
+// absent value (a historical row) as empty. DB-free, so it runs without
+// TEST_DATABASE_URL.
+func TestScanAuditEntry_RefusalCode(t *testing.T) {
+	row := func(refusal *string) func(dest ...any) error {
+		base := fakeRow([]byte(`{"code":"user-value"}`))
+		return func(dest ...any) error {
+			if err := base(dest...); err != nil {
+				return err
+			}
+			*dest[12].(**string) = refusal
+			return nil
+		}
+	}
+	code := "validation_failed"
+	e, err := scanAuditEntry(row(&code))
+	if err != nil || e.RefusalCode != "validation_failed" || e.Parameters["code"] != "user-value" {
+		t.Fatalf("entry=%+v err=%v, want both values independent", e, err)
+	}
+	e, err = scanAuditEntry(row(nil))
+	if err != nil || e.RefusalCode != "" || e.Parameters["code"] != "user-value" {
+		t.Fatalf("NULL refusal_code: entry=%+v err=%v", e, err)
+	}
+}
+
 // mctl-api#586 T9: against Postgres, a corrupt params value comes back marked
 // from both read paths, and a failed queue read is an error, not an empty
 // page.
