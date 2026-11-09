@@ -15,6 +15,13 @@ is mapped to this principal ahead of the generic OIDC user, so whatever groups
 the token carries are dropped. The principal is provisioned as kind `service`;
 disabling that principal refuses it like any other.
 
+Its token carries the MCTL API project id in `aud`, not the client id the
+`zitadel` entry enforces: a machine user signing in with its own key gets no
+application's client id. The entry therefore lists that project id under
+`subject_audiences` for this machine user's subject only (docs/federation.md);
+adding it to `audiences` would accept the project audience from every ZITADEL
+client.
+
 Both variables must be set. A provider naming a built-in namespace (`service`,
 `github`, `github-actions`, `dev`, `dex`, `agent`, `principal`) disables the
 mapping, and a customer identity is never mapped.

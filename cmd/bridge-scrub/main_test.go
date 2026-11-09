@@ -24,9 +24,9 @@ import (
 
 func TestScrubCLIRequiresExplicitConsentAndScopedDatabase(t *testing.T) {
 	cases := []struct {
-		name string
-		args []string
-		want string
+		name	string
+		args	[]string
+		want	string
 	}{
 		{name: "no confirmation", args: nil, want: "--confirm=scrub-legacy-results"},
 		{name: "unrecognized confirmation", args: []string{"--confirm=do-something-else"}, want: "--confirm=scrub-legacy-results"},
@@ -49,13 +49,15 @@ func TestScrubCLIRequiresExplicitConsentAndScopedDatabase(t *testing.T) {
 	}
 }
 
+type scrubBatchResult struct {
+	n   int
+	rem int64
+	err error
+}
+
 type fakeScrubBatch struct {
-	rows []struct {
-		n   int
-		rem int64
-		err error
-	}
-	calls int
+	rows   []scrubBatchResult
+	calls  int
 	limits []int
 }
 
@@ -71,15 +73,7 @@ func (f *fakeScrubBatch) ScrubLegacyResultBatch(_ context.Context, limit int) (i
 
 func TestScrubBatchesProgressAndZeroRemaining(t *testing.T) {
 	f := &fakeScrubBatch{}
-	f.rows = append(f.rows, struct {
-		n int
-		rem int64
-		err error
-	}{2, 1, nil}, struct {
-		n int
-		rem int64
-		err error
-	}{1, 0, nil})
+	f.rows = append(f.rows, scrubBatchResult{n: 2, rem: 1}, scrubBatchResult{n: 1, rem: 0})
 	var out bytes.Buffer
 	if err := scrubBatches(context.Background(), f, &out, 2, 10); err != nil {
 		t.Fatal(err)
@@ -96,21 +90,17 @@ func TestScrubBatchesProgressAndZeroRemaining(t *testing.T) {
 
 func TestScrubBatchesNoProgressAndCapAreFailures(t *testing.T) {
 	cases := []struct {
-		name string
-		n    int
-		rem  int64
-		want string
+		name	string
+		n	int
+		rem	int64
+		want	string
 	}{
 		{name: "locked", n: 0, rem: 5, want: "no progress"},
 		{name: "capped", n: 1, rem: 4, want: "stopped at batch cap"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := &fakeScrubBatch{rows: []struct {
-				n int
-				rem int64
-				err error
-			}{{n: tc.n, rem: tc.rem}}}
+			f := &fakeScrubBatch{rows: []scrubBatchResult{{n: tc.n, rem: tc.rem}}}
 			var out bytes.Buffer
 			err := scrubBatches(context.Background(), f, &out, 1, 1)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -121,11 +111,7 @@ func TestScrubBatchesNoProgressAndCapAreFailures(t *testing.T) {
 }
 
 func TestScrubBatchesCountsCommittedRowsOnCountError(t *testing.T) {
-	f := &fakeScrubBatch{rows: []struct {
-		n int
-		rem int64
-		err error
-	}{{n: 2, rem: 0, err: errors.New("count failed after commit")}}}
+	f := &fakeScrubBatch{rows: []scrubBatchResult{{n: 2, rem: 0, err: errors.New("count failed after commit")}}}
 	var out bytes.Buffer
 	err := scrubBatches(context.Background(), f, &out, 2, 1)
 	if err == nil || !strings.Contains(err.Error(), "processed 2 rows") {

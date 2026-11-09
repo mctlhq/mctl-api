@@ -53,6 +53,9 @@ type OIDCProviderConfigEntry struct {
 	// CustomersOrgID names the ZITADEL organization of self-service
 	// customers (OIDCProviderSpec.CustomersOrgID).
 	CustomersOrgID string `json:"customers_org_id,omitempty"`
+	// SubjectAudiences grants extra accepted audiences to single subjects
+	// (OIDCProviderSpec.SubjectAudiences).
+	SubjectAudiences map[string][]string `json:"subject_audiences,omitempty"`
 }
 
 func (e OIDCProviderConfigEntry) spec() OIDCProviderSpec {
@@ -67,6 +70,7 @@ func (e OIDCProviderConfigEntry) spec() OIDCProviderSpec {
 		Kind:                e.Kind,
 		GrantGroups:         e.GrantGroups != nil && *e.GrantGroups,
 		CustomersOrgID:      e.CustomersOrgID,
+		SubjectAudiences:    e.SubjectAudiences,
 	}
 }
 
@@ -136,6 +140,9 @@ func ParseOIDCProviders(raw string) ([]OIDCProviderConfigEntry, error) {
 		if reservedProviderNames[e.Name] {
 			return nil, fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q uses reserved provider name %q", e.Name, e.Name)
 		}
+		if err := validSubjectAudiences(e); err != nil {
+			return nil, err
+		}
 		if surfaceid.IsSurface(e.Name) {
 			return nil, fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q collides with a registered surface name", e.Name)
 		}
@@ -150,6 +157,45 @@ func ParseOIDCProviders(raw string) ([]OIDCProviderConfigEntry, error) {
 		seenIssuers[iss] = e.Name
 	}
 	return out, nil
+}
+
+// validSubjectAudiences refuses a subject_audiences map that would widen
+// more than one named subject or never match: an empty map, an empty or
+// padded subject, an empty list, an empty or padded audience, or a subject
+// claim other than sub. Not on the "dex" slot, whose audience handling is
+// the legacy shim's.
+func validSubjectAudiences(e *OIDCProviderConfigEntry) error {
+	if e.SubjectAudiences == nil {
+		return nil
+	}
+	if e.Name == ProviderDex {
+		return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q may not set subject_audiences", e.Name)
+	}
+	if len(e.SubjectAudiences) == 0 {
+		return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q has an empty subject_audiences (omit it instead)", e.Name)
+	}
+	if c := strings.TrimSpace(e.SubjectClaim); c != "" && c != "sub" {
+		// The map is keyed by the subject claim. Only `sub` is the issuer's
+		// immutable identifier; a claim like email or preferred_username can
+		// be taken by another user, who would inherit the extra audience.
+		return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q may set subject_audiences only with the default subject claim sub", e.Name)
+	}
+	for subject, auds := range e.SubjectAudiences {
+		if strings.TrimSpace(subject) == "" || subject != strings.TrimSpace(subject) {
+			return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q has a subject_audiences key that is empty or padded", e.Name)
+		}
+		if len(auds) == 0 {
+			return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q grants subject %q no audience", e.Name, subject)
+		}
+		for _, a := range auds {
+			if strings.TrimSpace(a) == "" || a != strings.TrimSpace(a) {
+				// Matched exactly against the token's aud: a padded value
+				// would pass here and never match at runtime.
+				return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q grants subject %q an empty or padded audience", e.Name, subject)
+			}
+		}
+	}
+	return nil
 }
 
 // FederationProvidersConfig groups the raw inputs BuildFederationRegistry
