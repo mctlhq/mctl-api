@@ -65,3 +65,21 @@ func TestConfigureSupportResource(t *testing.T) {
 }
 
 func ptr(s string) *string { return &s }
+
+func TestConfigureGlovoResource(t *testing.T) {
+	o := &auth.OAuthServer{BaseURL: "https://api.example", SupportResource: auth.DefaultSupportResource}
+	look := func(v string, ok bool) func(string) (string, bool) {
+		return func(string) (string, bool) { return v, ok }
+	}
+	if err := configureGlovoResource(o, look("", false)); err != nil || o.GlovoResource != "" {
+		t.Fatalf("unset: %v %q", err, o.GlovoResource)
+	}
+	if err := configureGlovoResource(o, look(" "+auth.GlovoResourceIntended+" ", true)); err != nil || o.GlovoResource != auth.GlovoResourceIntended {
+		t.Fatalf("valid: %v %q", err, o.GlovoResource)
+	}
+	for _, bad := range []string{"http://glovo.mctl.ai", auth.DefaultSupportResource, "https://api.example/mcp"} {
+		if err := configureGlovoResource(o, look(bad, true)); err == nil {
+			t.Fatalf("%q accepted", bad)
+		}
+	}
+}

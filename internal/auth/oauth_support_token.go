@@ -84,6 +84,9 @@ func (s *OAuthServer) issueSupportToken(u *User, ttl time.Duration) (SupportToke
 	if _, ok := u.Surface(); ok || u.IsService() {
 		return refuse("service and surface principals are not given support tokens")
 	}
+	if u.IsGlovoAudience() {
+		return refuse("a glovo-audience token cannot mint a support token")
+	}
 	if u.IsSupportAudience() {
 		return refuse("a support-audience token cannot mint another")
 	}

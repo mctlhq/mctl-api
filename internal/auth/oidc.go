@@ -178,6 +178,10 @@ type User struct {
 	// routes mctl-support relays (mctl-api#849).
 	tokenAudience   []string
 	supportAudience bool
+	// glovoAudience records that it is exactly the Glovo resource.
+	glovoAudience bool
+	// glovoWorker is reserved and never set.
+	glovoWorker bool
 
 	// oauthClientID is the verified client_id claim of a local OAuth access
 	// token. Provenance only: never read for authorization.
@@ -1373,6 +1377,7 @@ func userFromVerified(v *Verified) *User {
 		}
 		u.tokenPID = v.Claims.TokenPID
 		u.tokenAudience, u.supportAudience = v.Claims.TokenAudience, v.Claims.SupportAudience
+		u.glovoAudience = v.Claims.GlovoAudience
 		u.oauthClientID = v.Claims.OAuthClientID
 		return u
 	case v.Identity.Provider == ProviderPrincipal:
@@ -1380,7 +1385,7 @@ func userFromVerified(v *Verified) *User {
 		// minted for this principal. No groups: principal mode decides them.
 		return &User{ID: v.Identity.Display, principalID: v.Identity.Subject, tokenPrincipal: true,
 			tokenAudience: v.Claims.TokenAudience, supportAudience: v.Claims.SupportAudience,
-			oauthClientID: v.Claims.OAuthClientID}
+			glovoAudience: v.Claims.GlovoAudience, oauthClientID: v.Claims.OAuthClientID}
 	case v.Identity.Provider == ProviderGitHubActions:
 		// No groups, whatever the token held: a CI job is not a tenant
 		// member. Marked ci even if a claim were somehow empty, so the
@@ -1522,3 +1527,16 @@ func (u *User) OAuthClientID() string {
 // for the support resource, which may reach only the routes mctl-support
 // relays.
 func (u *User) IsSupportAudience() bool { return u != nil && u.supportAudience }
+
+// IsGlovoAudience reports whether the caller holds an access token whose aud
+// is exactly the Glovo resource.
+func (u *User) IsGlovoAudience() bool { return u != nil && u.glovoAudience }
+
+// GlovoWorkerUserID is the reserved identity of the future Glovo worker. It
+// is not issued: nothing constructs a user for it, no env var or token maps
+// to it, so IsGlovoWorker is always false.
+const GlovoWorkerUserID = "service:mctl-glovo-worker"
+
+// IsGlovoWorker reports whether the caller is the Glovo worker. Reserved:
+// always false in this slice.
+func (u *User) IsGlovoWorker() bool { return u != nil && u.glovoWorker }

@@ -168,6 +168,11 @@ type OAuthServer struct {
 	// verification but confined to a few routes (see internal/api). Empty
 	// disables it: the resource answers invalid_target.
 	SupportResource string
+	// GlovoResource is the RFC 8707 resource of the Glovo MCP facade
+	// (GLOVO_MCP_RESOURCE). Empty disables it. While set, no token for it is
+	// minted (ErrGlovoNotReady); verification accepts it only as the single
+	// aud of a token and confines it to no route yet (see internal/api).
+	GlovoResource string
 	// RejectHS256 refuses every HS256 access token (OAUTH_JWT_ACCEPT_HS256
 	// false). The zero value accepts them.
 	RejectHS256 bool
@@ -1962,6 +1967,7 @@ func (s *OAuthServer) ValidateJWT(token string) (*User, error) {
 		u.tokenAudience = audience{s.accessAudience()}
 	}
 	u.supportAudience = payload.support
+	u.glovoAudience = payload.glovo
 	u.oauthClientID = boundedClientID(payload.ClientID)
 	return u, nil
 }
@@ -2088,6 +2094,9 @@ type jwtPayload struct {
 	// support is set by verification, never by the token: its aud names the
 	// support resource, so it may reach only the routes mctl-support relays.
 	support bool
+	// glovo is set by verification, never by the token: its aud is exactly
+	// the Glovo resource.
+	glovo bool
 }
 
 func (s *OAuthServer) accessAudience() string {
@@ -2233,6 +2242,13 @@ func (s *OAuthServer) verifyAccessToken(token string) (*jwtPayload, error) {
 	}
 	if len(payload.Audience) > 0 {
 		switch {
+		case s.GlovoResource != "" && payload.Audience.contains(s.GlovoResource):
+			// First, so a mixed [glovo, api] or [glovo, support] aud is
+			// refused outright instead of read as another audience.
+			if len(payload.Audience) != 1 {
+				return fail("aud_mismatch", errors.New("JWT audience for the glovo resource must be exact"))
+			}
+			payload.glovo = true
 		case s.SupportResource != "" && payload.Audience.contains(s.SupportResource):
 			// Wins over an API entry in the same aud: fail closed.
 			payload.support = true
