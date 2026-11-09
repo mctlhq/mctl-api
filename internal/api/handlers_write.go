@@ -768,11 +768,13 @@ const reasonWithheld = "[REDACTED: reason withheld, it echoes a secret value]"
 // secretFragments lists every piece of the operation's Secret parameters that
 // must not reach the validation-denied audit row: the whole value, each
 // non-empty line, and the value after the first "=" of each line (the usual
-// KEY=value form, any length). Nothing is exempted for being short.
+// KEY=value form, any length). Nothing is exempted for being short, but a
+// whitespace-only fragment is skipped: it carries no secret and would match
+// ordinary reasons and unrelated parameters.
 func secretFragments(op operations.Operation, input map[string]string) []string {
 	var out []string
 	add := func(s string) {
-		if s != "" {
+		if strings.TrimSpace(s) != "" {
 			out = append(out, s)
 		}
 	}

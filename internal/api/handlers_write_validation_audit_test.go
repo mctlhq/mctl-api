@@ -237,6 +237,57 @@ func TestExecuteOperation_ValidationAuditKeepsReasonWithoutSecretMatch(t *testin
 	}
 }
 
+// A whitespace-only secret is not a secret fragment: it must not withhold the
+// useful validation reason or blank unrelated audit parameters that merely
+// contain a space. The secret parameter itself stays masked by name.
+func TestExecuteOperation_ValidationAuditIgnoresWhitespaceOnlySecret(t *testing.T) {
+	cases := map[string]string{
+		"single space":         " ",
+		"tabs":                 "\t\t",
+		"multiline whitespace": " \n\t\r\n  ",
+	}
+	for name, secret := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newRoleFixture(t)
+			body := validDeployBody()
+			body["component_name"] = "Bad_Name!"
+			body["env_vars"] = "A=b" + secret + "c"
+			body["secret_env_vars"] = secret
+
+			w := postAs(t, f.router, "/api/v1/operations/deploy-service/execute", body, adminUser)
+			assertStatus(t, w, http.StatusBadRequest)
+			var resp map[string]interface{}
+			mustJSON(t, w.Body.Bytes(), &resp)
+			if resp["code"] != "validation_failed" {
+				t.Fatalf("code = %v; body: %s", resp["code"], w.Body.String())
+			}
+			if len(f.exec.submitted) != 0 {
+				t.Fatalf("executor invoked: %v", f.exec.submitted)
+			}
+			if total := len(f.audit.List(1000)); total != 1 {
+				t.Fatalf("audit rows = %d, want exactly 1", total)
+			}
+			denied := deniedEntries(f)
+			if len(denied) != 1 {
+				t.Fatalf("denied rows = %d, want 1", len(denied))
+			}
+			e := denied[0]
+			if strings.Contains(e.Message, "reason withheld") || !strings.Contains(e.Message, "component_name: must match pattern") {
+				t.Errorf("useful reason withheld by whitespace secret: %q", e.Message)
+			}
+			if e.Parameters["env_vars"] != "A=b"+secret+"c" {
+				t.Errorf("unrelated whitespace parameter blanked: %v", e.Parameters)
+			}
+			if e.Parameters["component_name"] != "Bad_Name!" {
+				t.Errorf("component_name altered: %v", e.Parameters)
+			}
+			if e.Parameters["secret_env_vars"] != "[REDACTED]" {
+				t.Errorf("secret parameter = %q, want [REDACTED]", e.Parameters["secret_env_vars"])
+			}
+		})
+	}
+}
+
 // Valid input and existing authorization refusals keep their own behavior:
 // no extra denied row from the validation path.
 func TestExecuteOperation_NoValidationDeniedRowOnSuccessOrOtherRefusals(t *testing.T) {
