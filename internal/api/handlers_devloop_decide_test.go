@@ -447,3 +447,38 @@ func TestDevLoopDecide_ADecidedGrantOffersNoDecision(t *testing.T) {
 		t.Fatalf("callback on a decided grant = %d %s, want 409 and no form", rec.Code, rec.Body.String())
 	}
 }
+
+// Every option the page needs is required: a decider built without one is
+// off and answers 503, never a page that could later act without it.
+func TestDevLoopDecide_EveryOptionIsRequired(t *testing.T) {
+	full := func() *DevLoopDecideOptions {
+		return &DevLoopDecideOptions{
+			ProviderName: "zitadel", Issuer: "https://issuer.example",
+			ClientID: testDecideClientID, ClientSecret: testDecideClientSecret,
+			BaseURL: "https://api.example", Principals: &fakeSignInPrincipals{},
+			Authz: &auth.PrincipalAuthz{Admins: map[string]bool{}, Members: noTenants{}},
+		}
+	}
+	if !full().enabled() {
+		t.Fatal("complete options must enable the page")
+	}
+	for name, drop := range map[string]func(*DevLoopDecideOptions){
+		"provider":   func(o *DevLoopDecideOptions) { o.ProviderName = "" },
+		"issuer":     func(o *DevLoopDecideOptions) { o.Issuer = "" },
+		"client id":  func(o *DevLoopDecideOptions) { o.ClientID = "" },
+		"secret":     func(o *DevLoopDecideOptions) { o.ClientSecret = "" },
+		"base url":   func(o *DevLoopDecideOptions) { o.BaseURL = "" },
+		"principals": func(o *DevLoopDecideOptions) { o.Principals = nil },
+		"authz":      func(o *DevLoopDecideOptions) { o.Authz = nil },
+	} {
+		o := full()
+		drop(o)
+		h := &Handlers{devLoopDecide: newDevLoopDecider(o)}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, decidePathPrefix+"dev-loop-x", nil)
+		h.handleDevLoopDecidePage(rec, req)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Errorf("without %s: page = %d, want 503", name, rec.Code)
+		}
+	}
+}

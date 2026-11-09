@@ -77,7 +77,7 @@ type DevLoopDecideOptions struct {
 
 func (o *DevLoopDecideOptions) enabled() bool {
 	return o != nil && o.ProviderName != "" && o.Issuer != "" && o.ClientID != "" &&
-		o.ClientSecret != "" && o.BaseURL != "" && o.Principals != nil
+		o.ClientSecret != "" && o.BaseURL != "" && o.Principals != nil && o.Authz != nil
 }
 
 const (
@@ -403,7 +403,7 @@ func (h *Handlers) handleDevLoopDecideCallback(w http.ResponseWriter, r *http.Re
 	}
 	d.mu.Unlock()
 	if !valid {
-		d.failed(w, http.StatusBadRequest, "This sign-in is unknown, expired, or was started in another browser.")
+		d.failed(w, http.StatusBadRequest, "This sign-in is unknown, expired, started in another browser, or replaced by a newer decision started in this browser.")
 		return
 	}
 	advanced := false
@@ -557,7 +557,7 @@ func (h *Handlers) handleDevLoopDecideConfirm(w http.ResponseWriter, r *http.Req
 	d.mu.Unlock()
 	setDecideCookie(w, "", -1)
 	if !valid {
-		d.failed(w, http.StatusBadRequest, "This decision is unknown, expired, already used, or was started in another browser.")
+		d.failed(w, http.StatusBadRequest, "This decision is unknown, expired, already used, started in another browser, or replaced by a newer decision started in this browser.")
 		return
 	}
 	// Resolved again: an admin removed, or a principal disabled, since the
@@ -592,7 +592,10 @@ func (h *Handlers) handleDevLoopDecideConfirm(w http.ResponseWriter, r *http.Req
 
 // callAs runs handler in-process as user, with one chi URL parameter and an
 // optional JSON body, and returns its status and body. It is the same
-// handler the API route serves, so every gate in it decides.
+// handler the API route serves, so every gate in it decides. Only the
+// context (with the user) and RemoteAddr carry over, never the original
+// headers: none of the handlers called here reads one, and one that starts
+// to must get it passed explicitly.
 func (h *Handlers) callAs(r *http.Request, user *auth.User, method, param, value string, body any, handler http.HandlerFunc) (int, []byte) {
 	var buf bytes.Buffer
 	if body != nil {
@@ -603,7 +606,10 @@ func (h *Handlers) callAs(r *http.Request, user *auth.User, method, param, value
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add(param, value)
 	ctx := context.WithValue(auth.WithUser(r.Context(), user), chi.RouteCtxKey, rctx)
-	req := httptest.NewRequest(method, "/", &buf).WithContext(ctx)
+	req, err := http.NewRequestWithContext(ctx, method, "/", &buf)
+	if err != nil {
+		return http.StatusInternalServerError, nil
+	}
 	req.RemoteAddr = r.RemoteAddr
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
