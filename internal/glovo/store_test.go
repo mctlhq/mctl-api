@@ -1234,7 +1234,7 @@ func TestGetConnectionForWorkerHasNoOtherCaller(t *testing.T) {
 		if strings.HasSuffix(slash, "internal/glovo/connection.go") || strings.HasSuffix(slash, "internal/api/handlers_glovo_worker.go") {
 			return nil
 		}
-		b, err := os.ReadFile(path)
+		b, err := os.ReadFile(path) //nolint:gosec // path comes from filepath.WalkDir over this repository
 		if err != nil {
 			return err
 		}

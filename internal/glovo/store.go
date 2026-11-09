@@ -49,7 +49,7 @@ func ApplySchema(ctx context.Context, migrationConnStr, runtimeRole string) erro
 	if err != nil {
 		return fmt.Errorf("glovo: connect as migration role: %w", err)
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("glovo: begin schema tx: %w", err)

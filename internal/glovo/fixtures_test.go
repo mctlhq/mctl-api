@@ -76,7 +76,7 @@ func urlFor(t *testing.T, base, user, pass, db string) string {
 	return u.String()
 }
 
-const testPassword = "pw-glovo-test"
+const testPassword = "pw-glovo-test" //nolint:gosec // throwaway password of roles in a per-test scratch database
 
 // newEnvNoSchema creates the database and roles but applies nothing.
 func newEnvNoSchema(t *testing.T) *env {
@@ -89,7 +89,7 @@ func newEnvNoSchema(t *testing.T) *env {
 	if err != nil {
 		t.Fatalf("admin connect: %v", err)
 	}
-	defer admin.Close(ctx)
+	defer func() { _ = admin.Close(ctx) }()
 	for _, stmt := range []string{
 		fmt.Sprintf(`CREATE ROLE %s LOGIN PASSWORD '%s' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS`, e.mig, testPassword),
 		fmt.Sprintf(`CREATE ROLE %s LOGIN PASSWORD '%s' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS`, e.rt, testPassword),
@@ -111,7 +111,7 @@ func newEnvNoSchema(t *testing.T) *env {
 		if err != nil {
 			return
 		}
-		defer c.Close(context.Background())
+		defer func() { _ = c.Close(context.Background()) }()
 		_, _ = c.Exec(context.Background(), fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, e.dbName))
 		_, _ = c.Exec(context.Background(), fmt.Sprintf(`DROP ROLE IF EXISTS %s`, e.rt))
 		_, _ = c.Exec(context.Background(), fmt.Sprintf(`DROP ROLE IF EXISTS %s`, e.mig))
