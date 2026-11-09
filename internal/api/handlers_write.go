@@ -387,15 +387,14 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		// point never carries a digest (refused above), so without a grant
 		// it cannot approve at all: only a grant holds a human's decision.
 		if code, msg := directApproveDigestRefusal(input[expectedContentDigestParam]); code != "" {
-			params := legacyRelayParams(user, opName, input)
-			params["code"] = code
 			h.logAudit(r, audit.Entry{
-				UserID:     user.ID,
-				Operation:  opName,
-				Status:     "denied",
-				RiskLevel:  string(op.RiskLevel),
-				Message:    code + ": " + msg,
-				Parameters: params,
+				UserID:      user.ID,
+				Operation:   opName,
+				Status:      "denied",
+				RiskLevel:   string(op.RiskLevel),
+				Message:     code + ": " + msg,
+				Parameters:  legacyRelayParams(user, opName, input),
+				RefusalCode: code,
 			})
 			// A relay attempt refused here is still an attempt: counted as
 			// refused, like legacy_approver_disabled, so the counter keeps
@@ -448,14 +447,14 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		// redactSecrets keys on the parameter name; a non-secret field that
 		// carries a secret's value would still record it, so match on value too.
 		redactSecretFragments(op, input, auditParams)
-		auditParams["code"] = codeValidationFailed
 		h.logAudit(r, audit.Entry{
-			UserID:     user.ID,
-			Operation:  opName,
-			Parameters: auditParams,
-			Status:     "denied",
-			RiskLevel:  string(op.RiskLevel),
-			Message:    codeValidationFailed + ": " + strings.Join(scrubSecretValues(op, input, errs), "; "),
+			UserID:      user.ID,
+			Operation:   opName,
+			Parameters:  auditParams,
+			RefusalCode: codeValidationFailed,
+			Status:      "denied",
+			RiskLevel:   string(op.RiskLevel),
+			Message:     codeValidationFailed + ": " + strings.Join(scrubSecretValues(op, input, errs), "; "),
 		})
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 			"error":            "validation failed: " + strings.Join(errs, "; "),

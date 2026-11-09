@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -110,8 +111,11 @@ func TestExecuteOperation_ValidationFailureIsAuditedAndTyped(t *testing.T) {
 			if !strings.Contains(e.Message, "validation_failed") || !strings.Contains(e.Message, tc.wantReason) {
 				t.Errorf("message = %q, want it to carry the code and reason %q", e.Message, tc.wantReason)
 			}
-			if e.Parameters["code"] != "validation_failed" {
-				t.Errorf("parameters code = %q, want validation_failed", e.Parameters["code"])
+			if e.RefusalCode != "validation_failed" {
+				t.Errorf("refusal code = %q, want validation_failed", e.RefusalCode)
+			}
+			if v, ok := e.Parameters["code"]; ok {
+				t.Errorf("server metadata leaked into the parameter namespace: Parameters[code] = %q", v)
 			}
 			if e.Parameters["secret_env_vars"] != "[REDACTED]" {
 				t.Errorf("secret parameter = %q, want [REDACTED]", e.Parameters["secret_env_vars"])
@@ -206,12 +210,15 @@ func TestExecuteOperation_ValidationAuditScrubsKeyValueSecretFragments(t *testin
 				t.Errorf("secret fragment %q leaked into audit Message: %q", tc.fragment, e.Message)
 			}
 			for k, v := range e.Parameters {
-				if k != "code" && strings.Contains(v, tc.fragment) {
+				if strings.Contains(v, tc.fragment) {
 					t.Errorf("secret fragment %q leaked into audit Parameters[%q] = %q", tc.fragment, k, v)
 				}
 			}
-			if e.Parameters["code"] != "validation_failed" || e.Parameters["secret_env_vars"] != "[REDACTED]" {
-				t.Errorf("parameters = %v", e.Parameters)
+			if e.RefusalCode != "validation_failed" || e.Parameters["secret_env_vars"] != "[REDACTED]" {
+				t.Errorf("refusal code = %q, parameters = %v", e.RefusalCode, e.Parameters)
+			}
+			if _, ok := e.Parameters["code"]; ok {
+				t.Errorf("Parameters[code] present: %v", e.Parameters)
 			}
 			if e.Parameters["team_name"] != "tenant" {
 				t.Errorf("unrelated parameter altered: %v", e.Parameters)
@@ -499,6 +506,79 @@ func TestExecuteOperation_ValidationAuditPaddedBase64EchoIsBlanked(t *testing.T)
 		if v := denied[0].Parameters["env_vars"]; v != "[REDACTED]" {
 			t.Errorf("secret %q: env_vars echo = %q, want [REDACTED]", secret, v)
 		}
+	}
+}
+
+// The server's refusal code is audit metadata in its own field, not a
+// Parameters key. No builtin operation declares a "code" input, so a request
+// "code" is undeclared and stripped before auditing; this asserts that (not a
+// declared-code collision, which is unreachable with the builtin registry) and
+// that the refusal code is recorded independently. The HTTP contract is exact.
+func TestExecuteOperation_ValidationRefusalCodeIsDedicatedAuditField(t *testing.T) {
+	f := newRoleFixture(t)
+	body := validDeployBody()
+	body["component_name"] = "Bad_Name!"
+	body["code"] = "user-supplied"
+
+	w := postAs(t, f.router, "/api/v1/operations/deploy-service/execute", body, adminUser)
+	assertStatus(t, w, http.StatusBadRequest)
+	var resp map[string]interface{}
+	mustJSON(t, w.Body.Bytes(), &resp)
+	if len(resp) != 3 || resp["code"] != "validation_failed" {
+		t.Fatalf("response contract changed: %s", w.Body.String())
+	}
+	if s, _ := resp["error"].(string); !strings.HasPrefix(s, "validation failed: ") || !strings.Contains(s, "component_name: must match pattern") {
+		t.Errorf("error = %q", s)
+	}
+	if ve, _ := resp["validationErrors"].([]interface{}); len(ve) == 0 {
+		t.Errorf("validationErrors missing: %s", w.Body.String())
+	}
+	if len(f.exec.submitted) != 0 {
+		t.Fatalf("workflow submitted: %v", f.exec.submitted)
+	}
+	denied := deniedEntries(f)
+	if len(denied) != 1 {
+		t.Fatalf("denied rows = %d, want 1", len(denied))
+	}
+	e := denied[0]
+	if e.RefusalCode != "validation_failed" {
+		t.Errorf("RefusalCode = %q", e.RefusalCode)
+	}
+	if v, ok := e.Parameters["code"]; ok {
+		t.Errorf("Parameters[code] = %q: undeclared input must be stripped and the refusal code must not live in Parameters", v)
+	}
+	if e.Parameters["component_name"] != "Bad_Name!" || e.Parameters["team_name"] != "tests" {
+		t.Errorf("sanitized parameters not preserved: %v", e.Parameters)
+	}
+	raw, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row struct {
+		RefusalCode string            `json:"refusalCode"`
+		Parameters  map[string]string `json:"parameters"`
+	}
+	mustJSON(t, raw, &row)
+	if row.RefusalCode != "validation_failed" {
+		t.Errorf("serialized refusalCode = %q: %s", row.RefusalCode, raw)
+	}
+	if _, ok := row.Parameters["code"]; ok {
+		t.Errorf("serialized parameters carry code: %s", raw)
+	}
+}
+
+// Rows that are not refusals carry no refusal code.
+func TestExecuteOperation_SuccessRowHasNoRefusalCode(t *testing.T) {
+	f := newRoleFixture(t)
+	w := postAs(t, f.router, "/api/v1/operations/deploy-service/execute", validDeployBody(), adminUser)
+	assertStatus(t, w, http.StatusAccepted)
+	entries := f.audit.List(10)
+	if len(entries) != 1 || entries[0].RefusalCode != "" {
+		t.Fatalf("entries = %+v", entries)
+	}
+	raw, _ := json.Marshal(entries[0])
+	if strings.Contains(string(raw), "refusalCode") {
+		t.Errorf("refusalCode not omitted when empty: %s", raw)
 	}
 }
 
