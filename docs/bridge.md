@@ -151,7 +151,7 @@ the tenant and owner of a command come from its stored row.
 
 `BridgeProviderConfig.PinClaims` is the exact `iss`/`aud`/`sub`/`exp`/`nbf` pin
 for a federated service OIDC token. The verifier that feeds it is **not wired**:
-choosing the issuer is gated on mctl-api#2506 and must not silently pick
+choosing the issuer is gated on mctl-gitops#2506 and must not silently pick
 ZITADEL or Vault. Until then the only way to authenticate is the static
 `MCTL_BRIDGE_PROVIDER_TOKENS` (`ref=token` lines), **for tests only**.
 
@@ -173,7 +173,7 @@ at least once; the workflow dedupes on `command_id`. A Temporal NotFound ends as
 ## Deployment gates
 
 Not to be enabled before: mctl-gitops#2456 and #2469 (Temporal frontend auth),
-the #2506 issuer decision, mctl-gitops#2457 (P1 deployment and P2 OAuth
+the mctl-gitops#2506 issuer decision, mctl-gitops#2457 (P1 deployment and P2 OAuth
 approvals), and independent security approval of any credential issuance.
 
 ## Rollback
