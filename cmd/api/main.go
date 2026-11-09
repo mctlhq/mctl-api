@@ -1026,6 +1026,49 @@ func main() {
 			} else {
 				bridgeStore = bs
 				defer bs.Close()
+				expiryInterval := time.Duration(0)
+				if v := os.Getenv("MCTL_BRIDGE_EXPIRY_SWEEP_INTERVAL"); v != "" {
+					if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+						expiryInterval = d
+					} else {
+						slog.Warn("ignoring invalid MCTL_BRIDGE_EXPIRY_SWEEP_INTERVAL; using default")
+					}
+				}
+				expirer := &bridge.Expirer{Store: bs, Interval: expiryInterval}
+				// Expose scrape-time expiry progress to the already mounted /metrics
+				// endpoint. No command details, token values or tenant IDs are labels.
+				prometheus.MustRegister(
+					prometheus.NewCounterFunc(prometheus.CounterOpts{
+						Name: "mctl_api_bridge_expiry_processed_total",
+						Help: "Number of bridge commands expired by the background sweep since process start.",
+					}, func() float64 { return float64(expirer.Stats().Processed) }),
+					prometheus.NewCounterFunc(prometheus.CounterOpts{
+						Name: "mctl_api_bridge_expiry_sweep_errors_total",
+						Help: "Number of failed bridge expiry sweep operations since process start, excluding shutdown cancellation.",
+					}, func() float64 { return float64(expirer.Stats().Errors) }),
+					prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+						Name: "mctl_api_bridge_expiry_consecutive_errors",
+						Help: "Consecutive bridge expiry sweep errors since last fully successful sweep.",
+					}, func() float64 { return float64(expirer.Stats().ConsecutiveErrors) }),
+					prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+						Name: "mctl_api_bridge_expiry_backlog",
+						Help: "Open bridge commands past expires_at, measured by the last successful backlog query.",
+					}, func() float64 { return float64(expirer.Stats().Backlog) }),
+					prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+						Name: "mctl_api_bridge_expiry_oldest_overdue_seconds",
+						Help: "Age in seconds of the oldest overdue bridge command at the last successful backlog query.",
+					}, func() float64 { return float64(expirer.Stats().OldestOverdueSecs) }),
+					prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+						Name: "mctl_api_bridge_expiry_last_success_timestamp_seconds",
+						Help: "Unix timestamp of last fully successful bridge expiry sweep, zero before the first success.",
+					}, func() float64 {
+						if ts := expirer.Stats().LastSuccess; !ts.IsZero() {
+							return float64(ts.Unix())
+						}
+						return 0
+					}),
+				)
+				go expirer.Run(rootCtx)
 				if temporalReconnecting != nil {
 					d := &bridge.Dispatcher{Outbox: bs, Signaler: temporalReconnecting}
 					go d.Run(rootCtx)

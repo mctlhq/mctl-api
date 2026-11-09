@@ -168,3 +168,30 @@ func (r *Result) Digest() string {
 	sum := sha256.Sum256(b)
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
+
+// storedResult is the persisted form of a Result: identical field order, no
+// lease_token. The bearer token must never sit in bridge_commands.result.
+type storedResult struct {
+	SchemaVersion  string `json:"schema_version"`
+	CommandID      string `json:"command_id"`
+	ExecutionID    string `json:"execution_id"`
+	Attempt        int    `json:"attempt"`
+	WorkerIdentity string `json:"worker_identity"`
+	Outcome        string `json:"outcome"`
+	ProviderEffect string `json:"provider_effect"`
+	ResultRef      string `json:"result_ref,omitempty"`
+	ErrorCode      string `json:"error_code,omitempty"`
+	ErrorDetail    string `json:"error_detail,omitempty"`
+	CompletedAt    string `json:"completed_at"`
+}
+
+// redacted returns the JSON stored in bridge_commands.result. Digest() is
+// unaffected: it still covers the full projection.
+func (r *Result) redacted() ([]byte, error) {
+	return json.Marshal(storedResult{
+		SchemaVersion: r.SchemaVersion, CommandID: r.CommandID, ExecutionID: r.ExecutionID,
+		Attempt: r.Attempt, WorkerIdentity: r.WorkerIdentity, Outcome: r.Outcome,
+		ProviderEffect: r.ProviderEffect, ResultRef: r.ResultRef, ErrorCode: r.ErrorCode,
+		ErrorDetail: r.ErrorDetail, CompletedAt: r.CompletedAt,
+	})
+}
