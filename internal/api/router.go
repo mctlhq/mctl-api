@@ -270,6 +270,9 @@ type Options struct {
 	// route uses (mctl-api#989). Nil means no owner can decide: the route
 	// answers the uniform 403 it always gave a non-admin.
 	GlovoApprovals GlovoApprovalDecisions
+	// GlovoBasket is the dark, host-routed Glovo basket MCP (mctl-api#1006);
+	// nil, or any field unset, mounts nothing.
+	GlovoBasket *GlovoBasketRoutes
 	// IssueWorkItemTenant is the tenant whose work item a submitted
 	// issue-investigator run is recorded on when the caller names none. ""
 	// means DefaultIssueWorkItemTenant.
@@ -1046,6 +1049,7 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/work-items/{id}/execution-requests/{request_id}", h.GetExecutionRequest)
 			r.Get("/action-approvals", h.ListActionApprovals)
 			r.Get("/action-approvals/{id}", h.GetActionApproval)
+			r.Get("/action-approvals/{id}/glovo-basket", h.GetGlovoBasketApproval)
 
 			// Execution-evidence reads (mctl-api#409): side-effect free,
 			// admin-only except the work-item-scoped one, which reuses
@@ -1267,6 +1271,9 @@ func NewRouter(opts Options) http.Handler {
 		}
 	})
 
+	if opts.GlovoBasket.complete() {
+		return h.withGlovoBasketHost(r)
+	}
 	return r
 }
 
