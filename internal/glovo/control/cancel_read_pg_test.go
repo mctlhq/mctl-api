@@ -20,10 +20,12 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/mctlhq/mctl-api/internal/bridge"
 	"github.com/mctlhq/mctl-api/internal/glovo"
 	"github.com/mctlhq/mctl-api/internal/glovo/orders"
+	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
 func (e *env) cancel(f fixture) (*Result, error) {
@@ -452,5 +454,28 @@ func TestReady(t *testing.T) {
 	}
 	if err := d.Ready(ctx); err != nil || calls != 2 {
 		t.Fatalf("calls %d err %v: a positive answer must be cached and a negative one must not", calls, err)
+	}
+}
+
+// A typed nil inside an interface is not == nil; Ready must still see a missing
+// collaborator, for every one of them.
+func TestReadyRefusesTypedNilCollaborators(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	for name, mod := range map[string]func(d *Dispatcher){
+		"db":       func(d *Dispatcher) { d.DB = (*pgxpool.Pool)(nil) },
+		"bridge":   func(d *Dispatcher) { d.Bridge = (*bridge.Store)(nil) },
+		"orders":   func(d *Dispatcher) { d.Orders = (*orders.Store)(nil) },
+		"receipts": func(d *Dispatcher) { d.Receipts = (*workitems.Store)(nil) },
+		"conns":    func(d *Dispatcher) { d.Conns = (*glovo.Store)(nil) },
+		"members":  func(d *Dispatcher) { d.Members = (*fakeMembers)(nil) },
+		"joins":    func(d *Dispatcher) { d.Joins = (*orders.Store)(nil) },
+		"execs":    func(d *Dispatcher) { d.Execs = (*workitems.Store)(nil) },
+	} {
+		d := e.fresh()
+		mod(d)
+		if err := d.Ready(ctx); err == nil || Refusal(err).Code != glovo.CodeNotReady {
+			t.Errorf("a typed-nil %s passed Ready: %v", name, err)
+		}
 	}
 }

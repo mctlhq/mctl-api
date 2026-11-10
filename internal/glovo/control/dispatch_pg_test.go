@@ -332,18 +332,30 @@ func TestDispatchFreshnessWindow(t *testing.T) {
 	// command row exists; just outside it dispatches.
 	t.Run("boundary at the reserve margin", func(t *testing.T) {
 		e := newEnv(t)
+		spy := &enqueueSpy{Bridge: e.d.Bridge}
+		e.d.Bridge = spy
 		f := e.finalized(fixOpt{freshFor: 119 * time.Second})
 		_, err := e.dispatch(f)
 		wantCode(t, err, glovo.CodeApprovalExpired)
+		// The refusal is dispatch's own: it must come before Enqueue, not from
+		// ReserveGlovoApprovalTx refusing the same window further down.
+		if spy.calls != 0 {
+			t.Fatalf("Enqueue ran %d times for a receipt inside the reserve margin", spy.calls)
+		}
 		e.untouched(f, "approved")
 		if n := e.count(`SELECT count(*) FROM bridge_commands WHERE approval_ref = $1`, f.aar); n != 0 {
 			t.Fatalf("%d command rows exist after the refusal", n)
 		}
 		e2 := newEnv(t)
+		spy2 := &enqueueSpy{Bridge: e2.d.Bridge}
+		e2.d.Bridge = spy2
 		f2 := e2.finalized(fixOpt{freshFor: 121 * time.Second})
 		res, err := e2.dispatch(f2)
 		if err != nil {
 			t.Fatalf("121s: %v", err)
+		}
+		if spy2.calls != 1 {
+			t.Fatalf("Enqueue ran %d times at 121s, want 1", spy2.calls)
 		}
 		var ttl int
 		if err := e2.mp.QueryRow(context.Background(), `SELECT ttl_seconds FROM bridge_commands WHERE command_id=$1`, res.CommandID).Scan(&ttl); err != nil {
@@ -541,4 +553,15 @@ func TestDispatchOrderLockTimeoutIsTenantBusy(t *testing.T) {
 	}
 	_ = hold.Rollback(ctx)
 	e.untouched(f, "approved")
+}
+
+// enqueueSpy counts Enqueue calls on the bridge collaborator.
+type enqueueSpy struct {
+	Bridge
+	calls int
+}
+
+func (s *enqueueSpy) Enqueue(ctx context.Context, tx pgx.Tx, in bridge.EnqueueInput) (string, bool, error) {
+	s.calls++
+	return s.Bridge.Enqueue(ctx, tx, in)
 }
