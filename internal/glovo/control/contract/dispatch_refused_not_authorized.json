@@ -1,0 +1,16 @@
+{
+  "name": "dispatch refused not_authorized",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/internal/glovo/orders/ordr_ABCDEFGHIJKLMNOP0123/dispatch",
+    "body": {
+      "approval_ref": "aar_ABCDEFGHIJKLMNOP0123",
+      "fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+    }
+  },
+  "status": 403,
+  "response": {
+    "error": "not_authorized",
+    "error_description": "not authorized for the glovo facade"
+  }
+}

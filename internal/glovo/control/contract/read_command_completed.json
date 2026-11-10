@@ -1,0 +1,18 @@
+{
+  "name": "read command completed",
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/internal/glovo/commands/cmd_ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+  },
+  "status": 200,
+  "response": {
+    "command_id": "cmd_ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "effect_state": "succeeded",
+    "error_code": "none",
+    "order_ref": "ordr_ABCDEFGHIJKLMNOP0123",
+    "outcome": "succeeded",
+    "provider_effect": "applied",
+    "result_digest": "sha256:aa",
+    "status": "completed"
+  }
+}
