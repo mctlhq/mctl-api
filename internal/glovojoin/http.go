@@ -101,12 +101,12 @@ func (rt *Routes) init() {
 func (rt *Routes) Handler() http.Handler {
 	rt.init()
 	r := chi.NewRouter()
-	for _, route := range rt.doc.Routes {
+	for i := range rt.doc.Routes {
+		route := rt.doc.Routes[i]
 		h := rt.handlerFor(route.ID)
 		if h == nil {
 			panic("glovojoin: no handler for route " + route.ID)
 		}
-		route := route
 		r.Method(route.Method, route.Path, rt.pipeline(route, h))
 	}
 	return r

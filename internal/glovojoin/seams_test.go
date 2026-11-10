@@ -50,7 +50,7 @@ func TestJoinPackageDoesNotUseTheReadWireOrReadIDs(t *testing.T) {
 		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
 			return err
 		}
-		b, rerr := os.ReadFile(p)
+		b, rerr := os.ReadFile(p) //nolint:gosec // walks this package
 		if rerr != nil {
 			return rerr
 		}
@@ -74,7 +74,7 @@ func TestWireVersionsAreEnabledOnlyByTheRuntimeStore(t *testing.T) {
 	root := filepath.Join("..", "..")
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			return nil //nolint:nilerr // an unreadable entry is skipped, the caller count is asserted
 		}
 		if d.IsDir() && (d.Name() == ".git" || d.Name() == "node_modules") {
 			return filepath.SkipDir
@@ -82,7 +82,7 @@ func TestWireVersionsAreEnabledOnlyByTheRuntimeStore(t *testing.T) {
 		if d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
 			return nil
 		}
-		b, _ := os.ReadFile(p)
+		b, _ := os.ReadFile(p) //nolint:gosec // walks this repository
 		for _, line := range strings.Split(string(b), "\n") {
 			t := strings.TrimSpace(line)
 			if strings.Contains(t, ".EnableWireVersions(") && !strings.HasPrefix(t, "//") {

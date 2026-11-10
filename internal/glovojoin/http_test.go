@@ -43,7 +43,13 @@ type httpFx struct {
 	ref string
 }
 
-func (f *httpFx) do(method, path string, hdr map[string]string, body string) (*http.Response, string) {
+// wireResp is the part of a response the tests read; the body is closed by do.
+type wireResp struct {
+	StatusCode int
+	Header     http.Header
+}
+
+func (f *httpFx) do(method, path string, hdr map[string]string, body string) (wireResp, string) {
 	f.t.Helper()
 	req, _ := http.NewRequest(method, f.srv.URL+path, strings.NewReader(body))
 	for k, v := range hdr {
@@ -56,7 +62,7 @@ func (f *httpFx) do(method, path string, hdr map[string]string, body string) (*h
 	defer func() { _ = resp.Body.Close() }()
 	var buf bytes.Buffer
 	_, _ = buf.ReadFrom(resp.Body)
-	return resp, buf.String()
+	return wireResp{StatusCode: resp.StatusCode, Header: resp.Header}, buf.String()
 }
 
 func (f *httpFx) auth(extra map[string]string) map[string]string {
@@ -108,12 +114,12 @@ func golden(t *testing.T, route, name string, status int, body string) {
 	got := fmt.Sprintf("%d\n%s\n", status, norm)
 	path := filepath.Join("testdata", "v1alpha1", route, name+".json")
 	if os.Getenv("UPDATE_GOLDEN") != "" {
-		_ = os.MkdirAll(filepath.Dir(path), 0o755)
-		if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
+		_ = os.MkdirAll(filepath.Dir(path), 0o750) //nolint:gosec // test data directory
+		if err := os.WriteFile(path, []byte(got), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	want, err := os.ReadFile(path)
+	want, err := os.ReadFile(path) //nolint:gosec // fixed testdata path
 	if err != nil {
 		t.Fatalf("%s: %v (UPDATE_GOLDEN=1 writes it)", path, err)
 	}
@@ -216,7 +222,7 @@ func TestHTTPRefusalsAndErrorBodies(t *testing.T) {
 		golden(t, "refusals", strings.ReplaceAll(c.name, " ", "_"), resp.StatusCode, b)
 		if c.wire != "" {
 			var e map[string]string
-			if err := json.Unmarshal([]byte(b), &e); err != nil || e["error"] != c.wire && !(c.name == "status unwired") || e["error_description"] == "" {
+			if err := json.Unmarshal([]byte(b), &e); err != nil || (e["error"] != c.wire && c.name != "status unwired") || e["error_description"] == "" {
 				t.Errorf("%s: body %s", c.name, b)
 			}
 		}
