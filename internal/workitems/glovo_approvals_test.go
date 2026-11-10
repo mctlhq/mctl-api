@@ -106,7 +106,7 @@ func TestGlovoExecutionTx(t *testing.T) {
 	}
 }
 
-func (g *glovoEnv) wiPool() *pgxpool.Pool { return g.splitEnv.pool(g.wiURL) }
+func (g *glovoEnv) wiPool() *pgxpool.Pool { return g.pool(g.wiURL) }
 
 // Task 3, T8, T9: the whole happy path, replay and final states.
 func TestGlovoApprovalLifecycle(t *testing.T) {

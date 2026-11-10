@@ -96,20 +96,19 @@ func (f *fakeMembers) IsMember(string, string) (bool, error) { return f.member, 
 // env is a scratch database with the three roles of the owner-confirmed model,
 // the generic and Glovo schemas, and the bridge schema.
 type env struct {
-	t                *testing.T
-	base, db         string
-	mig, wi, rt      string
-	migURL, rtURL    string
-	mp, rtp          *pgxpool.Pool
-	store            *workitems.Store
-	log              []string
-	ord              *fakeOrders
-	conns            *fakeConns
-	members          *fakeMembers
-	fence            *Fence
-	caller           bridge.Caller
-	fingerprint      string
-	payload, command string
+	t             *testing.T
+	base, db      string
+	mig, wi, rt   string
+	migURL, rtURL string
+	mp, rtp       *pgxpool.Pool
+	store         *workitems.Store
+	log           []string
+	ord           *fakeOrders
+	conns         *fakeConns
+	members       *fakeMembers
+	fence         *Fence
+	caller        bridge.Caller
+	fingerprint   string
 }
 
 func newEnv(t *testing.T) *env {

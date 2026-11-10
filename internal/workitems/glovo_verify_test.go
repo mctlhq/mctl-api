@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgconn"
-
 	"github.com/mctlhq/mctl-api/internal/glovo"
 )
 
@@ -69,7 +67,7 @@ func TestVerifyGlovoApprovalSchema(t *testing.T) {
 			e := newGlovoEnv(t)
 			mp := e.pool(e.migURL)
 			for _, q := range c.mutate(e) {
-				var exec func(context.Context, string, ...any) (pgconn.CommandTag, error) = mp.Exec
+				exec := mp.Exec
 				if strings.HasPrefix(q, "GRANT "+e.mig) { // role membership is a cluster-level grant
 					root := e.conn(e.base)
 					exec = root.Exec
