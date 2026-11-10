@@ -16,6 +16,7 @@ package glovojoin
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -31,6 +32,8 @@ import (
 
 	"github.com/mctlhq/mctl-api/internal/glovo"
 	"github.com/mctlhq/mctl-api/internal/glovo/connect"
+	"github.com/mctlhq/mctl-api/internal/glovo/dbq"
+	"github.com/mctlhq/mctl-api/internal/glovo/orders"
 	"github.com/mctlhq/mctl-api/internal/glovo/scope"
 )
 
@@ -341,6 +344,39 @@ func TestHTTPLimiterKeys(t *testing.T) {
 			t.Fatal("another principal's first write was limited (a shared write bucket)")
 		}
 	})
+}
+
+// countingOrders counts the reads that reach the order store.
+type countingOrders struct {
+	StatusOrders
+	n int
+}
+
+func (c *countingOrders) Get(ctx context.Context, q dbq.Querier, sc orders.Scope, ref string) (*orders.Order, error) {
+	c.n++
+	return c.StatusOrders.Get(ctx, q, sc, ref)
+}
+
+// A malformed order id is refused before any store read.
+func TestHTTPBadOrderRefNeverReachesTheStore(t *testing.T) {
+	f := newHTTPFx(t)
+	_, body := f.do("POST", jb+"/resolve", f.auth(nil), "{}")
+	var raw map[string]string
+	_ = json.Unmarshal([]byte(body), &raw)
+	f.ref = raw["scope_ref"]
+	cnt := &countingOrders{StatusOrders: f.rt.Status.Orders}
+	f.rt.Status.Orders = cnt
+	for _, bad := range []string{"nope", "ordr_", "ordr_short", "ordr_AAAAAAAAAAAAAAAAAAAA%20x", "ORDR_AAAAAAAAAAAAAAAAAAAA", "ordr_" + strings.Repeat("A", 41)} {
+		if resp, b := f.do("GET", jb+"/orders/"+bad, f.auth(nil), ""); resp.StatusCode != 404 {
+			t.Errorf("%q = %d %s", bad, resp.StatusCode, b)
+		}
+	}
+	if cnt.n != 0 {
+		t.Fatalf("%d malformed ids reached the order store", cnt.n)
+	}
+	if resp, _ := f.do("GET", jb+"/orders/ordr_AAAAAAAAAAAAAAAAAAAA", f.auth(nil), ""); resp.StatusCode != 404 || cnt.n != 1 {
+		t.Fatalf("a well-formed id: status %d, store reads %d, want 404 and 1", resp.StatusCode, cnt.n)
+	}
 }
 
 // Without a status reader the order route is not_ready, never a guess.

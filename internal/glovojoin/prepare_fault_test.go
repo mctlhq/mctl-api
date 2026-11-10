@@ -106,7 +106,7 @@ func (t faultTx) Begin(ctx context.Context) (pgx.Tx, error) {
 
 func (t faultTx) Commit(ctx context.Context) error {
 	if t.st.commitAt {
-		_ = t.Tx.Rollback(ctx)
+		_ = t.Rollback(ctx)
 		return errInjected
 	}
 	return t.Tx.Commit(ctx)
