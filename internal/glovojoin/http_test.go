@@ -87,6 +87,7 @@ func newHTTPFx(t *testing.T) *httpFx {
 		Refs:     &ScopeRefs{DB: s.rp},
 		Reader:   s.reader(b),
 		Prepare:  s.prepare,
+		Status:   &StatusReader{DB: s.rp, Orders: s.orders, Approvals: s.work},
 		Connect:  &connect.Service{Store: s.conns, HandoffBaseURL: "https://handoff.example"},
 	}
 	mux := http.NewServeMux()
@@ -184,6 +185,23 @@ func TestHTTPHappyPathResolveToPrepareAndReplay(t *testing.T) {
 	if w := f.writes(); w[5] != 0 {
 		t.Fatalf("bridge_commands = %d", w[5])
 	}
+
+	// H1: the order body is exactly {state, outcome}. Nothing that could carry
+	// a handoff, a connection, a basket or a link is ever added to it.
+	var pr map[string]string
+	_ = json.Unmarshal([]byte(first), &pr)
+	resp3, ob := f.do("GET", jb+"/orders/"+pr["order_id"], f.auth(nil), "")
+	if resp3.StatusCode != 200 {
+		t.Fatalf("order %d %s", resp3.StatusCode, ob)
+	}
+	var keys map[string]any
+	if err := json.Unmarshal([]byte(ob), &keys); err != nil || len(keys) != 2 || keys["state"] != "awaiting_approval" || keys["outcome"] != OutcomeUnknown {
+		t.Fatalf("order body = %s", ob)
+	}
+	if strings.Contains(ob, "handoff") || strings.Contains(ob, "http") {
+		t.Fatalf("order body carries a link: %s", ob)
+	}
+	golden(t, "order", "ok", resp3.StatusCode, ob)
 }
 
 func TestHTTPRefusalsAndErrorBodies(t *testing.T) {
