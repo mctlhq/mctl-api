@@ -167,6 +167,10 @@ func (c *ReadClient) Read(ctx context.Context, r ReadRequest) (*ReadResult, erro
 	defer cancel()
 	ref, err := s.awaitRead(wctx, commandID)
 	if err != nil {
+		if ctx.Err() != nil {
+			c.cancelRead(commandID)
+			return nil, ctx.Err()
+		}
 		if wctx.Err() != nil {
 			c.cancelRead(commandID)
 			return nil, fmt.Errorf("%w: read deadline passed", ErrReadUnavailable)

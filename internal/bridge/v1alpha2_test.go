@@ -466,7 +466,7 @@ func TestReadResultPipeline(t *testing.T) {
 
 func mustRead(t *testing.T, p string) []byte {
 	t.Helper()
-	b, err := os.ReadFile(p)
+	b, err := os.ReadFile(p) //nolint:gosec // test fixture path
 	if err != nil {
 		t.Fatal(err)
 	}

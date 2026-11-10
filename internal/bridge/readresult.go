@@ -82,15 +82,18 @@ type parsedResult struct {
 // parsed; a v1alpha1 body takes today's path untouched.
 func parseAnyResult(body []byte) (*parsedResult, error) {
 	marked := bytes.Contains(body, []byte(WireV1alpha2))
+	var markedErr error
 	if marked {
-		if err := rawCheck(body); err != nil {
-			return nil, err
-		}
+		markedErr = rawCheck(body)
 	}
 	var peek struct {
 		SchemaVersion string `json:"schema_version"`
 	}
-	if err := json.Unmarshal(body, &peek); err == nil && peek.SchemaVersion == WireV1alpha2 {
+	peekErr := json.Unmarshal(body, &peek)
+	if markedErr != nil && (peekErr != nil || peek.SchemaVersion == WireV1alpha2) {
+		return nil, markedErr
+	}
+	if peekErr == nil && peek.SchemaVersion == WireV1alpha2 {
 		if !marked {
 			if err := rawCheck(body); err != nil {
 				return nil, err

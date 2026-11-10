@@ -363,3 +363,25 @@ func TestEnqueueReadRefusedWhileWireVersionsDisabled(t *testing.T) {
 		t.Fatalf("EnqueueRead with wire versions disabled = %v, want ErrReadUnavailable", err)
 	}
 }
+
+func TestClaimGatesV1alpha2RowsWhileWireVersionsDisabled(t *testing.T) {
+	h := newReadHarness(t, KindReadHistory)
+	ctx := context.Background()
+	v1 := enqueue(t, h.s, h.tenant, KindPlaceOrderFake)
+	v2 := enqueue(t, h.s, h.tenant, KindPlaceOrderFake)
+	if _, err := h.s.Pool().Exec(ctx, `UPDATE bridge_commands SET wire_version=$1 WHERE command_id=$2`, WireV1alpha2, v2); err != nil {
+		t.Fatal(err)
+	}
+	h.s.wireEnabled.Store(false)
+	got, err := h.s.Claim(ctx, h.caller(), MaxClaimBatch, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, g := range got {
+		ids = append(ids, g.CommandID)
+	}
+	if len(ids) != 1 || ids[0] != v1 {
+		t.Fatalf("claimed %v, want only the v1alpha1 command %s (v1alpha2 %s must stay gated)", ids, v1, v2)
+	}
+}
