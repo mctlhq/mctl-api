@@ -40,6 +40,9 @@ type Scope struct {
 	Tenant      string
 	Role        string
 	GrantID     string
+	// RefreshFamilyID is the refresh family the grant is bound to: revoking the
+	// grant revokes it, so a scope ref bound to it dies with the grant.
+	RefreshFamilyID string
 }
 
 // GrantChecker loads a grant and matches it to the caller. ErrGrantInvalid is
@@ -201,5 +204,5 @@ func (r *Resolver) Resolve(ctx context.Context, u *auth.User) (Scope, *glovo.Err
 		return Scope{}, refuse(glovo.CodeNotInPilot)
 	}
 	// 7.
-	return Scope{PrincipalID: prn, Tenant: g.Tenant, Role: string(role), GrantID: g.ID}, nil
+	return Scope{PrincipalID: prn, Tenant: g.Tenant, Role: string(role), GrantID: g.ID, RefreshFamilyID: g.RefreshFamilyID}, nil
 }
