@@ -62,6 +62,27 @@ ALTER TABLE oauth_refresh_tokens ADD COLUMN IF NOT EXISTS auth_method TEXT NOT N
 -- The RFC 8707 resource the session's access tokens are minted for
 -- (mctl-api#849). Empty is the default API resource.
 ALTER TABLE oauth_refresh_tokens ADD COLUMN IF NOT EXISTS resource TEXT NOT NULL DEFAULT '';
+-- Team grants of the Glovo pilot. Additive and inert while the pilot is off:
+-- the table stays empty and team_grant_id stays ''. They live here, not in
+-- the teamgrant package, so the revocation statements below always find them
+-- and a grant shares a transaction with its refresh family.
+CREATE TABLE IF NOT EXISTS oauth_team_grants (
+    grant_id          TEXT PRIMARY KEY,
+    principal_id      TEXT NOT NULL CHECK (principal_id <> ''),
+    tenant            TEXT NOT NULL CHECK (tenant <> ''),
+    resource          TEXT NOT NULL CHECK (resource <> ''),
+    client_id         TEXT NOT NULL,
+    refresh_family_id UUID NULL,
+    state             TEXT NOT NULL CHECK (state IN ('pending','active','revoked')),
+    created_at        TIMESTAMPTZ NOT NULL,
+    expires_at        TIMESTAMPTZ NOT NULL,
+    revoked_at        TIMESTAMPTZ NULL,
+    revoked_reason    TEXT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS oauth_team_grants_one_active
+    ON oauth_team_grants (principal_id, client_id, resource) WHERE state IN ('pending','active');
+CREATE INDEX IF NOT EXISTS oauth_team_grants_family ON oauth_team_grants (refresh_family_id);
+ALTER TABLE oauth_refresh_tokens ADD COLUMN IF NOT EXISTS team_grant_id TEXT NOT NULL DEFAULT '';
 `
 
 // PostgresStore is a Postgres-backed implementation of Store.
@@ -125,6 +146,10 @@ func NewPostgresStore(ctx context.Context, connStr string) (*PostgresStore, erro
 	return &PostgresStore{pool: pool}, nil
 }
 
+// Pool is the pool the store runs on. The team grant store uses it so a grant
+// and a refresh token are written on the same database.
+func (s *PostgresStore) Pool() *pgxpool.Pool { return s.pool }
+
 func tokenHash(raw string) []byte {
 	h := sha256.Sum256([]byte(raw))
 	return h[:]
@@ -150,12 +175,49 @@ func (s *PostgresStore) Insert(rawToken, clientID string, sess Session, expiresA
 	defer cancel()
 	_, err = s.pool.Exec(ctx,
 		`INSERT INTO oauth_refresh_tokens
-		 (token_hash, client_id, login, principal_id, groups, family_id, parent_token_hash, issued_at, expires_at, auth_method, resource)
-		 VALUES ($1, $2, $3, $4, $5, $6, NULL, NOW(), $7, $8, $9)`,
-		tokenHash(rawToken), clientID, sess.Login, sess.PrincipalID, groupsJSON, uuid.New(), expiresAt, sess.AuthMethod, sess.Resource,
+		 (token_hash, client_id, login, principal_id, groups, family_id, parent_token_hash, issued_at, expires_at, auth_method, resource, team_grant_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, NULL, NOW(), $7, $8, $9, $10)`,
+		tokenHash(rawToken), clientID, sess.Login, sess.PrincipalID, groupsJSON, uuid.New(), expiresAt, sess.AuthMethod, sess.Resource, sess.TeamGrantID,
 	)
 	if err != nil {
 		return fmt.Errorf("oauth refresh store: insert: %w", err)
+	}
+	return nil
+}
+
+// InsertBound is Insert for a session bound to a team grant. It inserts the
+// token and calls bind on the same transaction with the new family id; bind
+// activates the grant. An error from bind rolls the insert back, so either
+// both writes commit or neither does.
+func (s *PostgresStore) InsertBound(ctx context.Context, rawToken, clientID string, sess Session, expiresAt time.Time, bind func(ctx context.Context, tx pgx.Tx, familyID uuid.UUID) error) error {
+	if bind == nil {
+		return errors.New("oauth refresh store: insert bound: no bind")
+	}
+	groupsJSON, err := json.Marshal(sess.Groups)
+	if err != nil {
+		return fmt.Errorf("oauth refresh store: marshal groups: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		return fmt.Errorf("oauth refresh store: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	familyID := uuid.New()
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO oauth_refresh_tokens
+		 (token_hash, client_id, login, principal_id, groups, family_id, parent_token_hash, issued_at, expires_at, auth_method, resource, team_grant_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, NULL, NOW(), $7, $8, $9, $10)`,
+		tokenHash(rawToken), clientID, sess.Login, sess.PrincipalID, groupsJSON, familyID, expiresAt, sess.AuthMethod, sess.Resource, sess.TeamGrantID,
+	); err != nil {
+		return fmt.Errorf("oauth refresh store: insert bound: %w", err)
+	}
+	if err := bind(ctx, tx, familyID); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("oauth refresh store: insert bound commit: %w", err)
 	}
 	return nil
 }
@@ -170,6 +232,17 @@ func (s *PostgresStore) Rotate(oldRawToken, newRawToken, clientID string, newExp
 
 // RotateIf is Rotate with a precondition; see Store.RotateIf.
 func (s *PostgresStore) RotateIf(oldRawToken, newRawToken, clientID string, newExpiresAt time.Time, accept func(Session) error) (Session, error) {
+	var wrapped func(context.Context, pgx.Tx, Session) error
+	if accept != nil {
+		wrapped = func(_ context.Context, _ pgx.Tx, sess Session) error { return accept(sess) }
+	}
+	return s.RotateIfTx(oldRawToken, newRawToken, clientID, newExpiresAt, wrapped)
+}
+
+// RotateIfTx is RotateIf whose accept runs on the rotation's own transaction,
+// so it can read the team grant at the same snapshot. accept only reads and
+// refuses: a write in it would roll back with its error.
+func (s *PostgresStore) RotateIfTx(oldRawToken, newRawToken, clientID string, newExpiresAt time.Time, accept func(ctx context.Context, tx pgx.Tx, s Session) error) (Session, error) {
 	backoff := []time.Duration{5 * time.Millisecond, 15 * time.Millisecond}
 	for attempt := range 3 {
 		sess, err := s.rotateTx(oldRawToken, newRawToken, clientID, newExpiresAt, accept)
@@ -185,7 +258,7 @@ func (s *PostgresStore) RotateIf(oldRawToken, newRawToken, clientID string, newE
 	return Session{}, ErrServerError
 }
 
-func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newExpiresAt time.Time, accept func(Session) error) (Session, error) {
+func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newExpiresAt time.Time, accept func(context.Context, pgx.Tx, Session) error) (Session, error) {
 	oldHash := tokenHash(oldRawToken)
 	newHash := tokenHash(newRawToken)
 
@@ -198,7 +271,7 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
-	var storedClientID, login, principalID, authMethod, resource string
+	var storedClientID, login, principalID, authMethod, resource, teamGrantID string
 	var groupsJSON []byte
 	var familyID uuid.UUID
 	var expiresAt time.Time
@@ -206,12 +279,12 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 	var revokedAt *time.Time
 
 	err = tx.QueryRow(ctx,
-		`SELECT client_id, login, principal_id, groups, family_id, expires_at, rotated_at, revoked_at, auth_method, resource
+		`SELECT client_id, login, principal_id, groups, family_id, expires_at, rotated_at, revoked_at, auth_method, resource, team_grant_id
 		 FROM oauth_refresh_tokens
 		 WHERE token_hash = $1
 		 FOR UPDATE`,
 		oldHash,
-	).Scan(&storedClientID, &login, &principalID, &groupsJSON, &familyID, &expiresAt, &rotatedAt, &revokedAt, &authMethod, &resource)
+	).Scan(&storedClientID, &login, &principalID, &groupsJSON, &familyID, &expiresAt, &rotatedAt, &revokedAt, &authMethod, &resource, &teamGrantID)
 	if err == pgx.ErrNoRows {
 		return Session{}, ErrInvalidToken
 	}
@@ -253,7 +326,7 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 			return Session{}, ErrInvalidToken
 		}
 		if time.Since(*rotatedAt) < rotationGraceWindow {
-			var childLogin, childPrincipalID, childAuthMethod, childResource string
+			var childLogin, childPrincipalID, childAuthMethod, childResource, childTeamGrantID string
 			var childGroupsJSON []byte
 			var childRevokedAt *time.Time
 			var childRotatedAt *time.Time
@@ -266,12 +339,12 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 			// either the up-to-date row or a 40001 serialization error that
 			// the outer Rotate retry loop already handles.
 			lookupErr := tx.QueryRow(ctx,
-				`SELECT login, principal_id, groups, revoked_at, rotated_at, expires_at, auth_method, resource FROM oauth_refresh_tokens
+				`SELECT login, principal_id, groups, revoked_at, rotated_at, expires_at, auth_method, resource, team_grant_id FROM oauth_refresh_tokens
 				 WHERE token_hash = $1 AND parent_token_hash = $2
 				   AND family_id = $3 AND client_id = $4
 				 FOR UPDATE`,
 				newHash, oldHash, familyID, clientID,
-			).Scan(&childLogin, &childPrincipalID, &childGroupsJSON, &childRevokedAt, &childRotatedAt, &childExpiresAt, &childAuthMethod, &childResource)
+			).Scan(&childLogin, &childPrincipalID, &childGroupsJSON, &childRevokedAt, &childRotatedAt, &childExpiresAt, &childAuthMethod, &childResource, &childTeamGrantID)
 			if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
 				// A real DB error (including a caught-and-surfaced
 				// serialization failure) must not be misreported as
@@ -292,9 +365,9 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 				if err := json.Unmarshal(childGroupsJSON, &childGroups); err != nil {
 					return Session{}, fmt.Errorf("oauth refresh store: grace unmarshal groups: %w", err)
 				}
-				childSess := Session{Login: childLogin, PrincipalID: childPrincipalID, Groups: childGroups, AuthMethod: childAuthMethod, Resource: childResource}
+				childSess := Session{Login: childLogin, PrincipalID: childPrincipalID, Groups: childGroups, AuthMethod: childAuthMethod, Resource: childResource, TeamGrantID: childTeamGrantID}
 				if accept != nil {
-					if err := accept(childSess); err != nil {
+					if err := accept(ctx, tx, childSess); err != nil {
 						return Session{}, err
 					}
 				}
@@ -308,6 +381,19 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 			return Session{}, ErrInvalidToken
 		}
 		now := time.Now().UTC()
+		// The grant first, in the same commit as the family: a replayed or
+		// stolen Glovo refresh token must stop its access tokens passing the
+		// per-request grant check.
+		if _, execErr := tx.Exec(ctx,
+			`UPDATE oauth_team_grants
+			 SET state = 'revoked', revoked_at = $1, revoked_reason = 'reuse_detected'
+			 WHERE refresh_family_id = $2 AND state IN ('pending','active')`,
+			now, familyID,
+		); execErr != nil {
+			slog.Error("oauth refresh token reuse: failed to revoke team grant",
+				"family_id", familyID, "error", execErr)
+			return Session{}, fmt.Errorf("oauth refresh store: reuse grant revocation failed: %w", execErr)
+		}
 		if _, execErr := tx.Exec(ctx,
 			`UPDATE oauth_refresh_tokens
 			 SET revoked_at = $1, revoked_reason = 'reuse_detected'
@@ -339,11 +425,11 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 	if err := json.Unmarshal(groupsJSON, &groups); err != nil {
 		groups = nil
 	}
-	sess := Session{Login: login, PrincipalID: principalID, Groups: groups, AuthMethod: authMethod, Resource: resource}
+	sess := Session{Login: login, PrincipalID: principalID, Groups: groups, AuthMethod: authMethod, Resource: resource, TeamGrantID: teamGrantID}
 	if accept != nil {
 		// Before any write: a refused session keeps its token un-rotated,
 		// and the deferred Rollback releases the row lock.
-		if err := accept(sess); err != nil {
+		if err := accept(ctx, tx, sess); err != nil {
 			return Session{}, err
 		}
 	}
@@ -363,9 +449,9 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 	newGroupsJSON, _ := json.Marshal(groups)
 	_, err = tx.Exec(ctx,
 		`INSERT INTO oauth_refresh_tokens
-		 (token_hash, client_id, login, principal_id, groups, family_id, parent_token_hash, issued_at, expires_at, auth_method, resource)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-		newHash, clientID, login, principalID, newGroupsJSON, familyID, oldHash, now, newExpiresAt, authMethod, resource,
+		 (token_hash, client_id, login, principal_id, groups, family_id, parent_token_hash, issued_at, expires_at, auth_method, resource, team_grant_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		newHash, clientID, login, principalID, newGroupsJSON, familyID, oldHash, now, newExpiresAt, authMethod, resource, teamGrantID,
 	)
 	if err != nil {
 		return Session{}, fmt.Errorf("oauth refresh store: insert rotated: %w", err)
@@ -377,34 +463,41 @@ func (s *PostgresStore) rotateTx(oldRawToken, newRawToken, clientID string, newE
 	return sess, nil
 }
 
-// RevokeFamily revokes all non-revoked tokens in the same family as rawToken.
-// If clientID is non-empty, only tokens belonging to that client are affected.
+// RevokeFamily revokes all non-revoked tokens in the same family as rawToken,
+// and the team grant bound to that family, in one transaction (the grant
+// first: it is what the per-request check reads). If clientID is non-empty,
+// only tokens belonging to that client are affected.
 func (s *PostgresStore) RevokeFamily(rawToken, clientID, reason string) error {
 	hash := tokenHash(rawToken)
 	now := time.Now().UTC()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	var err error
-	if clientID != "" {
-		_, err = s.pool.Exec(ctx,
-			`UPDATE oauth_refresh_tokens
-			 SET revoked_at = $1, revoked_reason = $2
-			 WHERE family_id = (SELECT family_id FROM oauth_refresh_tokens WHERE token_hash = $3)
-			   AND client_id = $4
-			   AND revoked_at IS NULL`,
-			now, reason, hash, clientID,
-		)
-	} else {
-		_, err = s.pool.Exec(ctx,
-			`UPDATE oauth_refresh_tokens
-			 SET revoked_at = $1, revoked_reason = $2
-			 WHERE family_id = (SELECT family_id FROM oauth_refresh_tokens WHERE token_hash = $3)
-			   AND revoked_at IS NULL`,
-			now, reason, hash,
-		)
-	}
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		return fmt.Errorf("oauth refresh store: revoke family: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err = tx.Exec(ctx,
+		`UPDATE oauth_team_grants
+		 SET state = 'revoked', revoked_at = $1, revoked_reason = $2
+		 WHERE refresh_family_id = (SELECT family_id FROM oauth_refresh_tokens WHERE token_hash = $3 AND ($4 = '' OR client_id = $4))
+		   AND state IN ('pending','active')`,
+		now, reason, hash, clientID,
+	); err != nil {
+		return fmt.Errorf("oauth refresh store: revoke family grant: %w", err)
+	}
+	if _, err = tx.Exec(ctx,
+		`UPDATE oauth_refresh_tokens
+		 SET revoked_at = $1, revoked_reason = $2
+		 WHERE family_id = (SELECT family_id FROM oauth_refresh_tokens WHERE token_hash = $3)
+		   AND ($4 = '' OR client_id = $4)
+		   AND revoked_at IS NULL`,
+		now, reason, hash, clientID,
+	); err != nil {
 		return fmt.Errorf("oauth refresh store: revoke family: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("oauth refresh store: revoke family commit: %w", err)
 	}
 	return nil
 }
@@ -443,6 +536,15 @@ func (s *PostgresStore) revokePrincipalTx(principalID, reason string) (int64, er
 		return 0, fmt.Errorf("oauth refresh store: begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	// The principal's grants first, in the same commit as its families.
+	if _, err := tx.Exec(ctx,
+		`UPDATE oauth_team_grants
+		 SET state = 'revoked', revoked_at = $1, revoked_reason = $2
+		 WHERE principal_id = $3 AND state IN ('pending','active')`,
+		time.Now().UTC(), reason, principalID,
+	); err != nil {
+		return 0, fmt.Errorf("oauth refresh store: revoke principal grants: %w", err)
+	}
 	var sessions int64
 	err = tx.QueryRow(ctx,
 		`WITH revoked AS (

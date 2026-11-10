@@ -1,0 +1,124 @@
+// Copyright 2026 MCTL Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/mctlhq/mctl-api/internal/api"
+	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
+	"github.com/mctlhq/mctl-api/internal/auth/teamgrant"
+	"github.com/mctlhq/mctl-api/internal/glovo"
+	"github.com/mctlhq/mctl-api/internal/glovo/scope"
+	"github.com/mctlhq/mctl-api/internal/pgshared"
+)
+
+// defaultGlovoNonSelectable is GLOVO_NON_SELECTABLE_TENANTS when unset: only
+// the platform's own system tenant. `labs` is selectable by an allowlisted
+// member who chooses it explicitly; nothing ever picks it by default.
+const defaultGlovoNonSelectable = "admins"
+
+// glovoEnabled parses GLOVO_ENABLED: unset or empty is false, and anything
+// but true/false is a refused boot, so a typo never reads as on or off.
+func glovoEnabled(lookup func(string) (string, bool)) (bool, error) {
+	v, _ := lookup("GLOVO_ENABLED")
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "false":
+		return false, nil
+	case "true":
+		return true, nil
+	}
+	return false, fmt.Errorf("GLOVO_ENABLED %q must be true or false", v)
+}
+
+// glovoTeamGrantDeps is what GLOVO_ENABLED=true needs; every field is checked
+// so a missing one refuses the boot instead of leaving the feature half on.
+type glovoTeamGrantDeps struct {
+	OAuth           *auth.OAuthServer
+	RefreshStore    *refreshstore.PostgresStore
+	Membership      scope.MembershipReader
+	ExplicitOAuthDB bool
+}
+
+// configureGlovoTeamGrants wires the team grant store, the live eligibility
+// reader and the kill switch. With GLOVO_ENABLED unset it does nothing, so
+// every OAuth flow stays exactly as it was. It returns the Glovo store (for
+// the allowlist routes) when enabled.
+func configureGlovoTeamGrants(ctx context.Context, d glovoTeamGrantDeps, lookup func(string) (string, bool)) (*glovo.Store, error) {
+	enabled, err := glovoEnabled(lookup)
+	if err != nil || !enabled {
+		return nil, err
+	}
+	o := d.OAuth
+	switch {
+	case o == nil:
+		return nil, errors.New("GLOVO_ENABLED=true needs the OAuth server")
+	case o.GlovoResource == "":
+		return nil, errors.New("GLOVO_ENABLED=true needs GLOVO_MCP_RESOURCE")
+	case !o.PrincipalMode:
+		return nil, errors.New("GLOVO_ENABLED=true needs TENANT_AUTHZ_MODE=principal")
+	case d.RefreshStore == nil:
+		return nil, errors.New("GLOVO_ENABLED=true needs the Postgres refresh store, not the in-memory one")
+	case !d.ExplicitOAuthDB:
+		return nil, errors.New("GLOVO_ENABLED=true needs an explicit OAUTH_DB_URL")
+	case d.Membership == nil:
+		return nil, errors.New("GLOVO_ENABLED=true needs the principal membership reader")
+	}
+	val := func(k string) string { v, _ := lookup(k); return strings.TrimSpace(v) }
+	glovoURL := postgresURL(val("GLOVO_DB_URL"))
+	if glovoURL == "" {
+		return nil, errors.New("GLOVO_ENABLED=true needs an explicit GLOVO_DB_URL")
+	}
+	runtimeRole, migrationRole := val("GLOVO_DB_RUNTIME_ROLE"), val("GLOVO_DB_MIGRATION_ROLE")
+	if runtimeRole == "" || migrationRole == "" {
+		return nil, errors.New("GLOVO_ENABLED=true needs GLOVO_DB_RUNTIME_ROLE and GLOVO_DB_MIGRATION_ROLE")
+	}
+	pool, err := pgshared.Open(ctx, glovoURL)
+	if err != nil {
+		return nil, fmt.Errorf("glovo store: connect: %w", err)
+	}
+	store, err := glovo.NewStore(ctx, pool, runtimeRole, migrationRole, glovo.WithExplicitURL(true))
+	if err != nil {
+		pgshared.Release(pool)
+		return nil, err
+	}
+	grants, err := teamgrant.NewPostgresStore(d.RefreshStore.Pool())
+	if err != nil {
+		pgshared.Release(pool)
+		return nil, err
+	}
+	// Empty is unset: a blank Helm value must not drop the default exclusion.
+	nonSel := val("GLOVO_NON_SELECTABLE_TENANTS")
+	if nonSel == "" {
+		nonSel = defaultGlovoNonSelectable
+	}
+	o.TeamGrants = grants
+	o.TeamEligibility = &scope.Eligibility{Membership: d.Membership, Allowlist: store, NonSelectable: scope.NonSelectable(nonSel)}
+	o.GlovoEnabled = true
+	return store, nil
+}
+
+// glovoAllowlist avoids a typed-nil interface: with the Glovo store absent
+// the allowlist routes answer 503.
+func glovoAllowlist(s *glovo.Store) api.GlovoAllowlist {
+	if s == nil {
+		return nil
+	}
+	return s
+}

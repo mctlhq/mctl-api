@@ -7002,7 +7002,42 @@ paths:
         '422': {description: verification_not_bound, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
         '503': {description: security_findings_store_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
 
+  /api/v1/glovo/pilot/{tenant}/principals/{principal_id}:
+    put:
+      summary: Add a principal to a tenant's Glovo pilot allowlist
+      description: |
+        Human platform administrators only (a service user, agent token or
+        relayed surface identity is refused, and so is a tenant owner who is
+        not an admin). The entry is per principal: there is no tenant-wide or
+        wildcard entry, and the principal id must be a `prn_` id. A Glovo
+        audience token never reaches this route. Idempotent.
+      tags: [Glovo]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+        - {name: principal_id, in: path, required: true, schema: {type: string, pattern: '^prn_[0-9A-HJKMNP-TV-Z]{26}$'}}
+      responses:
+        '204': {description: The principal is on the allowlist}
+        '400': {description: invalid tenant or principal id}
+        '403': {description: forbidden}
+        '404': {description: tenant not found}
+        '503': {description: the tenant lookup or the allowlist store is unavailable}
+    delete:
+      summary: Remove a principal from a tenant's Glovo pilot allowlist
+      description: Same authorization as PUT. Takes effect on the principal's next Glovo request and next refresh. Idempotent.
+      tags: [Glovo]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+        - {name: principal_id, in: path, required: true, schema: {type: string, pattern: '^prn_[0-9A-HJKMNP-TV-Z]{26}$'}}
+      responses:
+        '204': {description: The principal is not on the allowlist}
+        '400': {description: invalid tenant or principal id}
+        '403': {description: forbidden}
+        '404': {description: tenant not found}
+        '503': {description: the tenant lookup or the allowlist store is unavailable}
+
 tags:
+  - name: Glovo
+    description: Glovo pilot administration
   - name: Health
     description: Health and readiness probes
   - name: Docs

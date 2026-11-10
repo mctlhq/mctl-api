@@ -302,6 +302,9 @@ type Options struct {
 	// BridgeProviders is the server-side bridge-provider configuration
 	// (MCTL_BRIDGE_PROVIDERS), keyed by ref: the tenant upper bound of each.
 	BridgeProviders map[string]auth.BridgeProviderConfig
+	// GlovoAllowlist writes the Glovo pilot allowlist (GLOVO_ENABLED, the
+	// glovo store). Nil makes the allowlist routes answer 503.
+	GlovoAllowlist GlovoAllowlist
 	// CodeScanningWebhookSecret is the dedicated HMAC secret of
 	// POST /api/v1/security/webhooks/github-code-scanning (mctl-api#802). It
 	// must be at least CodeScanningMinSecretLen long and differ from
@@ -889,6 +892,11 @@ func NewRouter(opts Options) http.Handler {
 					r.Post("/commands/{command_id}/write-permit", h.BridgeWritePermit)
 				})
 			}
+
+			// Glovo pilot allowlist: per (tenant, principal), human admins only.
+			// No route names a tenant without a principal.
+			r.Put("/glovo/pilot/{tenant}/principals/{principal_id}", h.GlovoAllowlistAdd)
+			r.Delete("/glovo/pilot/{tenant}/principals/{principal_id}", h.GlovoAllowlistRemove)
 
 			// SecurityFinding v1 reads and lifecycle writes (mctl-api#774).
 			r.Get("/security/findings", h.ListSecurityFindings)
