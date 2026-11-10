@@ -107,17 +107,11 @@ func configureGlovoTeamGrants(ctx context.Context, d glovoTeamGrantDeps, lookup 
 	if prove == nil {
 		prove = proveBridgeHookTables
 	}
-	realHook, err := decideRealRevocationHook(ctx, pool, lookup, prove)
+	store, err := openGlovoStore(ctx, pool, lookup, glovo.ControlDefault.Open, prove,
+		func(opts []glovo.Option) (*glovo.Store, error) {
+			return glovo.NewStore(ctx, pool, runtimeRole, migrationRole, opts...)
+		})
 	if err != nil {
-		pgshared.Release(pool)
-		return nil, nil, err
-	}
-	store, err := glovo.NewStore(ctx, pool, runtimeRole, migrationRole, glovoStoreOptions(realHook)...)
-	if err != nil {
-		pgshared.Release(pool)
-		return nil, nil, err
-	}
-	if err := assertControlHook(realHook, store); err != nil {
 		pgshared.Release(pool)
 		return nil, nil, err
 	}
@@ -180,6 +174,27 @@ func assertControlHook(controlEnabled bool, s *glovo.Store) error {
 	return nil
 }
 
+// openGlovoStore is the sequence that chooses the revocation hook and builds the
+// store with it: decide (flag, gate, proof), build with exactly that decision,
+// then assert the installed hook. The gate, the proof and the constructor are
+// parameters so every branch can be driven without a database or a fixture
+// build. An error means the boot is refused.
+func openGlovoStore(ctx context.Context, q dbq.Querier, lookup func(string) (string, bool), gateOpen bool,
+	prove func(context.Context, dbq.Querier) error, newStore func([]glovo.Option) (*glovo.Store, error)) (*glovo.Store, error) {
+	realHook, err := decideRealRevocationHook(ctx, q, lookup, gateOpen, prove)
+	if err != nil {
+		return nil, err
+	}
+	store, err := newStore(glovoStoreOptions(realHook))
+	if err != nil {
+		return nil, err
+	}
+	if err := assertControlHook(realHook, store); err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
 // decideRealRevocationHook is the one place that chooses the connection-end
 // hook. The real hook (bridge.CancelOpenForConnections) runs SELECT ... FOR
 // UPDATE on bridge_commands inside every connection-ending transaction, and an
@@ -189,9 +204,9 @@ func assertControlHook(controlEnabled bool, s *glovo.Store) error {
 // the gate on refuses the boot; it never falls back to the synthetic hook. With
 // the flag off or the gate closed (every release build) prove is not called and
 // the #959 lifecycle is untouched.
-func decideRealRevocationHook(ctx context.Context, q dbq.Querier, lookup func(string) (string, bool),
+func decideRealRevocationHook(ctx context.Context, q dbq.Querier, lookup func(string) (string, bool), gateOpen bool,
 	prove func(context.Context, dbq.Querier) error) (bool, error) {
-	if !glovoControlEnabled(lookup) || !glovo.ControlDefault.Open {
+	if !glovoControlEnabled(lookup) || !gateOpen {
 		return false, nil
 	}
 	if err := prove(ctx, q); err != nil {

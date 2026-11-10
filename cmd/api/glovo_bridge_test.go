@@ -220,39 +220,49 @@ func TestMainInstallsTheFenceOnlyThroughTheInstaller(t *testing.T) {
 	}
 }
 
-func TestDecideRealRevocationHook(t *testing.T) {
+func TestOpenGlovoStoreChoosesTheHook(t *testing.T) {
 	env := func(m map[string]string) func(string) (string, bool) {
 		return func(k string) (string, bool) { v, ok := m[k]; return v, ok }
 	}
 	on, off := env(map[string]string{"MCTL_GLOVO_CONTROL_ENABLED": "true"}), env(nil)
-	var calls int
-	pass := func(context.Context, dbq.Querier) error { calls++; return nil }
-	fail := func(context.Context, dbq.Querier) error { calls++; return errors.New("no bridge_commands") }
+	var proofs, built int
+	pass := func(context.Context, dbq.Querier) error { proofs++; return nil }
+	fail := func(context.Context, dbq.Querier) error { proofs++; return errors.New("no bridge_commands") }
+	newStore := func(opts []glovo.Option) (*glovo.Store, error) { built++; return storeWith(opts), nil }
+	open := func(lookup func(string) (string, bool), gate bool, prove func(context.Context, dbq.Querier) error) (*glovo.Store, error) {
+		proofs, built = 0, 0
+		return openGlovoStore(context.Background(), nil, lookup, gate, prove, newStore)
+	}
+	synthetic := func(s *glovo.Store) bool {
+		return s != nil && s.RevocationHookIs(syntheticRevocationHook) && !s.RevocationHookIs(bridge.CancelOpenForConnections)
+	}
 
-	// Flag off: never real, never probed, whatever the gate and the proof.
+	// Flag on, gate closed: no proof, the unchanged synthetic hook.
 	for _, p := range []func(context.Context, dbq.Querier) error{pass, fail} {
-		got, err := decideRealRevocationHook(context.Background(), nil, off, p)
-		if got || err != nil || calls != 0 {
-			t.Fatalf("flag off: real=%v err=%v probed=%d; the #959 lifecycle must be untouched", got, err, calls)
+		s, err := open(on, false, p)
+		if err != nil || proofs != 0 || built != 1 || !synthetic(s) {
+			t.Fatalf("flag on, gate closed: err=%v proofs=%d built=%d synthetic=%v", err, proofs, built, synthetic(s))
 		}
 	}
-	if !glovo.ControlDefault.Open {
-		// Release build: the gate is closed, the flag alone changes nothing.
-		for _, p := range []func(context.Context, dbq.Querier) error{pass, fail} {
-			got, err := decideRealRevocationHook(context.Background(), nil, on, p)
-			if got || err != nil || calls != 0 {
-				t.Fatalf("gate closed: real=%v err=%v probed=%d", got, err, calls)
-			}
+	// Flag off, gate open: no proof, the synthetic hook.
+	for _, p := range []func(context.Context, dbq.Querier) error{pass, fail} {
+		s, err := open(off, true, p)
+		if err != nil || proofs != 0 || built != 1 || !synthetic(s) {
+			t.Fatalf("flag off, gate open: err=%v proofs=%d built=%d synthetic=%v", err, proofs, built, synthetic(s))
 		}
-		return
 	}
-	// Fixture build: flag and gate on. A failed proof refuses the boot and does
-	// not fall back to the synthetic hook; a passing one installs the real hook.
-	if got, err := decideRealRevocationHook(context.Background(), nil, on, fail); got || err == nil {
-		t.Fatalf("a failed proof must refuse the boot: real=%v err=%v", got, err)
+	// Flag on, gate open, proof fails: the boot is refused, nothing is built.
+	if s, err := open(on, true, fail); err == nil || s != nil || built != 0 || proofs != 1 {
+		t.Fatalf("a failed proof must refuse the boot: store=%v err=%v built=%d proofs=%d", s, err, built, proofs)
 	}
-	if got, err := decideRealRevocationHook(context.Background(), nil, on, pass); !got || err != nil {
-		t.Fatalf("a passing proof must install the real hook: real=%v err=%v", got, err)
+	// Flag on, gate open, proof ok: the real hook.
+	if s, err := open(on, true, pass); err != nil || s == nil || proofs != 1 || !s.RevocationHookIs(bridge.CancelOpenForConnections) {
+		t.Fatalf("a passing proof must install the real hook: err=%v proofs=%d", err, proofs)
+	}
+	// A constructor failure is returned, not swallowed.
+	boom := errors.New("boom")
+	if _, err := openGlovoStore(context.Background(), nil, off, false, pass, func([]glovo.Option) (*glovo.Store, error) { return nil, boom }); !errors.Is(err, boom) {
+		t.Fatalf("a store error was lost: %v", err)
 	}
 }
 
@@ -268,5 +278,24 @@ func TestLifecycleOptionsUnchangedWithoutTheRealHook(t *testing.T) {
 	}
 	if !s.EndPurgerInstalled() {
 		t.Fatal("the end purger is not installed")
+	}
+}
+
+// A closed-gate release never runs the one-database proof: it is not evaluated
+// unless the build gate is open.
+func TestInstallWriteFenceDoesNotRunTheProofBehindAClosedGate(t *testing.T) {
+	var ran int
+	d := fenceInstall{
+		Gate: false, HoldLifted: true,
+		Proof: func(context.Context) error { ran++; return nil },
+		Set:   func(bridge.WriteFence) { t.Error("installed behind a closed gate") },
+	}
+	if got, _ := installWriteFence(context.Background(), d); got || ran != 0 {
+		t.Fatalf("gate closed: installed=%v proof ran %d times", got, ran)
+	}
+	d.Gate = true
+	_, _ = installWriteFence(context.Background(), d)
+	if ran != 1 {
+		t.Fatalf("gate open: the proof ran %d times, want 1", ran)
 	}
 }

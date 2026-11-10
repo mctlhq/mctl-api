@@ -157,9 +157,11 @@ type fenceInstall struct {
 // observed. With any one false the bridge keeps its refusing fence.
 func installWriteFence(ctx context.Context, d fenceInstall) (bool, glovoFencePreconditions) {
 	pre := glovoFencePreconditions{
-		GateOpen:             d.Gate,
-		HoldLifted:           d.HoldLifted,
-		OneDatabaseProof:     d.Proof != nil && d.Proof(ctx) == nil,
+		GateOpen:   d.Gate,
+		HoldLifted: d.HoldLifted,
+		// The proof is evaluated only behind the build gate: a closed-gate
+		// release never runs it.
+		OneDatabaseProof:     d.Gate && d.Proof != nil && d.Proof(ctx) == nil,
 		RevocationHookReady:  fenceHookReady(ctx, d.Glovo),
 		MembershipRevocation: fenceMembershipObserved(d.Glovo),
 	}
