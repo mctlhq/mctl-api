@@ -305,6 +305,10 @@ type Options struct {
 	// GlovoAllowlist writes the Glovo pilot allowlist (GLOVO_ENABLED, the
 	// glovo store). Nil makes the allowlist routes answer 503.
 	GlovoAllowlist GlovoAllowlist
+	// Glovo configures the synthetic Glovo connection routes (mctl-api#961):
+	// facade, tenant installation and worker. Nil, or Enabled false, makes
+	// every one of them answer 503 not_ready.
+	Glovo *GlovoRoutes
 	// CodeScanningWebhookSecret is the dedicated HMAC secret of
 	// POST /api/v1/security/webhooks/github-code-scanning (mctl-api#802). It
 	// must be at least CodeScanningMinSecretLen long and differ from
@@ -604,6 +608,9 @@ func NewRouter(opts Options) http.Handler {
 		// A bridge provider reaches the bridge routes and nothing else
 		// (mctl-api#962).
 		r.Use(bridgeProviderGate)
+		// The Glovo worker reaches the worker routes and nothing else
+		// (mctl-api#961).
+		r.Use(h.glovoWorkerGate)
 		// The registry publisher reaches the registry publication routes and
 		// nothing else (mctlhq/mctl-agents#470).
 		r.Use(registryPublisherGate)
@@ -897,6 +904,28 @@ func NewRouter(opts Options) http.Handler {
 			// No route names a tenant without a principal.
 			r.Put("/glovo/pilot/{tenant}/principals/{principal_id}", h.GlovoAllowlistAdd)
 			r.Delete("/glovo/pilot/{tenant}/principals/{principal_id}", h.GlovoAllowlistRemove)
+
+			// Synthetic Glovo connections (mctl-api#961): every route is
+			// behind the feature gate, which answers 503 not_ready before the
+			// body is read unless GLOVO_ENABLED and every dependency is healthy.
+			r.Group(func(r chi.Router) {
+				r.Use(h.glovoFeatureGate)
+				r.Route("/glovo/facade", func(r chi.Router) {
+					r.Get("/context", h.GlovoFacadeContext)
+					r.Post("/connections", h.GlovoFacadeConnect)
+					r.Get("/connections/{id}", h.GlovoFacadeGetConnection)
+					r.Post("/connections/{id}/handoff", h.GlovoFacadeHandoff)
+					r.Post("/connections/{id}/revoke", h.GlovoFacadeRevoke)
+					r.Post("/connections/{id}/reconnect", h.GlovoFacadeReconnect)
+				})
+				r.Put("/glovo/tenants/{tenant}/installation", h.GlovoInstallationPut)
+				r.Delete("/glovo/tenants/{tenant}/installation", h.GlovoInstallationDelete)
+				r.Route("/glovo/worker", func(r chi.Router) {
+					r.Post("/check", h.GlovoWorkerCheck)
+					r.Post("/connections/{id}/activate", h.GlovoWorkerActivate)
+					r.Post("/connections/{id}/expire", h.GlovoWorkerExpire)
+				})
+			})
 
 			// SecurityFinding v1 reads and lifecycle writes (mctl-api#774).
 			r.Get("/security/findings", h.ListSecurityFindings)

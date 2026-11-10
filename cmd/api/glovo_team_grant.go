@@ -19,12 +19,16 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/mctlhq/mctl-api/internal/api"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
 	"github.com/mctlhq/mctl-api/internal/auth/teamgrant"
 	"github.com/mctlhq/mctl-api/internal/glovo"
+	"github.com/mctlhq/mctl-api/internal/glovo/connect"
 	"github.com/mctlhq/mctl-api/internal/glovo/scope"
 	"github.com/mctlhq/mctl-api/internal/pgshared"
 )
@@ -59,49 +63,52 @@ type glovoTeamGrantDeps struct {
 // configureGlovoTeamGrants wires the team grant store, the live eligibility
 // reader and the kill switch. With GLOVO_ENABLED unset it does nothing, so
 // every OAuth flow stays exactly as it was. It returns the Glovo store (for
-// the allowlist routes) when enabled.
-func configureGlovoTeamGrants(ctx context.Context, d glovoTeamGrantDeps, lookup func(string) (string, bool)) (*glovo.Store, error) {
+// the allowlist routes) and the synthetic connection routes' configuration
+// when enabled.
+func configureGlovoTeamGrants(ctx context.Context, d glovoTeamGrantDeps, lookup func(string) (string, bool)) (*glovo.Store, *api.GlovoRoutes, error) {
 	enabled, err := glovoEnabled(lookup)
 	if err != nil || !enabled {
-		return nil, err
+		return nil, nil, err
 	}
 	o := d.OAuth
 	switch {
 	case o == nil:
-		return nil, errors.New("GLOVO_ENABLED=true needs the OAuth server")
+		return nil, nil, errors.New("GLOVO_ENABLED=true needs the OAuth server")
 	case o.GlovoResource == "":
-		return nil, errors.New("GLOVO_ENABLED=true needs GLOVO_MCP_RESOURCE")
+		return nil, nil, errors.New("GLOVO_ENABLED=true needs GLOVO_MCP_RESOURCE")
 	case !o.PrincipalMode:
-		return nil, errors.New("GLOVO_ENABLED=true needs TENANT_AUTHZ_MODE=principal")
+		return nil, nil, errors.New("GLOVO_ENABLED=true needs TENANT_AUTHZ_MODE=principal")
 	case d.RefreshStore == nil:
-		return nil, errors.New("GLOVO_ENABLED=true needs the Postgres refresh store, not the in-memory one")
+		return nil, nil, errors.New("GLOVO_ENABLED=true needs the Postgres refresh store, not the in-memory one")
 	case !d.ExplicitOAuthDB:
-		return nil, errors.New("GLOVO_ENABLED=true needs an explicit OAUTH_DB_URL")
+		return nil, nil, errors.New("GLOVO_ENABLED=true needs an explicit OAUTH_DB_URL")
 	case d.Membership == nil:
-		return nil, errors.New("GLOVO_ENABLED=true needs the principal membership reader")
+		return nil, nil, errors.New("GLOVO_ENABLED=true needs the principal membership reader")
 	}
 	val := func(k string) string { v, _ := lookup(k); return strings.TrimSpace(v) }
 	glovoURL := postgresURL(val("GLOVO_DB_URL"))
 	if glovoURL == "" {
-		return nil, errors.New("GLOVO_ENABLED=true needs an explicit GLOVO_DB_URL")
+		return nil, nil, errors.New("GLOVO_ENABLED=true needs an explicit GLOVO_DB_URL")
 	}
 	runtimeRole, migrationRole := val("GLOVO_DB_RUNTIME_ROLE"), val("GLOVO_DB_MIGRATION_ROLE")
 	if runtimeRole == "" || migrationRole == "" {
-		return nil, errors.New("GLOVO_ENABLED=true needs GLOVO_DB_RUNTIME_ROLE and GLOVO_DB_MIGRATION_ROLE")
+		return nil, nil, errors.New("GLOVO_ENABLED=true needs GLOVO_DB_RUNTIME_ROLE and GLOVO_DB_MIGRATION_ROLE")
 	}
 	pool, err := pgshared.Open(ctx, glovoURL)
 	if err != nil {
-		return nil, fmt.Errorf("glovo store: connect: %w", err)
+		return nil, nil, fmt.Errorf("glovo store: connect: %w", err)
 	}
-	store, err := glovo.NewStore(ctx, pool, runtimeRole, migrationRole, glovo.WithExplicitURL(true))
+	store, err := glovo.NewStore(ctx, pool, runtimeRole, migrationRole, glovo.WithExplicitURL(true),
+		glovo.WithRevocationHook(syntheticRevocationHook), glovo.WithEndPurger(glovo.PurgeHandoffRefs), glovo.WithEndPurgerRequired(true),
+		glovo.WithLockTimeout(5*time.Second))
 	if err != nil {
 		pgshared.Release(pool)
-		return nil, err
+		return nil, nil, err
 	}
 	grants, err := teamgrant.NewPostgresStore(d.RefreshStore.Pool())
 	if err != nil {
 		pgshared.Release(pool)
-		return nil, err
+		return nil, nil, err
 	}
 	// Empty is unset: a blank Helm value must not drop the default exclusion.
 	nonSel := val("GLOVO_NON_SELECTABLE_TENANTS")
@@ -109,10 +116,23 @@ func configureGlovoTeamGrants(ctx context.Context, d glovoTeamGrantDeps, lookup 
 		nonSel = defaultGlovoNonSelectable
 	}
 	o.TeamGrants = grants
-	o.TeamEligibility = &scope.Eligibility{Membership: d.Membership, Allowlist: store, NonSelectable: scope.NonSelectable(nonSel)}
+	elig := &scope.Eligibility{Membership: d.Membership, Allowlist: store, NonSelectable: scope.NonSelectable(nonSel)}
+	o.TeamEligibility = elig
 	o.GlovoEnabled = true
-	return store, nil
+	routes := &api.GlovoRoutes{
+		Enabled: true, ResourceConfigured: o.GlovoResource != "", WorkerConfigured: auth.GlovoWorkerConfigured(),
+		Store:    store,
+		Resolver: &scope.Resolver{Grants: grants, Elig: elig, Resource: o.GlovoResource, Ready: o.GlovoReady},
+		Connect:  &connect.Service{Store: store, HandoffBaseURL: val("GLOVO_SYNTHETIC_HANDOFF_BASE_URL")},
+		ReadyTTL: 5 * time.Second,
+	}
+	return store, routes, nil
 }
+
+// syntheticRevocationHook is the revocation hook of the synthetic provider: it
+// holds no secret, cookie or consumer credential, so there is nothing to
+// release when a connection ends. A real provider replaces it.
+func syntheticRevocationHook(context.Context, pgx.Tx, []string, string) error { return nil }
 
 // glovoAllowlist avoids a typed-nil interface: with the Glovo store absent
 // the allowlist routes answer 503.

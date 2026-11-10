@@ -84,6 +84,9 @@ func ApplySchema(ctx context.Context, migrationConnStr, runtimeRole string) erro
 	if _, err := tx.Exec(ctx, glovoSchema); err != nil {
 		return fmt.Errorf("glovo: apply schema: %w", err)
 	}
+	if _, err := tx.Exec(ctx, handoffSchema); err != nil {
+		return fmt.Errorf("glovo: apply handoff schema: %w", err)
+	}
 	// Ownership again: IF NOT EXISTS must not have adopted a foreign object.
 	if err := checkOwnership(ctx, tx); err != nil {
 		return err
@@ -93,7 +96,7 @@ func ApplySchema(ctx context.Context, migrationConnStr, runtimeRole string) erro
 	if _, err := tx.Exec(ctx, `GRANT USAGE ON SCHEMA glovo TO `+role); err != nil {
 		return fmt.Errorf("glovo: grant schema usage: %w", err)
 	}
-	for _, t := range slice959Tables {
+	for _, t := range append(append([]string(nil), slice959Tables...), slice961Tables...) {
 		row, ok := grantFor(t)
 		if !ok {
 			return fmt.Errorf("glovo: no grant row registered for %s", t)
@@ -105,6 +108,15 @@ func ApplySchema(ctx context.Context, migrationConnStr, runtimeRole string) erro
 		if len(row.Privileges) > 0 {
 			if _, err := tx.Exec(ctx, `GRANT `+strings.Join(row.Privileges, ", ")+` ON TABLE `+tbl+` TO `+role); err != nil {
 				return fmt.Errorf("glovo: grant on %s: %w", t, err)
+			}
+		}
+		if len(row.UpdateColumns) > 0 {
+			cols := make([]string, len(row.UpdateColumns))
+			for i, c := range row.UpdateColumns {
+				cols[i] = pgx.Identifier{c}.Sanitize()
+			}
+			if _, err := tx.Exec(ctx, `GRANT UPDATE (`+strings.Join(cols, ", ")+`) ON TABLE `+tbl+` TO `+role); err != nil {
+				return fmt.Errorf("glovo: grant column update on %s: %w", t, err)
 			}
 		}
 	}
@@ -189,6 +201,7 @@ type Store struct {
 	hook                       RevocationHook
 	purger                     EndPurger
 	purgerRequired             bool
+	lockTimeout                time.Duration
 	membershipRevoker          string
 
 	// test hooks

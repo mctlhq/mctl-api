@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "glovo.WriteError body",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["error", "error_description"],
+  "properties": {
+    "error": {"enum": ["not_ready","unavailable","not_authorized","invalid_request","not_found","no_install","ambiguous_tenant","no_tenant","scope_unsupported","not_in_pilot","stale_install","stale_version","no_connection","connection_exists","connection_revoked","connection_expired","invalid_transition","idempotency_key_reused","rate_limited","fingerprint_changed","approval_invalid","approval_expired","approval_replayed","intent_mismatch","basket_changed","tenant_busy"]},
+    "error_description": {"type": "string", "minLength": 1}
+  }
+}

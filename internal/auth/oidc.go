@@ -184,7 +184,8 @@ type User struct {
 	// Glovo-audience token; empty for every other credential.
 	teamGrantID    string
 	selectedTenant string
-	// glovoWorker is reserved and never set.
+	// glovoWorker is set only on the Glovo worker principal, built by
+	// NewGlovoWorkerUser from the test-only worker credential.
 	glovoWorker bool
 
 	// oauthClientID is the verified client_id claim of a local OAuth access
@@ -1056,6 +1057,7 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 	registryPublisher := registryPublisherToken()
 	supportProducer := supportIncidentProducerToken()
 	securityProviders := securityProviderTokens()
+	glovoWorker := glovoWorkerToken()
 	var cfg middlewareConfig
 	for _, o := range opts {
 		o(&cfg)
@@ -1064,7 +1066,7 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 	federationDisabled := federationKillSwitchOn(os.Getenv("MCTL_FEDERATION_DISABLED"))
 	registry := cfg.federationRegistry
 	if !federationDisabled && registry == nil {
-		registry = defaultFederationRegistry(validator, resolver, dex, oauth, surfaces, usageWriter, evidenceWriter, registryPublisher, supportProducer, securityProviders)
+		registry = defaultFederationRegistry(validator, resolver, dex, oauth, surfaces, usageWriter, evidenceWriter, registryPublisher, supportProducer, securityProviders, glovoWorker)
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -1149,6 +1151,8 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 					user = sip
 				} else if sp := securityProviderUserFor(securityProviders, token); sp != nil {
 					user = sp
+				} else if gw := glovoWorkerUserFor(glovoWorker, token); gw != nil {
+					user = gw
 				} else if isJWT(token) {
 					// Peek at the JWT issuer to route to the correct verifier.
 					if oauth != nil && jwtIssuer(token) == oauth.BaseURL {
@@ -1279,7 +1283,7 @@ func federationKillSwitchOn(v string) bool {
 // federation_config.go, with audience enforcement); this default is what
 // every existing caller of Middleware -- including every test in this
 // package -- exercises unchanged.
-func defaultFederationRegistry(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier, oauth *OAuthServer, surfaces map[string]string, usageWriter, evidenceWriter, registryPublisher, supportProducer string, securityProviders map[string]string) *Registry {
+func defaultFederationRegistry(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier, oauth *OAuthServer, surfaces map[string]string, usageWriter, evidenceWriter, registryPublisher, supportProducer string, securityProviders map[string]string, glovoWorker string) *Registry {
 	bridgeProviders := bridgeProviderTokens()
 	static := []Provider{
 		newServiceTokenProvider(func() string { return strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN")) }),
@@ -1290,6 +1294,7 @@ func defaultFederationRegistry(validator *GitHubValidator, resolver TenantResolv
 		newSupportIncidentProducerProvider(func() string { return supportProducer }),
 		newSecurityProviderProvider(func() map[string]string { return securityProviders }),
 		newBridgeProviderProvider(func() map[string]string { return bridgeProviders }),
+		newGlovoWorkerProvider(func() string { return glovoWorker }),
 	}
 	var jwtProviders []Provider
 	if oauth != nil && oauth.BaseURL != "" {
@@ -1361,6 +1366,8 @@ func userFromVerified(v *Verified) *User {
 		return NewUsageWriterUser()
 	case v.Identity.Provider == ProviderService && v.Identity.Subject == EvidenceWriterUserID:
 		return NewEvidenceWriterUser()
+	case v.Identity.Provider == ProviderService && v.Identity.Subject == GlovoWorkerUserID:
+		return NewGlovoWorkerUser()
 	case v.Identity.Provider == ProviderService && v.Identity.Subject == RegistryPublisherUserID:
 		return NewRegistryPublisherUser()
 	case v.Identity.Provider == ProviderService && v.Identity.Subject == SupportIncidentProducerUserID:
@@ -1554,11 +1561,5 @@ func (u *User) TeamGrant() (grantID, tenant string, ok bool) {
 	return u.teamGrantID, u.selectedTenant, true
 }
 
-// GlovoWorkerUserID is the reserved identity of the future Glovo worker. It
-// is not issued: nothing constructs a user for it, no env var or token maps
-// to it, so IsGlovoWorker is always false.
-const GlovoWorkerUserID = "service:mctl-glovo-worker"
-
-// IsGlovoWorker reports whether the caller is the Glovo worker. Reserved:
-// always false in this slice.
+// IsGlovoWorker reports whether the caller is the Glovo worker (glovo_worker.go).
 func (u *User) IsGlovoWorker() bool { return u != nil && u.glovoWorker }

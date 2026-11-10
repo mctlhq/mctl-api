@@ -401,30 +401,39 @@ func TestReadyOtherInputs(t *testing.T) {
 func TestReadyWithAnotherSlicesTable(t *testing.T) {
 	e := newEnv(t, WithEndPurgerRequired(true), WithEndPurger(func(context.Context, pgx.Tx, []string) error { return nil }))
 	ctx := context.Background()
-	// required table absent
+	mp := e.migPool()
+	// A table of this slice that is required and absent.
+	if _, err := mp.Exec(ctx, `ALTER TABLE glovo.glovo_handoff_refs RENAME TO glovo_handoff_refs_gone`); err != nil {
+		t.Fatal(err)
+	}
 	if r := e.store.Ready(ctx); r == nil || !strings.Contains(r.Error(), NotReadyTableMissing) {
 		t.Fatalf("want table_missing, got %v", r)
 	}
-	mp := e.migPool()
-	if _, err := mp.Exec(ctx, `CREATE TABLE glovo.glovo_handoff_refs (ref text PRIMARY KEY, consumed_at timestamptz)`); err != nil {
+	if _, err := mp.Exec(ctx, `ALTER TABLE glovo.glovo_handoff_refs_gone RENAME TO glovo_handoff_refs`); err != nil {
+		t.Fatal(err)
+	}
+	if r := e.store.Ready(ctx); r != nil {
+		t.Fatalf("slice tables present: %v", r)
+	}
+	if _, err := mp.Exec(ctx, `CREATE TABLE glovo.glovo_other_slice (ref text PRIMARY KEY, consumed_at timestamptz)`); err != nil {
 		t.Fatal(err)
 	}
 	if r := e.store.Ready(ctx); r == nil || !strings.Contains(r.Error(), NotReadyUnregistered) {
 		t.Fatalf("no registry row: %v", r)
 	}
-	RegisterGrants(GrantRow{Table: "glovo_handoff_refs", Privileges: []string{"SELECT", "INSERT", "DELETE"}, UpdateColumns: nil, Description: "test row"})
-	t.Cleanup(func() { unregisterGrant("glovo_handoff_refs") })
+	RegisterGrants(GrantRow{Table: "glovo_other_slice", Privileges: []string{"SELECT", "INSERT", "DELETE"}, UpdateColumns: nil, Description: "test row"})
+	t.Cleanup(func() { unregisterGrant("glovo_other_slice") })
 	// registered but not granted: missing rights
 	if r := e.store.Ready(ctx); r == nil || !strings.Contains(r.Error(), NotReadyGrants) {
 		t.Fatalf("missing rights: %v", r)
 	}
-	if _, err := mp.Exec(ctx, fmt.Sprintf(`GRANT SELECT, INSERT, DELETE ON glovo.glovo_handoff_refs TO %s`, e.rt)); err != nil {
+	if _, err := mp.Exec(ctx, fmt.Sprintf(`GRANT SELECT, INSERT, DELETE ON glovo.glovo_other_slice TO %s`, e.rt)); err != nil {
 		t.Fatal(err)
 	}
 	if r := e.store.Ready(ctx); r != nil {
 		t.Fatalf("granted as registered: %v", r)
 	}
-	if _, err := mp.Exec(ctx, fmt.Sprintf(`GRANT UPDATE ON glovo.glovo_handoff_refs TO %s`, e.rt)); err != nil {
+	if _, err := mp.Exec(ctx, fmt.Sprintf(`GRANT UPDATE ON glovo.glovo_other_slice TO %s`, e.rt)); err != nil {
 		t.Fatal(err)
 	}
 	if r := e.store.Ready(ctx); r == nil || !strings.Contains(r.Error(), NotReadyGrants) {
@@ -441,7 +450,7 @@ func unregisterGrant(table string) {
 func TestApplySchemaGrantsMatchRegistry(t *testing.T) {
 	e := newEnv(t)
 	c := e.adminConn()
-	for _, tb := range slice959Tables {
+	for _, tb := range append(append([]string(nil), slice959Tables...), slice961Tables...) {
 		row, _ := grantFor(tb)
 		for _, p := range knownPrivilegeList() {
 			var has bool

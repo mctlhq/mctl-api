@@ -16,7 +16,7 @@ package glovo
 
 // schemaVersion is the version recorded in glovo.glovo_schema_version. NewStore
 // fails closed on any other value.
-const schemaVersion = 1
+const schemaVersion = 2
 
 // glovoSchema is the DDL of every glovo_* table of this slice, in schema
 // glovo. It is idempotent and is run only by ApplySchema, under the migration

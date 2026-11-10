@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "glovo-connection/v1alpha1.WorkerCheckResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "allowed", "tenant", "owner_principal_id", "state"],
+  "properties": {
+    "schema": {"const": "glovo-connection/v1alpha1.WorkerCheckResponse"},
+    "allowed": {"type": "boolean"},
+    "tenant": {"type": "string", "minLength": 1},
+    "owner_principal_id": {"type": "string", "pattern": "^prn_"},
+    "state": {"enum": ["pending", "active", "expired", "failed", "revoked"]},
+    "expires_at": {"type": "string", "format": "date-time"}
+  }
+}
