@@ -448,6 +448,114 @@ func TestScopeAndReadRefTables(t *testing.T) {
 	mustExec(t, e.rp, `DELETE FROM glovo.join_read_refs WHERE expires_at < now()`)
 }
 
+// TestPreviewNullBasketHasNoFingerprint: sha256(NULL) is NULL, so a CHECK
+// that only compares the fingerprint accepts a NULL basket with any
+// fingerprint (a CHECK that evaluates to NULL passes). An empty preview has
+// no basket and no fingerprint, and nothing else.
+func TestPreviewNullBasketHasNoFingerprint(t *testing.T) {
+	e := newEnv(t)
+	ins := `INSERT INTO glovo.join_previews (id, tenant, principal_id, connection_id, install_id, install_revision, approval_basket, fingerprint, payload_hash, created_at, expires_at)
+ VALUES ($1, 't', 'p', 'c', 'i', 1, $2, $3, 'h', now(), now() + interval '1 minute')`
+	if _, err := e.rp.Exec(context.Background(), ins, "gpv_"+randHex(11), nil, "sha256:"+strings.Repeat("1", 64)); err == nil {
+		t.Fatal("a NULL basket with a fingerprint was accepted")
+	}
+	if _, err := e.rp.Exec(context.Background(), ins, "gpv_"+randHex(11), nil, "x"); err == nil {
+		t.Fatal("a NULL basket with a non-hash fingerprint was accepted")
+	}
+	mustExec(t, e.rp, ins, "gpv_"+randHex(11), nil, "")
+}
+
+// TestCheckColumnsAreNotNull sweeps the NULL class: a CHECK over a nullable
+// column evaluates to NULL for a NULL operand and the row is accepted. Every
+// column a CHECK of these tables reads is NOT NULL, except the two that are
+// nullable by design and whose checks are written for NULL on purpose.
+func TestCheckColumnsAreNotNull(t *testing.T) {
+	e := newEnv(t)
+	rows, err := e.rp.Query(context.Background(), `
+SELECT DISTINCT c.relname || '.' || a.attname
+  FROM pg_constraint k
+  JOIN pg_class c ON c.oid = k.conrelid
+  JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'glovo'
+  JOIN LATERAL unnest(k.conkey) AS col(attnum) ON true
+  JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = col.attnum
+ WHERE k.contype = 'c' AND c.relname = ANY($1) AND NOT a.attnotnull
+ ORDER BY 1`, joinTables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	deliberate := map[string]bool{
+		"join_previews.approval_basket":    true, // NULL is the empty preview; paired with fingerprint = ''
+		"join_previews.consumed_order_ref": true, // NULL is the unclaimed preview
+	}
+	for rows.Next() {
+		var col string
+		if err := rows.Scan(&col); err != nil {
+			t.Fatal(err)
+		}
+		if !deliberate[col] {
+			t.Errorf("a CHECK reads the nullable column %s: a NULL operand makes it pass", col)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPreviewClaimIsWriteOnce: the runtime role holds UPDATE on
+// consumed_order_ref, so the database itself must refuse to clear or rewrite
+// a set claim; otherwise a consumed preview could be claimed again.
+func TestPreviewClaimIsWriteOnce(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	id := "gpv_" + randHex(11)
+	mustExec(t, e.rp, `INSERT INTO glovo.join_previews (id, tenant, principal_id, connection_id, install_id, install_revision, payload_hash, created_at, expires_at)
+ VALUES ($1, 't', 'p', 'c', 'i', 1, 'h', now(), now() + interval '1 minute')`, id)
+	mustExec(t, e.rp, `UPDATE glovo.join_previews SET consumed_order_ref = $2 WHERE id = $1`, id, orderRefA)
+	for name, sql := range map[string]string{
+		"cleared":   `UPDATE glovo.join_previews SET consumed_order_ref = NULL WHERE id = $1`,
+		"rewritten": `UPDATE glovo.join_previews SET consumed_order_ref = '` + orderRefB + `' WHERE id = $1`,
+	} {
+		if _, err := e.rp.Exec(ctx, sql, id); err == nil {
+			t.Errorf("the claim was %s", name)
+		}
+	}
+	// writing the same value again is a no-op, not a change
+	mustExec(t, e.rp, `UPDATE glovo.join_previews SET consumed_order_ref = $2 WHERE id = $1`, id, orderRefA)
+	var got string
+	if err := e.rp.QueryRow(ctx, `SELECT consumed_order_ref FROM glovo.join_previews WHERE id = $1`, id).Scan(&got); err != nil || got != orderRefA {
+		t.Fatalf("claim = %q, %v", got, err)
+	}
+}
+
+// TestApplySchemaRevokesDriftedGrants: a re-run converges the grants back to
+// the registered rows. An extra table-level right and an extra column right
+// that someone granted by hand are removed.
+func TestApplySchemaRevokesDriftedGrants(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	mustExec(t, e.mp, `GRANT DELETE ON glovo.control_starts TO `+e.rt)
+	mustExec(t, e.mp, `GRANT UPDATE (input) ON glovo.control_starts TO `+e.rt)
+	mustExec(t, e.mp, `GRANT TRUNCATE ON glovo.join_previews TO `+e.rt)
+	var drifted bool
+	if err := e.rp.QueryRow(ctx, `SELECT has_table_privilege(current_user, 'glovo.control_starts', 'DELETE') AND has_column_privilege(current_user, 'glovo.control_starts', 'input', 'UPDATE')`).Scan(&drifted); err != nil || !drifted {
+		t.Fatalf("the drift was not set up: %v %v", drifted, err)
+	}
+	if err := ApplySchema(ctx, e.migURL, e.rt); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`SELECT has_table_privilege(current_user, 'glovo.control_starts', 'DELETE')`,
+		`SELECT has_column_privilege(current_user, 'glovo.control_starts', 'input', 'UPDATE')`,
+		`SELECT has_table_privilege(current_user, 'glovo.join_previews', 'TRUNCATE')`,
+	} {
+		var still bool
+		if err := e.rp.QueryRow(ctx, q).Scan(&still); err != nil || still {
+			t.Errorf("%s = %v, %v after a re-run", q, still, err)
+		}
+	}
+}
+
 // TestNoControlImport: go list -deps of this package lists no
 // internal/glovo/control (the control package imports this one, never the
 // reverse; #957 task A14, round 6 G3).

@@ -45,10 +45,31 @@ CREATE TABLE IF NOT EXISTS glovo.join_previews (
   consumed_order_ref TEXT CHECK (consumed_order_ref ~ '^ordr_[A-Za-z0-9]{16,40}$'),
   CHECK (expires_at > created_at AND expires_at <= created_at + interval '15 minutes'),
   CHECK ((approval_basket IS NULL AND fingerprint = '')
-      OR fingerprint = 'sha256:' || encode(sha256(approval_basket), 'hex')));
+      OR (approval_basket IS NOT NULL AND fingerprint = 'sha256:' || encode(sha256(approval_basket), 'hex'))));
 CREATE UNIQUE INDEX IF NOT EXISTS join_previews_consumed
   ON glovo.join_previews (consumed_order_ref) WHERE consumed_order_ref IS NOT NULL;
 CREATE INDEX IF NOT EXISTS join_previews_expires ON glovo.join_previews (expires_at);
+
+-- The single-use claim is write-once: the runtime role holds UPDATE on this
+-- column (design 6d.1), so without the guard it could set it back to NULL or
+-- rewrite it and reopen a consumed preview. Run as the invoker; not SECURITY DEFINER.
+CREATE OR REPLACE FUNCTION glovo.join_previews_claim_once() RETURNS trigger
+LANGUAGE plpgsql AS $f$
+BEGIN
+  IF OLD.consumed_order_ref IS NOT NULL AND NEW.consumed_order_ref IS DISTINCT FROM OLD.consumed_order_ref THEN
+    RAISE EXCEPTION 'a consumed preview claim is write-once' USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+  RETURN NEW;
+END
+$f$;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'join_previews_claim_once'
+                  AND tgrelid = 'glovo.join_previews'::regclass) THEN
+    CREATE TRIGGER join_previews_claim_once BEFORE UPDATE ON glovo.join_previews
+      FOR EACH ROW EXECUTE FUNCTION glovo.join_previews_claim_once();
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS glovo.join_scope_refs (
   ref_hash TEXT PRIMARY KEY CHECK (ref_hash ~ '^[0-9a-f]{64}$'),
@@ -162,11 +183,6 @@ func ApplySchema(ctx context.Context, migrationConnStr, runtimeRole string) erro
 	if _, err := tx.Exec(ctx, joinSchema); err != nil {
 		return fmt.Errorf("glovo join: apply schema: %w", err)
 	}
-	// IF NOT EXISTS must not have adopted a foreign object.
-	if err := checkOwnership(ctx, tx); err != nil {
-		return err
-	}
-
 	role := pgx.Identifier{runtimeRole}.Sanitize()
 	if _, err := tx.Exec(ctx, `GRANT USAGE ON SCHEMA glovo TO `+role); err != nil {
 		return fmt.Errorf("glovo join: grant schema usage: %w", err)

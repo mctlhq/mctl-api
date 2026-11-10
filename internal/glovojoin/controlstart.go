@@ -17,6 +17,7 @@ package glovojoin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 
 	"github.com/jackc/pgx/v5"
@@ -45,6 +46,8 @@ func ControlStartTx(ctx context.Context, q dbq.Querier, orderRef string) (workfl
 	case errors.Is(err, pgx.ErrNoRows):
 		return "", "", glovo.Refuse(glovo.CodeNotFound)
 	default:
-		return "", "", glovo.Refuse(glovo.CodeUnavailable)
+		// errors.Is on the unavailable code stays true, and the cause stays
+		// reachable for logs and errors.Is/As by the caller.
+		return "", "", fmt.Errorf("glovojoin: read control start: %w: %w", glovo.Refuse(glovo.CodeUnavailable), err)
 	}
 }

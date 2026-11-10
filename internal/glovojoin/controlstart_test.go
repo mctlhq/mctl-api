@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/mctlhq/mctl-api/internal/glovo"
 )
 
@@ -75,13 +77,23 @@ func TestControlStartTxFailedReadIsUnavailable(t *testing.T) {
 	ctx := context.Background()
 	e.insertStart(orderRefA)
 	mustExec(t, e.mp, `DROP TABLE glovo.control_starts`)
-	if _, _, err := ControlStartTx(ctx, e.rp, orderRefA); !errors.Is(err, glovo.Refuse(glovo.CodeUnavailable)) {
+	_, _, err := ControlStartTx(ctx, e.rp, orderRefA)
+	if !errors.Is(err, glovo.Refuse(glovo.CodeUnavailable)) {
 		t.Fatalf("a missing table = %v", err)
+	}
+	// the cause is wrapped, not dropped: the undefined-table error is reachable
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "42P01" {
+		t.Fatalf("the cause of the failed read is not wrapped: %v", err)
+	}
+	if errors.Is(err, glovo.Refuse(glovo.CodeNotFound)) {
+		t.Fatal("a failed read also matches not_found")
 	}
 	cctx, cancel := context.WithTimeout(ctx, time.Nanosecond)
 	defer cancel()
 	time.Sleep(time.Millisecond)
-	if _, _, err := ControlStartTx(cctx, e.rp, orderRefA); !errors.Is(err, glovo.Refuse(glovo.CodeUnavailable)) {
+	_, _, err = ControlStartTx(cctx, e.rp, orderRefA)
+	if !errors.Is(err, glovo.Refuse(glovo.CodeUnavailable)) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("an expired context = %v", err)
 	}
 }
