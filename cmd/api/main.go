@@ -337,13 +337,14 @@ func main() {
 	// here runs and every OAuth flow is unchanged; set without its
 	// dependencies, the boot is refused.
 	var glovoStore *glovo.Store
+	var glovoRoutes *mctlapi.GlovoRoutes
 	{
 		var pgRefresh *refreshstore.PostgresStore
 		if oauthServer != nil {
 			pgRefresh, _ = oauthServer.RefreshStore.(*refreshstore.PostgresStore)
 		}
 		var err error
-		glovoStore, err = configureGlovoTeamGrants(initCtx, glovoTeamGrantDeps{
+		glovoStore, glovoRoutes, err = configureGlovoTeamGrants(initCtx, glovoTeamGrantDeps{
 			OAuth: oauthServer, RefreshStore: pgRefresh, Membership: gitReader,
 			ExplicitOAuthDB: os.Getenv("OAUTH_DB_URL") != "",
 		}, os.LookupEnv)
@@ -352,6 +353,27 @@ func main() {
 			stopSignals()
 			os.Exit(1)
 		}
+	}
+
+	// Cleanup of the handoff, counter and idempotency tables; it exists only
+	// while GLOVO_ENABLED=true (the store is nil otherwise).
+	if glovoStore != nil {
+		go func() {
+			t := time.NewTicker(5 * time.Minute)
+			defer t.Stop()
+			for {
+				select {
+				case <-rootCtx.Done():
+					return
+				case <-t.C:
+					ctx, cancel := context.WithTimeout(rootCtx, 30*time.Second)
+					if _, err := glovoStore.Sweep(ctx, 500); err != nil {
+						slog.Warn("glovo sweep failed", "error", err)
+					}
+					cancel()
+				}
+			}
+		}()
 	}
 
 	// Canonical principals, phase 1 (mctl-api#373). The store shares the
@@ -1406,6 +1428,7 @@ func main() {
 		LegacyApproverDisabled:         cfg.legacyApproverDisabled(),
 		PrincipalMembership:            gitReader,
 		GlovoAllowlist:                 glovoAllowlist(glovoStore),
+		Glovo:                          glovoRoutes,
 		AdminPrincipals:                cfg.adminPrincipals(),
 		RequireRegisteredPolicy:        cfg.requireRegisteredPolicy(),
 		Clock:                          approvalClock,

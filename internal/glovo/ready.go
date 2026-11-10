@@ -155,8 +155,12 @@ SELECT (SELECT count(*) FROM pg_namespace WHERE nspname = 'glovo' AND pg_get_use
 			return notReady(NotReadyTableMissing)
 		}
 	}
-	if s.purgerRequired && !present["glovo_handoff_refs"] {
-		return notReady(NotReadyTableMissing)
+	if s.purgerRequired {
+		for _, name := range slice961Tables {
+			if !present[name] {
+				return notReady(NotReadyTableMissing)
+			}
+		}
 	}
 	for _, t := range tables {
 		row, ok := grantFor(t.name)

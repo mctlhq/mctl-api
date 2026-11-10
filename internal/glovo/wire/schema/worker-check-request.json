@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "glovo-connection/v1alpha1.WorkerCheckRequest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "connection_id", "install_revision"],
+  "properties": {
+    "schema": {"const": "glovo-connection/v1alpha1.WorkerCheckRequest"},
+    "connection_id": {"type": "string", "pattern": "^gcn_[0-9A-Z]{26}$"},
+    "install_revision": {"type": "integer", "minimum": 1}
+  }
+}

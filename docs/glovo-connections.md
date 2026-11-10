@@ -13,10 +13,10 @@ reference id.
 
 ## Non-goals of this slice
 
-- No route, MCP tool or `cmd/api/main.go` wiring: the store is not
-  constructed at startup, so no production database receives the schema.
-- No OAuth audience, grant or team selection (#958, #960), no handlers or
-  worker scope checks (#961).
+- No route, MCP tool or `cmd/api/main.go` wiring in slice 2 itself: the HTTP
+  routes, the worker identity and the wiring are slice 4 (#961, see "Synthetic
+  connection routes" below).
+- No OAuth audience, grant or team selection (#958, #960).
 - No real provider access, secret backend or KMS. `SecretRefs` has only a
   refusing implementation.
 - No audit deletion API (see Retention).
@@ -139,8 +139,10 @@ schema and exactly the rows registered with `glovo.RegisterGrants` (checked in
 glovo.glovo_audit_events: INSERT,SELECT
 glovo.glovo_connect_requests: DELETE,INSERT,SELECT,UPDATE
 glovo.glovo_connections: INSERT,SELECT,UPDATE
+glovo.glovo_handoff_refs: DELETE,INSERT,SELECT UPDATE(consumed_at)
 glovo.glovo_installs: INSERT,SELECT,UPDATE
 glovo.glovo_pilot_allowlist: DELETE,INSERT,SELECT
+glovo.glovo_rate_counters: DELETE,INSERT,SELECT UPDATE(count,updated_at)
 glovo.glovo_schema_version: SELECT
 ```
 
@@ -186,8 +188,8 @@ the code and its fixed description only: no identifier, no owner data.
 
 ## Kill switch
 
-`GLOVO_ENABLED`, default `false`, read once in `cmd/api/main.go` by the wiring
-slice. Nothing in this slice reads it.
+`GLOVO_ENABLED`, default `false`, read once in `cmd/api/main.go` (introduced by
+#960, reused by #961). Nothing in `internal/glovo` itself reads it.
 
 ## Retention
 
@@ -226,6 +228,8 @@ DROP TRIGGER glovo_connections_no_delete ON glovo.glovo_connections;
 DROP TRIGGER glovo_connections_no_truncate ON glovo.glovo_connections;
 DROP FUNCTION glovo.glovo_audit_immutable();
 DROP FUNCTION glovo.glovo_connections_no_delete();
+DROP TABLE glovo.glovo_handoff_refs;
+DROP TABLE glovo.glovo_rate_counters;
 DROP TABLE glovo.glovo_connect_requests;
 DROP TABLE glovo.glovo_audit_events;
 DROP TABLE glovo.glovo_connections;
@@ -234,3 +238,179 @@ DROP TABLE glovo.glovo_pilot_allowlist;
 DROP TABLE glovo.glovo_schema_version;
 -- drop schema glovo only when no other slice's table remains in it
 ```
+
+# Synthetic connection routes (M1a slice 4, mctl-api#961)
+
+Default OFF. With `GLOVO_ENABLED` unset every `/api/v1/glovo/facade/*`,
+`/api/v1/glovo/tenants/*` and `/api/v1/glovo/worker/*` route answers `503
+not_ready` before the body is read, and token issuance and verification are
+unchanged. The only provider is `synthetic`: no cookie, consumer credential or
+Glovo HTTP call exists. **Integration is NOT READY** until the canonical
+facade join API (mctl-api#957) and the public facade (mctl-telegram#1235) are
+merged; this slice only keeps its schemas and refusal codes compatible with
+them. The approval of parent #953 does not authorize this slice.
+
+## Prerequisite mapping (task 0)
+
+| Joint-contract name | Where it is in the code |
+|---|---|
+| Glovo audience, `IsGlovoAudience`, `glovoAudienceGate` (#958) | `internal/auth`, `internal/api/glovo_audience_gate.go` |
+| store, states, refusal enum, `Status`, `WriteError` (#959) | `internal/glovo` |
+| `ActivateTx`, `ConnectInput.AfterLocks`, `TerminalOnly`, `AppendRefusal`, `Ready`, `GetConnectionForWorker`, `WithEndPurger`, `WithEndPurgerRequired`, `EndPurgerInstalled`, `expectedGrants` (#959) | `internal/glovo/connection.go`, `store.go`, `ready.go`, `grants.go` |
+| `GLOVO_ENABLED`, `scope.Resolver`, team grant, allowlist routes (#960) | `cmd/api/glovo_team_grant.go`, `internal/glovo/scope` |
+| `IsGlovoWorker`, `glovoWorkerGate` | built here: `internal/auth/glovo_worker.go`, `internal/api/handlers_glovo.go` |
+
+## Routes
+
+| Route | Caller | Effect |
+|---|---|---|
+| `GET /api/v1/glovo/facade/context` | Glovo-audience token | team, installation, the caller's recent connections |
+| `POST /api/v1/glovo/facade/connections` | same, `Idempotency-Key` | 201 `pending`, or 200 `replayed:true` |
+| `GET /api/v1/glovo/facade/connections/{id}` | same | owner-scoped read; foreign and missing ids are the same 404 |
+| `POST .../connections/{id}/handoff` | same | issues `ghr_` + 32 random bytes (hex), only the SHA-256 is stored, TTL 10 min, single use; the connection stays `pending_handoff` |
+| `POST .../connections/{id}/revoke` | same | `revoked`, idempotent |
+| `POST .../connections/{id}/reconnect` | same, `Idempotency-Key` | new `gcn_` with `supersedes_id`; a live prior is `connection_exists` |
+| `PUT /api/v1/glovo/tenants/{tenant}/installation` | tenant owner (strict) | install (201) or reinstall (200): revision +1, older live connections revoked in one transaction |
+| `DELETE /api/v1/glovo/tenants/{tenant}/installation` | tenant owner (strict) | uninstall, all live connections revoked |
+| `POST /api/v1/glovo/worker/check` | worker | `{allowed, tenant, owner_principal_id, state, expires_at}` |
+| `POST /api/v1/glovo/worker/connections/{id}/activate` | worker | consumes the handoff reference and activates, atomically |
+| `POST /api/v1/glovo/worker/connections/{id}/expire` | worker | synthetic, drives the expiry path |
+
+The pilot allowlist routes (`/api/v1/glovo/pilot/...`) are #960's and are not
+behind this feature gate.
+
+Facade handlers resolve the scope with `scope.Resolver` (selected-team grant,
+live membership, allowlist) and take tenant, principal and install revision
+only from it and the store. The installation routes use `requireGlovoTenantOwner`:
+the principal-mode role must be `owner`; `roleGate` is never consulted, so a
+platform admin who is not an owner is refused and an owner who is an admin is
+judged by the owner role alone.
+
+The worker identity is `service:mctl-glovo-worker`, built by
+`auth.NewGlovoWorkerUser` only when `MCTL_GLOVO_WORKER_TOKEN_FILE` names a
+readable file holding a credential of at least 32 characters that equals no
+other principal's token. The credential is test-only until the issuer decision
+(mctl-gitops#2506, #2540); no production credential is issued by this change.
+`glovoWorkerGate` confines the worker to `POST /api/v1/glovo/worker/*` (403
+everywhere else: facade, `/mcp`, DevLoop, bridge, installation, `whoami`); each
+worker handler also requires `IsGlovoWorker()`. An admin, the service token, a
+bridge provider, a support-audience token and a Glovo-audience token are
+refused on the worker routes, and the bridge provider is refused on every
+`/api/v1/glovo/*` route.
+
+Every worker handler starts with the one by-id read without an owner predicate
+(`WorkerConnectionView`, the lapsed-aware form of `GetConnectionForWorker`),
+takes the write-once Owner and the version from it, and passes them to the
+locked primitives (`ActivateTx`, `Transition`), which re-check under L1 and L2.
+`check` re-derives install state and revision, the owner's live role, the
+allowlist row and the connection's state and expiry on every call.
+
+## Wire types and schemas
+
+`internal/glovo/wire`: one struct per body with a mandatory `schema` constant
+(`glovo-connection/v1alpha1.<Type>`), a decoder (16 KiB, no unknown field, no
+trailing data, exact schema; any failure is `400 invalid_request`) and the
+public state (`pending_handoff` and `pending_provider` are `pending`). JSON
+Schemas are committed in `internal/glovo/wire/schema/` and may be vendored by
+#957 and mctl-telegram#1235. Refusals are `glovo.WriteError` bodies
+(`{error, error_description}`, no `schema` field; `schema/error.json`).
+
+## Handoff, quota and the connect service
+
+Tables (created by `ApplySchema` under the migration role, schema version 2):
+`glovo_handoff_refs` (hash-only, single use, TTL) and `glovo_rate_counters`
+(`owner_hour` windows and one `tenant_mutex` row per tenant).
+
+Lock order: connect and reconnect take L1 shared, L2 exclusive, then **L2a**
+(the `tenant_mutex` row, created by `INSERT ... ON CONFLICT DO NOTHING` with
+`window_start = 'epoch'`, then `FOR UPDATE`); activate takes L1 shared, L2
+exclusive, then **L2b** (the `glovo_handoff_refs` row `FOR UPDATE`). Limits
+(`ConnectLimits`): 10 connects or reconnects per hour per owner, and 50 live
+connections per tenant (state not terminal and `expires_at` null or in the
+future, database clock), counted after L2a is held. A refusal rolls the whole
+connect back, so no counter moves; a replay returns before `AfterLocks` and
+moves nothing. A `lock_timeout` (SQLSTATE `55P03`) on these locks is
+`tenant_busy`; any other store failure is `unavailable`.
+
+`ActivateWithHandoff` runs `ActivateTx` with an `AfterLocks` that consumes the
+reference. State, revision and version checks come first, so a revoked or
+expired connection reports its own code; an unknown, foreign, expired or
+already-consumed reference is one `not_found` and commits nothing. The
+`EndPurger` (`PurgeHandoffRefs`) deletes a connection's unconsumed references
+whenever it ends. `Sweep(ctx, limit)` (a ticker that exists only while
+`GLOVO_ENABLED=true`) deletes expired references, stale `owner_hour` windows
+and 24 h old idempotency rows; it never deletes `tenant_mutex` rows.
+
+`internal/glovo/connect.Service` is the one connect path, used by the facade
+connect route and, later, by #957's `glovojoin.Connections` adapter. The
+`handoff_url` is `GLOVO_SYNTHETIC_HANDOFF_BASE_URL` + `/` + the raw reference
+(unset: `not_ready`, never an invented URL). A connection that is live in
+storage but past `expires_at` is ended through `Reconnect` with `TerminalOnly`
+before the new row is inserted.
+
+`NewStore` is wired with a no-op revocation hook (the synthetic provider holds
+no secret to release), `WithEndPurger(PurgeHandoffRefs)` and
+`WithEndPurgerRequired(true)`. `glovoReady` requires `GLOVO_ENABLED`, the store,
+`store.Ready()` nil, `EndPurgerInstalled()`, the Glovo resource, the resolver
+and a configured worker credential.
+
+## Refusals of handoff and activate
+
+| Case | Code |
+|---|---|
+| unknown, foreign or never-existing connection; wrong, foreign, expired or consumed reference | `not_found` (one body) |
+| connection not `pending_handoff` (`pending_provider` or `active`) | `invalid_transition` |
+| revoked | `connection_revoked` |
+| expired, or `expires_at` passed | `connection_expired` |
+| failed | `no_connection` |
+| install revision differs | `stale_install` |
+| version changed under the locks | `stale_version` (nothing committed) |
+| lock timeout | `tenant_busy` |
+| any other failure | `unavailable` |
+
+Refusals on a mutating route that name an existing install or connection are
+appended to the audit table with `AppendRefusal`. Refusals that arrive before
+any entity exists (`ambiguous_tenant`, `scope_unsupported`, `no_tenant`,
+`not_in_pilot`, `no_install`, `rate_limited`) are logged with ids and codes and
+counted in `mctl_glovo_route_refusals_total` only.
+
+## Test matrix
+
+`go test ./internal/api -run GlovoE2E` with `TEST_DATABASE_URL`
+(`internal/api/glovo_e2e_*_test.go`): the real `NewRouter`, the real auth
+middleware for Glovo-audience tokens minted through the real consent and token
+endpoints with a selected team, the real worker credential, and the real store
+on a per-test database with its own migration and runtime roles. Fixtures:
+tenants `alpha` and `beta`, users `a1` and `a2` in `alpha`, `b1` in `beta`,
+`u3` eligible but unselected.
+
+| Test | Covers |
+|---|---|
+| `FeatureOffEveryRoute` | T1: `chi.Walk` over every glovo route, 503 `not_ready` |
+| `HappyPath` | T2 |
+| `Isolation` | T3: foreign and missing ids give byte-identical 404 on every id route |
+| `FailClosed` | T4: no grant, unselected, system tenant, role and allowlist removed, forged body fields and headers, wrong and multi audience |
+| `AuditNoLeakAndSchemas` | T5, T9: audit rows, refusal audit, secret scan of logs, audit rows and responses, schema validation |
+| `Lifecycle`, `HandoffRefusalTable` | T6 |
+| `IdempotencyAndLimits`, `TenantLimitRace`, `Races` | T7 (the race test holds both replicas between count and insert; it goes red with the L2a lock removed) |
+| `IdentityConfinement`, `InstallationOwnerOnly` | T8, F1 |
+| `Readiness` | T11 |
+| `JoinPath` | T12 |
+| `WorkerOwnerPath` | T13 |
+
+## Anti-regression list
+
+- A Glovo-audience token reaches only the facade routes (`glovoAudienceRoutes`).
+- The worker reaches only `POST /api/v1/glovo/worker/*`; no admin, service,
+  bridge or support credential is a substitute.
+- No handler reads `glovo_connections` with SQL; the owner-less read is only in
+  `handlers_glovo_worker.go`.
+- A forged tenant, owner or install revision in a body is `400`; a selected-team
+  header is ignored; there is no `labs` fallback.
+- No MCP tool is added or changed.
+
+## Rollback
+
+`GLOVO_ENABLED` unset returns every route to `503 not_ready`. For a code
+rollback revert the PR. `glovo_handoff_refs` and `glovo_rate_counters` hold
+synthetic data only and can stay, or be dropped by the migration role once empty.

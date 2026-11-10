@@ -24,12 +24,17 @@ import (
 )
 
 // glovoAudienceRoutes are the only requests a Glovo-audience access token
-// may make. Empty in this slice: the token is refused on every route of the
-// authenticated group, /mcp included.
+// may make: the facade routes of the synthetic connections (mctl-api#961).
+// Every other route of the authenticated group, /mcp included, is refused.
 var glovoAudienceRoutes = []struct {
 	method string
 	path   *regexp.Regexp
-}{}
+}{
+	{http.MethodGet, regexp.MustCompile(`^/api/v1/glovo/facade/context$`)},
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/glovo/facade/connections$`)},
+	{http.MethodGet, regexp.MustCompile(`^/api/v1/glovo/facade/connections/[^/]+$`)},
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/glovo/facade/connections/[^/]+/(handoff|revoke|reconnect)$`)},
+}
 
 var glovoAudienceRefusals = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "mctl_glovo_audience_refusals_total",

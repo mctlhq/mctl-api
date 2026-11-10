@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "glovo-connection/v1alpha1.Handoff",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "connection_id", "handoff_ref", "expires_at"],
+  "properties": {
+    "schema": {"const": "glovo-connection/v1alpha1.Handoff"},
+    "connection_id": {"type": "string", "pattern": "^gcn_[0-9A-Z]{26}$"},
+    "handoff_ref": {"type": "string", "pattern": "^ghr_[0-9a-f]{64}$"},
+    "expires_at": {"type": "string", "format": "date-time"}
+  }
+}
