@@ -107,6 +107,28 @@ func (s *Service) input(sc JoinScope, key string) glovo.ConnectInput {
 // single-use handoff reference; the raw value is never stored, so a replay
 // returns a fresh one and the older one no longer activates.
 func (s *Service) Connect(ctx context.Context, sc JoinScope, idempotencyKey string) (*ConnectOutcome, error) {
+	out, err := s.ConnectWithoutHandoff(ctx, sc, idempotencyKey)
+	if err != nil {
+		return nil, err
+	}
+	in := s.input(sc, idempotencyKey)
+	issue, err := s.Store.IssueHandoff(ctx, in.Owner, out.Connection.ConnectionID, in.Actor)
+	if err != nil {
+		if code, typed := codeOf(err); typed && out.Replayed && code != glovo.CodeNotFound {
+			return out, nil
+		}
+		return nil, err
+	}
+	out.HandoffURL = strings.TrimRight(strings.TrimSpace(s.HandoffBaseURL), "/") + "/" + issue.Ref
+	out.HandoffExpiresAt = issue.ExpiresAt
+	return out, nil
+}
+
+// ConnectWithoutHandoff is Connect without issuing a handoff reference. The
+// facade uses it: its response carries no reference, so issuing one would
+// delete a previously issued unconsumed reference on an idempotent retry and
+// discard the new one. The facade /handoff route issues the reference.
+func (s *Service) ConnectWithoutHandoff(ctx context.Context, sc JoinScope, idempotencyKey string) (*ConnectOutcome, error) {
 	if err := s.ready(); err != nil {
 		return nil, err
 	}
@@ -127,17 +149,7 @@ func (s *Service) Connect(ctx context.Context, sc JoinScope, idempotencyKey stri
 	if err != nil {
 		return nil, err
 	}
-	out := &ConnectOutcome{Connection: res.Connection, Replayed: res.Replayed}
-	issue, err := s.Store.IssueHandoff(ctx, in.Owner, res.Connection.ConnectionID, in.Actor)
-	if err != nil {
-		if code, typed := codeOf(err); typed && res.Replayed && code != glovo.CodeNotFound {
-			return out, nil
-		}
-		return nil, err
-	}
-	out.HandoffURL = strings.TrimRight(strings.TrimSpace(s.HandoffBaseURL), "/") + "/" + issue.Ref
-	out.HandoffExpiresAt = issue.ExpiresAt
-	return out, nil
+	return &ConnectOutcome{Connection: res.Connection, Replayed: res.Replayed}, nil
 }
 
 // Reconnect creates a new connection that supersedes a terminal prior of the

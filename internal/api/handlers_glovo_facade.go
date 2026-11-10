@@ -31,8 +31,6 @@ import (
 // the selected-team grant (scope.Resolver); tenant, principal and install
 // revision come only from that scope and the store, never from the request.
 
-const glovoMaxIdempotencyKey = 200
-
 var idempotencyKeyRE = regexp.MustCompile(`^[\x21-\x7e]{1,200}$`)
 
 type glovoFacadeCall struct {
@@ -120,7 +118,7 @@ func (h *Handlers) GlovoFacadeConnect(w http.ResponseWriter, r *http.Request) {
 		glovoRefuse(w, call.route, err)
 		return
 	}
-	out, err := rt.Connect.Connect(r.Context(), call.joinScope(inst.InstallRevision), key)
+	out, err := rt.Connect.ConnectWithoutHandoff(r.Context(), call.joinScope(inst.InstallRevision), key)
 	if err != nil {
 		ge := glovoRefuse(w, call.route, err)
 		switch ge.Code {

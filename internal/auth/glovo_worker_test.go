@@ -20,6 +20,7 @@ import (
 	"testing"
 )
 
+//nolint:gosec // G101: synthetic test-only token, not a credential
 const glovoWorkerToken32 = "glovo-worker-token-0123456789abcdef"
 
 func writeWorkerToken(t *testing.T, content string) {

@@ -39,7 +39,7 @@ func (h *Handlers) requireGlovoTenantOwner(w http.ResponseWriter, r *http.Reques
 		return glovo.Actor{}, false
 	}
 	deny := func(c glovo.Code) (glovo.Actor, bool) {
-		glovoRefuse(w, route, glovo.Refuse(c), "tenant", tenant)
+		_ = glovoRefuse(w, route, glovo.Refuse(c), "tenant", tenant)
 		return glovo.Actor{}, false
 	}
 	id, human := user.Identity()
@@ -58,7 +58,7 @@ func (h *Handlers) requireGlovoTenantOwner(w http.ResponseWriter, r *http.Reques
 	}
 	roles, err := h.opts.PrincipalMembership.MemberRolesForPrincipal(tenant, prn)
 	if err != nil {
-		glovoRefuse(w, route, err, "tenant", tenant)
+		_ = glovoRefuse(w, route, err, "tenant", tenant)
 		return glovo.Actor{}, false
 	}
 	role, known := operations.EffectiveTenantRole(roles)
@@ -88,19 +88,19 @@ func (h *Handlers) GlovoInstallationPut(w http.ResponseWriter, r *http.Request) 
 	}
 	var body wire.InstallationRequest
 	if e := wire.Decode(w, r, &body, wire.SchemaInstallationReq, true); e != nil {
-		glovoRefuse(w, route, e)
+		_ = glovoRefuse(w, route, e)
 		return
 	}
 	store := h.glovoRoutes().Store
 	cur, err := store.InstallRow(r.Context(), tenant)
 	if err != nil {
-		glovoRefuse(w, route, err)
+		_ = glovoRefuse(w, route, err)
 		return
 	}
 	if cur == nil {
 		inst, err := store.Install(r.Context(), tenant, actor)
 		if err != nil {
-			glovoRefuse(w, route, err, "tenant", tenant)
+			_ = glovoRefuse(w, route, err, "tenant", tenant)
 			return
 		}
 		writeJSON(w, http.StatusCreated, glovoInstallation(tenant, inst))
@@ -132,11 +132,11 @@ func (h *Handlers) GlovoInstallationDelete(w http.ResponseWriter, r *http.Reques
 	store := h.glovoRoutes().Store
 	cur, err := store.InstallRow(r.Context(), tenant)
 	if err != nil {
-		glovoRefuse(w, route, err)
+		_ = glovoRefuse(w, route, err)
 		return
 	}
 	if cur == nil || cur.State != glovo.InstallInstalled {
-		glovoRefuse(w, route, glovo.Refuse(glovo.CodeNoInstall), "tenant", tenant)
+		_ = glovoRefuse(w, route, glovo.Refuse(glovo.CodeNoInstall), "tenant", tenant)
 		return
 	}
 	inst, _, err := store.RevokeInstall(r.Context(), tenant, actor, "owner_requested", cur.InstallRevision)

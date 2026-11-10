@@ -234,11 +234,10 @@ func TestGlovoE2EAuditNoLeakAndSchemas(t *testing.T) {
 	}
 	_ = json.Unmarshal(hraw, &h)
 	e.refs = append(e.refs, h.Ref)
-	_ = ref // superseded by the second reference: the first no longer activates
 	if code, _ := e.activate(conn.ID, rev, ref); code != http.StatusNotFound {
 		t.Fatalf("an older reference still activates: %d", code)
 	}
-	raw = callRaw(200, "connection", http.MethodPost, worker+"/connections/"+conn.ID+"/activate", e2eWorkerTok,
+	_ = callRaw(200, "connection", http.MethodPost, worker+"/connections/"+conn.ID+"/activate", e2eWorkerTok,
 		map[string]any{"schema": wire.SchemaWorkerActivate, "install_revision": rev, "handoff_ref": h.Ref})
 	callRaw(200, "worker-check-response", http.MethodPost, worker+"/check", e2eWorkerTok,
 		map[string]any{"schema": wire.SchemaWorkerCheckReq, "connection_id": conn.ID, "install_revision": rev})
@@ -1104,7 +1103,7 @@ func TestGlovoE2EWorkerOwnerPath(t *testing.T) {
 			if strings.HasSuffix(f, "_test.go") {
 				continue
 			}
-			src, err := os.ReadFile(f)
+			src, err := os.ReadFile(f) //nolint:gosec // G304: fixed in-repo source files
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1116,5 +1115,27 @@ func TestGlovoE2EWorkerOwnerPath(t *testing.T) {
 				t.Errorf("%s calls the owner-less worker read", f)
 			}
 		}
+	}
+}
+
+// A connect retry after /handoff must not invalidate the issued reference: the
+// facade connect response carries none, so it must not rotate it.
+func TestGlovoE2EConnectRetryKeepsHandoff(t *testing.T) {
+	e := newE2E(t, e2eOpts{})
+	rev, _ := e.readyAlphaBeta()
+	a1 := e.mint(prnA1, "alpha")
+	key := e.key()
+	code, m := e.callJSON(http.MethodPost, facade+"/connections", a1, nil, "Idempotency-Key", key)
+	if code != http.StatusCreated {
+		t.Fatalf("connect: %d %v", code, m)
+	}
+	id := m["connection_id"].(string)
+	ref := e.handoffAs(a1, id)
+	code, m = e.callJSON(http.MethodPost, facade+"/connections", a1, nil, "Idempotency-Key", key)
+	if code != http.StatusOK || m["replayed"] != true {
+		t.Fatalf("retry: %d %v", code, m)
+	}
+	if code, m := e.activate(id, rev, ref); code != http.StatusOK {
+		t.Fatalf("handoff ref invalidated by connect retry: %d %v", code, m)
 	}
 }

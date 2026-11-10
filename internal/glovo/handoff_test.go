@@ -26,7 +26,8 @@ func newHandoffEnv(t *testing.T) (*env, fixture, *Install) {
 	t.Helper()
 	e := newEnv(t, WithEndPurger(PurgeHandoffRefs), WithEndPurgerRequired(true))
 	f := newFixture(t)
-	return e, f, e.install(f, f.Alpha)
+	inst := e.install(f, f.Alpha)
+	return e, f, inst
 }
 
 // The raw reference is never stored: only its SHA-256 is.
