@@ -1153,6 +1153,15 @@ func main() {
 		stopSignals()
 		os.Exit(1)
 	}
+	// Glovo join facade routes (mctl-api#957): dark. GLOVO_JOIN_ENABLED mounts
+	// them, and with no dependency wired every route answers 503 not_ready.
+	glovoJoinRoutes, gjErr := configureGlovoJoin(os.LookupEnv, auth.GlovoFacadeConfigured())
+	if gjErr != nil {
+		slog.Error("invalid configuration", "error", gjErr)
+		stopSignals()
+		os.Exit(1)
+	}
+
 	// Glovo control routes (mctl-api#985): dark, see configureGlovoControl.
 	glovoControlRoutes, gcErr := configureGlovoControl(os.LookupEnv, auth.LoadGlovoControlWorker())
 	if gcErr != nil {
@@ -1481,6 +1490,7 @@ func main() {
 		GlovoAllowlist:                 glovoAllowlist(glovoStore),
 		Glovo:                          glovoRoutes,
 		GlovoControl:                   glovoControlRoutes,
+		GlovoJoin:                      glovoJoinRoutes,
 		AdminPrincipals:                cfg.adminPrincipals(),
 		RequireRegisteredPolicy:        cfg.requireRegisteredPolicy(),
 		Clock:                          approvalClock,
