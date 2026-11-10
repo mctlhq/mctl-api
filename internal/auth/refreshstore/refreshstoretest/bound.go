@@ -199,7 +199,7 @@ func (t *tx) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag
 	}
 	fam := args[4].(uuid.UUID)
 	if err := t.b.Grants.Activate(args[0].(string), args[1].(string), args[2].(string), args[3].(string), fam.String()); err != nil {
-		return pgconn.NewCommandTag("UPDATE 0"), nil
+		return pgconn.NewCommandTag("UPDATE 0"), nil //nolint:nilerr // a refused activation updates zero rows, as the real UPDATE does
 	}
 	return pgconn.NewCommandTag("UPDATE 1"), nil
 }

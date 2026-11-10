@@ -81,6 +81,12 @@ func TestInsertBoundIsAllOrNothing(t *testing.T) {
 		t.Fatalf("a refresh row was committed: %v", err)
 	}
 
+	// The expired grant still holds the one-active slot for this (principal,
+	// client, resource); retire it before inserting the next pending grant.
+	if _, err := s.pool.Exec(context.Background(), `UPDATE oauth_team_grants SET state = 'revoked' WHERE grant_id = 'tgr_bound1'`); err != nil {
+		t.Fatal(err)
+	}
+
 	// Live grant: both commit, the id survives rotation.
 	insertPendingGrant(t, s, "tgr_bound2", time.Hour)
 	sess.TeamGrantID = "tgr_bound2"

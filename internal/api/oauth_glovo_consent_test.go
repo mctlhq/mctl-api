@@ -92,7 +92,9 @@ func (e *glovoConsentEnv) startConsent(t *testing.T, c authzCompletion) (*httpte
 	var token string
 	if i := strings.Index(body, `name="token" value="`); i >= 0 {
 		token = body[i+len(`name="token" value="`):]
-		token = token[:strings.Index(token, `"`)]
+		if j := strings.Index(token, `"`); j >= 0 {
+			token = token[:j]
+		}
 	}
 	var cookie *http.Cookie
 	for _, ck := range rec.Result().Cookies() {

@@ -109,7 +109,9 @@ func TestOAuthServerRevokeRefreshToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IssueRefreshToken failed: %v", err)
 	}
-	server.RevokeRefreshToken(refreshToken, "client-1")
+	if err := server.RevokeRefreshToken(refreshToken, "client-1"); err != nil {
+		t.Fatalf("RevokeRefreshToken failed: %v", err)
+	}
 
 	if _, _, err := server.RefreshAccessToken(refreshToken, "client-1"); err == nil {
 		t.Fatal("expected revoked refresh token to fail")

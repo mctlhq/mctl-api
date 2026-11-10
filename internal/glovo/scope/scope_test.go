@@ -250,3 +250,40 @@ func TestNonSelectable(t *testing.T) {
 		t.Fatalf("%v", m)
 	}
 }
+
+// TestResolveRefusesNonActiveGrants runs Resolve against the real MemoryStore
+// (not a fake) so that a Check that accepted a pending, expired or revoked
+// grant turns this red.
+func TestResolveRefusesNonActiveGrants(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	ms := teamgrant.NewMemoryStore()
+	now := time.Now()
+	ms.SetClock(func() time.Time { return now })
+	e.r.Grants = ms
+	g, err := ms.Create(ctx, teamgrant.Grant{PrincipalID: prnA, Tenant: "alpha", ClientID: client, Resource: res, ExpiresAt: now.Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := e.user(t, res, prnA, g.ID, "alpha")
+	if _, rerr := e.r.Resolve(ctx, u); code(rerr) != glovo.CodeAmbiguousTenant {
+		t.Fatalf("pending grant resolved: %v", rerr)
+	}
+	if err := ms.Activate(g.ID, prnA, client, res, "fam"); err != nil {
+		t.Fatal(err)
+	}
+	if _, rerr := e.r.Resolve(ctx, u); rerr != nil {
+		t.Fatalf("active grant refused: %v", rerr)
+	}
+	now = now.Add(2 * time.Hour)
+	if _, rerr := e.r.Resolve(ctx, u); code(rerr) != glovo.CodeAmbiguousTenant {
+		t.Fatalf("expired grant resolved: %v", rerr)
+	}
+	now = now.Add(-2 * time.Hour)
+	if err := ms.Revoke(ctx, g.ID, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, rerr := e.r.Resolve(ctx, u); code(rerr) != glovo.CodeAmbiguousTenant {
+		t.Fatalf("revoked grant resolved: %v", rerr)
+	}
+}
