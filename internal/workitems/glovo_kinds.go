@@ -78,6 +78,10 @@ var GlovoActionKinds = []string{ActionKindGlovoPlaceOrderFake}
 // approval". It is parenthesized, so it can be ANDed or negated as it stands.
 const glovoKindPredicate = `(action_kind LIKE 'glovo.%')`
 
+// GlovoKindPredicate is glovoKindPredicate for SQL outside this package (the
+// receipt sweeper); there is one definition.
+const GlovoKindPredicate = glovoKindPredicate
+
 // IsGlovoKind reports whether kind is in the Glovo namespace. The prefix is the
 // predicate on purpose: "glovo.other" is a Glovo kind the generic paths must
 // refuse, not a generic kind that merely looks similar.
