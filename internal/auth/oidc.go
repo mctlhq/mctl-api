@@ -180,6 +180,10 @@ type User struct {
 	supportAudience bool
 	// glovoAudience records that it is exactly the Glovo resource.
 	glovoAudience bool
+	// teamGrantID and selectedTenant are the signed tgr and stn claims of a
+	// Glovo-audience token; empty for every other credential.
+	teamGrantID    string
+	selectedTenant string
 	// glovoWorker is reserved and never set.
 	glovoWorker bool
 
@@ -1378,14 +1382,21 @@ func userFromVerified(v *Verified) *User {
 		u.tokenPID = v.Claims.TokenPID
 		u.tokenAudience, u.supportAudience = v.Claims.TokenAudience, v.Claims.SupportAudience
 		u.glovoAudience = v.Claims.GlovoAudience
+		if u.glovoAudience {
+			u.teamGrantID, u.selectedTenant = v.Claims.TeamGrant, v.Claims.SelectedTenant
+		}
 		u.oauthClientID = v.Claims.OAuthClientID
 		return u
 	case v.Identity.Provider == ProviderPrincipal:
 		// Reserved: only the local-OAuth provider yields it, for a token
 		// minted for this principal. No groups: principal mode decides them.
-		return &User{ID: v.Identity.Display, principalID: v.Identity.Subject, tokenPrincipal: true,
+		u := &User{ID: v.Identity.Display, principalID: v.Identity.Subject, tokenPrincipal: true,
 			tokenAudience: v.Claims.TokenAudience, supportAudience: v.Claims.SupportAudience,
 			glovoAudience: v.Claims.GlovoAudience, oauthClientID: v.Claims.OAuthClientID}
+		if v.Claims.GlovoAudience {
+			u.teamGrantID, u.selectedTenant = v.Claims.TeamGrant, v.Claims.SelectedTenant
+		}
+		return u
 	case v.Identity.Provider == ProviderGitHubActions:
 		// No groups, whatever the token held: a CI job is not a tenant
 		// member. Marked ci even if a claim were somehow empty, so the
@@ -1531,6 +1542,17 @@ func (u *User) IsSupportAudience() bool { return u != nil && u.supportAudience }
 // IsGlovoAudience reports whether the caller holds an access token whose aud
 // is exactly the Glovo resource.
 func (u *User) IsGlovoAudience() bool { return u != nil && u.glovoAudience }
+
+// TeamGrant returns the team grant id and selected tenant a Glovo-audience
+// token was minted under. ok is false for every other caller and for a Glovo
+// token without both claims. The claims are only a pointer to the server-held
+// grant: the resolver loads and checks it, and trusts nothing else.
+func (u *User) TeamGrant() (grantID, tenant string, ok bool) {
+	if u == nil || !u.glovoAudience || u.teamGrantID == "" || u.selectedTenant == "" {
+		return "", "", false
+	}
+	return u.teamGrantID, u.selectedTenant, true
+}
 
 // GlovoWorkerUserID is the reserved identity of the future Glovo worker. It
 // is not issued: nothing constructs a user for it, no env var or token maps

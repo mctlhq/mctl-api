@@ -18,8 +18,12 @@
 package refreshstore
 
 import (
+	"context"
 	"errors"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // Session is what a refresh token stands for: the GitHub login it was
@@ -39,6 +43,9 @@ type Session struct {
 	// minted for; empty is the default API resource. Rotation carries it
 	// forward.
 	Resource string
+	// TeamGrantID is the Glovo team grant the session is bound to; empty for
+	// every other session. Rotation carries it forward.
+	TeamGrantID string
 }
 
 // ErrInvalidToken is returned when a refresh token is not found, expired, or revoked.
@@ -103,4 +110,16 @@ type Store interface {
 	// GC hard-deletes rows where expires_at < now()-7d AND revoked_at IS NOT NULL.
 	// Safe to call on a schedule; never deletes live tokens.
 	GC() error
+}
+
+// BoundStore is a Store that can bind a session to a team grant atomically.
+// Only the Postgres store implements it: the Glovo resource is not ready
+// without one.
+type BoundStore interface {
+	Store
+	// InsertBound is Insert plus bind, on one transaction; see
+	// PostgresStore.InsertBound.
+	InsertBound(ctx context.Context, rawToken, clientID string, sess Session, expiresAt time.Time, bind func(ctx context.Context, tx pgx.Tx, familyID uuid.UUID) error) error
+	// RotateIfTx is RotateIf whose accept runs on the rotation's transaction.
+	RotateIfTx(oldRawToken, newRawToken, clientID string, newExpiresAt time.Time, accept func(ctx context.Context, tx pgx.Tx, s Session) error) (Session, error)
 }

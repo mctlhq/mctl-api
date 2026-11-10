@@ -103,6 +103,12 @@ type ConsentEntry struct {
 	AuthMethod string
 	// Resource is the flow resource ("" is the default API resource).
 	Resource string
+	// TeamSelection marks a Glovo consent: the decision must carry exactly one
+	// team chosen from the eligible set recomputed at decision time.
+	// EligibleTenants is what the page listed, kept for audit only; it is
+	// never trusted as the eligible set.
+	TeamSelection   bool     `json:",omitempty"`
+	EligibleTenants []string `json:",omitempty"`
 	// BrowserHash is the SHA-256 (hex) of the consent token, held by the
 	// browser that signed in as a cookie.
 	BrowserHash string

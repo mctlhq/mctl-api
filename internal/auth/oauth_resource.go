@@ -66,7 +66,12 @@ func (s *OAuthServer) ResolveResource(values []string) (string, error) {
 		return s.SupportResource, nil
 	}
 	if s.GlovoResource != "" && n == normalizeIssuer(s.GlovoResource) {
-		return "", ErrGlovoNotReady
+		// Admitted only with the kill switch on and every readiness
+		// dependency present; GLOVO_MCP_RESOURCE alone never opens it.
+		if !s.GlovoReady() {
+			return "", ErrGlovoNotReady
+		}
+		return s.GlovoResource, nil
 	}
 	return "", ErrInvalidTarget
 }

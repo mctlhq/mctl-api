@@ -61,6 +61,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/ghactions"
 	"github.com/mctlhq/mctl-api/internal/ghtoken"
 	"github.com/mctlhq/mctl-api/internal/gitops"
+	"github.com/mctlhq/mctl-api/internal/glovo"
 	"github.com/mctlhq/mctl-api/internal/governance"
 	"github.com/mctlhq/mctl-api/internal/humaninput"
 	"github.com/mctlhq/mctl-api/internal/k8s"
@@ -328,6 +329,28 @@ func main() {
 					}
 				}()
 			}
+		}
+	}
+
+	// Glovo pilot (GLOVO_ENABLED, default false): team grants, the live
+	// membership-and-allowlist eligibility and the kill switch. Unset, nothing
+	// here runs and every OAuth flow is unchanged; set without its
+	// dependencies, the boot is refused.
+	var glovoStore *glovo.Store
+	{
+		var pgRefresh *refreshstore.PostgresStore
+		if oauthServer != nil {
+			pgRefresh, _ = oauthServer.RefreshStore.(*refreshstore.PostgresStore)
+		}
+		var err error
+		glovoStore, err = configureGlovoTeamGrants(initCtx, glovoTeamGrantDeps{
+			OAuth: oauthServer, RefreshStore: pgRefresh, Membership: gitReader,
+			ExplicitOAuthDB: os.Getenv("OAUTH_DB_URL") != "",
+		}, os.LookupEnv)
+		if err != nil {
+			slog.Error("invalid configuration", "error", err)
+			stopSignals()
+			os.Exit(1)
 		}
 	}
 
@@ -1382,6 +1405,7 @@ func main() {
 		AgentReceiptMaxAge:             cfg.agentReceiptMaxAge(),
 		LegacyApproverDisabled:         cfg.legacyApproverDisabled(),
 		PrincipalMembership:            gitReader,
+		GlovoAllowlist:                 glovoAllowlist(glovoStore),
 		AdminPrincipals:                cfg.adminPrincipals(),
 		RequireRegisteredPolicy:        cfg.requireRegisteredPolicy(),
 		Clock:                          approvalClock,
