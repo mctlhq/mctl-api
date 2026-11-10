@@ -22,7 +22,7 @@ func approvalNotReady(reason string) error { return &glovo.NotReadyError{Reason:
 
 // VerifyGlovoApprovalSchema is the start-up proof of the approval schema, run
 // as the runtime role on the Glovo pool (mctl-api#989 design section 8): the
-// recorded version matches, the three guards are enabled, the tables are owned
+// recorded version matches, the four guards are enabled, the tables are owned
 // by a role the runtime role is not a member of, and the runtime role's
 // grants on them are exactly those of ApplyGlovoApprovalSchema (the UPDATE
 // column list per column, and no table-wide UPDATE, DELETE or TRUNCATE). A
