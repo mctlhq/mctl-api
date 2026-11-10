@@ -226,7 +226,8 @@ ZITADEL or Vault. Until then the only way to authenticate is the static
 refuses with `write_fence_unavailable` and issues zero permits. A permit alone
 never proves exactly-once provider I/O: the provider must dedupe by command and
 read back, and an ambiguous outcome stays `unknown` and is never retried.
-`hir_` is never approval.
+`hir_` is never approval. The Glovo control routes and the six conditions under
+which the fence is installed are described in [glovo-control.md](glovo-control.md).
 
 ## Signals
 
