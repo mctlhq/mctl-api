@@ -80,6 +80,16 @@ type Routes struct {
 	perSubject, writes, aggreg *httprate.RateLimiter
 }
 
+// CloneRoutes returns a Routes with the same configuration and fresh limiter
+// state, so a caller can wrap OnRefused without changing the original.
+func CloneRoutes(rt *Routes) *Routes {
+	return &Routes{
+		Verifier: rt.Verifier, Refs: rt.Refs, Reader: rt.Reader, Prepare: rt.Prepare, Status: rt.Status,
+		Connect: rt.Connect, Readiness: rt.Readiness, OnRefused: rt.OnRefused,
+		PerSubject: rt.PerSubject, Writes: rt.Writes, Aggregate: rt.Aggregate,
+	}
+}
+
 func (rt *Routes) init() {
 	rt.once.Do(func() {
 		rt.doc = contract.MustLoad()
@@ -450,7 +460,8 @@ func (rt *Routes) prepare(_ http.ResponseWriter, r *http.Request, sub Subject, _
 	if rt.Prepare == nil {
 		return 0, nil, false, refusal(glovo.CodeNotReady, "not_ready:prepare")
 	}
-	res, rf := rt.Prepare.Prepare(r.Context(), PrepareRequest{Tenant: sub.Tenant, PrincipalID: sub.PrincipalID, PreviewID: in.PreviewID, Key: key})
+	res, rf := rt.Prepare.Prepare(r.Context(), PrepareRequest{Tenant: sub.Tenant, PrincipalID: sub.PrincipalID, PreviewID: in.PreviewID, Key: key,
+		InstallID: sub.InstallID, InstallRevision: sub.InstallRevision})
 	if rf != nil {
 		return 0, nil, false, rf
 	}

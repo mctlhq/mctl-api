@@ -39,9 +39,12 @@ type GlovoJoinRoutes struct {
 func (g *GlovoJoinRoutes) mounted() bool { return g != nil && g.Enabled }
 
 func (g *GlovoJoinRoutes) handler() http.Handler {
-	rt := g.Routes
-	if rt == nil {
+	var rt *glovojoin.Routes
+	if g.Routes == nil {
 		rt = &glovojoin.Routes{}
+	} else {
+		// A copy: the caller's hook is wrapped, never replaced in place.
+		rt = glovojoin.CloneRoutes(g.Routes)
 	}
 	prev := rt.OnRefused
 	rt.OnRefused = func(e glovojoin.Refused) {

@@ -225,5 +225,5 @@ func (s *stack) count(sql string, args ...any) int {
 }
 
 func (s *stack) req(p Preview, key string) PrepareRequest {
-	return PrepareRequest{Tenant: stackTenant, PrincipalID: stackOwner, PreviewID: p.ID, Key: key}
+	return PrepareRequest{Tenant: stackTenant, PrincipalID: stackOwner, PreviewID: p.ID, Key: key, InstallID: s.installID, InstallRevision: s.installRev}
 }

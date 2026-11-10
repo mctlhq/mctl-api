@@ -30,3 +30,11 @@ func TestFixtureApprovalTTLSeam(t *testing.T) {
 		t.Fatalf("TTL %s", GlovoApprovalTTL)
 	}
 }
+
+// T13 (seam reaches prepare): the tagged value is what a prepare writes.
+func TestFixtureTTLReachesPrepare(t *testing.T) {
+	prev := GlovoApprovalTTL
+	t.Cleanup(func() { GlovoApprovalTTL = prev })
+	SetFixtureGlovoApprovalTTL(5 * time.Minute)
+	approvalTTLOnPrepare(t, 5*time.Minute)
+}

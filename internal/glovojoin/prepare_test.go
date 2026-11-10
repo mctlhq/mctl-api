@@ -170,11 +170,11 @@ func TestPrepareRefusals(t *testing.T) {
 	_, rf := s.prepare.Prepare(context.Background(), s.req(empty, "key-e"))
 	wantCode(t, rf, glovo.CodeInvalidRequest, "basket_empty")
 
-	_, rf = s.prepare.Prepare(context.Background(), PrepareRequest{Tenant: stackTenant, PrincipalID: stackOwner, PreviewID: "gpv_doesnotexist0000000000000", Key: "key-n"})
+	_, rf = s.prepare.Prepare(context.Background(), PrepareRequest{Tenant: stackTenant, PrincipalID: stackOwner, PreviewID: "gpv_doesnotexist0000000000000", Key: "key-n", InstallID: s.installID, InstallRevision: s.installRev})
 	wantCode(t, rf, glovo.CodeNotFound, "preview_not_found")
 
 	foreign := s.preview(stackBasket)
-	_, rf = s.prepare.Prepare(context.Background(), PrepareRequest{Tenant: stackTenant, PrincipalID: "prn_OTHER00000000000000000001", PreviewID: foreign.ID, Key: "key-f"})
+	_, rf = s.prepare.Prepare(context.Background(), PrepareRequest{Tenant: stackTenant, PrincipalID: "prn_OTHER00000000000000000001", PreviewID: foreign.ID, Key: "key-f", InstallID: s.installID, InstallRevision: s.installRev})
 	if rf == nil {
 		t.Fatal("a foreign principal prepared the preview")
 	}

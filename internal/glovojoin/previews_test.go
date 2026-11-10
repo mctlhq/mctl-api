@@ -130,6 +130,58 @@ func TestPreviewClaimIsSingleUseAndScoped(t *testing.T) {
 	}
 }
 
+// TestReissuedRefLivesAgainAfterItsTTL: a pho_ or cursor ref the history read
+// returns again after it expired must be accepted again, and the re-issue must
+// neither extend a live row, nor touch another owner's row.
+func TestReissuedRefLivesAgainAfterItsTTL(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	t0 := time.Now().UTC().Truncate(time.Second)
+	ref := "pho_00000000000000000009"
+	rec := func(tenant, prn, conn string, at time.Time) {
+		t.Helper()
+		if err := RecordIssuedRefs(ctx, e.rp, tenant, prn, conn, []string{ref}, "curR", at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	issued := func(tenant, prn, conn, kind, r string, at time.Time) bool {
+		t.Helper()
+		ok, err := RefIssued(ctx, e.rp, tenant, prn, conn, kind, r, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+	rec("acme", subjPrincipal, "gcn_x", t0)
+	rec("other", subjPrincipal, "gcn_x", t0) // another tenant, same ref
+	later := t0.Add(ReadRefTTL + time.Minute)
+	if issued("acme", subjPrincipal, "gcn_x", RefKindPho, ref, later) {
+		t.Fatal("a ref was accepted after its TTL")
+	}
+	// A live row is not extended by a re-issue half way through its life.
+	half := t0.Add(ReadRefTTL / 2)
+	rec("acme", subjPrincipal, "gcn_x", half)
+	if issued("acme", subjPrincipal, "gcn_x", RefKindPho, ref, later) {
+		t.Fatal("re-issue extended a live ref")
+	}
+	// After the TTL the re-issue brings both kinds back, for that owner only.
+	rec("acme", subjPrincipal, "gcn_x", later)
+	for _, k := range []struct{ kind, ref string }{{RefKindPho, ref}, {RefKindCursor, "curR"}} {
+		if !issued("acme", subjPrincipal, "gcn_x", k.kind, k.ref, later.Add(time.Minute)) {
+			t.Errorf("a re-issued %s ref was refused after a TTL", k.kind)
+		}
+	}
+	if issued("other", subjPrincipal, "gcn_x", RefKindPho, ref, later.Add(time.Minute)) {
+		t.Error("re-issue to one tenant revived the ref of another")
+	}
+	if issued("acme", subjPrincipal, "gcn_y", RefKindPho, ref, later.Add(time.Minute)) {
+		t.Error("re-issue revived the ref on another connection")
+	}
+	if issued("acme", "prn_ffffffffffffffff", "gcn_x", RefKindPho, ref, later.Add(time.Minute)) {
+		t.Error("re-issue revived the ref of another principal")
+	}
+}
+
 func TestReadRefsAreIssuedOnlyToTheirOwner(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()

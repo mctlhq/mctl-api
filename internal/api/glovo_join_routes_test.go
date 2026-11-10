@@ -15,10 +15,13 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/glovojoin"
@@ -92,5 +95,34 @@ func TestGlovoJoinFacadeSkipsTheGlobalLimiterAndHasItsOwn(t *testing.T) {
 	}
 	if got429At != 401 {
 		t.Fatalf("first 429 at request %d, want 401 (the aggregate of 400, not the global 300)", got429At)
+	}
+}
+
+// The router wraps the caller's refusal hook with the metric counter; it must
+// do so on a copy. Mounting twice from one options value must neither double
+// count nor leave the caller's hook counting metrics when called directly.
+func TestGlovoJoinDoesNotMutateTheCallersRoutes(t *testing.T) {
+	calls := 0
+	rts := &glovojoin.Routes{OnRefused: func(glovojoin.Refused) { calls++ }}
+	opts := &GlovoJoinRoutes{Enabled: true, Routes: rts}
+	before := fmt.Sprintf("%p", rts.OnRefused)
+	h1, h2 := joinRouter(opts), joinRouter(opts)
+	if rec := joinCall(h1, "GET", contract.BasePath+"/connection"); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("connection = %d", rec.Code)
+	}
+	if calls != 1 {
+		t.Fatalf("the caller's hook ran %d times for one refusal", calls)
+	}
+	_ = h2
+	probe := glovojoin.Refused{Route: "zz_probe", Reason: "zz_probe"}
+	counter := func() float64 {
+		return testutil.ToFloat64(glovoRouteRefusals.WithLabelValues("join_zz_probe", "zz_probe"))
+	}
+	rts.OnRefused(probe)
+	if calls != 2 || counter() != 0 {
+		t.Fatalf("the caller's hook was replaced by the wrapped one: calls=%d metric=%v", calls, counter())
+	}
+	if after := fmt.Sprintf("%p", rts.OnRefused); after != before {
+		t.Fatalf("OnRefused pointer changed %s -> %s", before, after)
 	}
 }

@@ -104,7 +104,7 @@ func TestReadsFeedPrepareEndToEnd(t *testing.T) {
 		len(c.Scopes) != 2 || c.Tenant != stackTenant || c.OwnerPrincipalID != stackOwner {
 		t.Fatalf("read request = %+v", c)
 	}
-	res, rf := s.prepare.Prepare(ctx, PrepareRequest{Tenant: stackTenant, PrincipalID: stackOwner, PreviewID: pv.PreviewID, Key: "e2e-key"})
+	res, rf := s.prepare.Prepare(ctx, PrepareRequest{Tenant: stackTenant, PrincipalID: stackOwner, PreviewID: pv.PreviewID, Key: "e2e-key", InstallID: s.installID, InstallRevision: s.installRev})
 	if rf != nil {
 		t.Fatalf("prepare: %v", rf)
 	}
@@ -225,7 +225,7 @@ func TestEmptyPreviewCannotBePrepared(t *testing.T) {
 	if pv.Fingerprint != "" || len(pv.Items) != 0 {
 		t.Fatalf("empty preview = %+v", pv)
 	}
-	_, rf = s.prepare.Prepare(ctx, PrepareRequest{Tenant: stackTenant, PrincipalID: stackOwner, PreviewID: pv.PreviewID, Key: "empty-key"})
+	_, rf = s.prepare.Prepare(ctx, PrepareRequest{Tenant: stackTenant, PrincipalID: stackOwner, PreviewID: pv.PreviewID, Key: "empty-key", InstallID: s.installID, InstallRevision: s.installRev})
 	wantCode(t, rf, glovo.CodeInvalidRequest, "basket_empty")
 }
 

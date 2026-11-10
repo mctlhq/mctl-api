@@ -152,8 +152,20 @@ const (
 // here (#1059 consumer duty 10).
 func RecordIssuedRefs(ctx context.Context, q dbq.Querier, tenant, principal, connection string, pho []string, cursor string, now time.Time) error {
 	insert := func(kind, ref string) error {
+		// A ref re-issued after its TTL must live again. The runtime role may
+		// DELETE but not UPDATE this table, so the expired row of exactly this
+		// key is removed first and the insert then writes a fresh expiry. A
+		// live row is left alone (DO NOTHING): re-issue never shortens, and the
+		// key carries tenant, principal and connection, so it never extends a
+		// row of another owner.
+		if _, err := q.Exec(ctx, `DELETE FROM glovo.join_read_refs
+ WHERE tenant = $1 AND principal_id = $2 AND connection_id = $3 AND kind = $4 AND ref = $5 AND expires_at <= $6`,
+			tenant, principal, connection, kind, ref, now.UTC()); err != nil {
+			return fmt.Errorf("glovojoin: record issued ref: %w: %w", glovo.Refuse(glovo.CodeUnavailable), err)
+		}
 		_, err := q.Exec(ctx, `INSERT INTO glovo.join_read_refs (tenant, principal_id, connection_id, kind, ref, created_at, expires_at)
- VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`, tenant, principal, connection, kind, ref, now.UTC(), now.Add(ReadRefTTL).UTC())
+ VALUES ($1,$2,$3,$4,$5,$6,$7)
+ ON CONFLICT (tenant, principal_id, connection_id, kind, ref) DO NOTHING`, tenant, principal, connection, kind, ref, now.UTC(), now.Add(ReadRefTTL).UTC())
 		if err != nil {
 			return fmt.Errorf("glovojoin: record issued ref: %w: %w", glovo.Refuse(glovo.CodeUnavailable), err)
 		}

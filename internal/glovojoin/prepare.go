@@ -96,6 +96,11 @@ type PrepareRequest struct {
 	PrincipalID string
 	PreviewID   string
 	Key         string
+	// InstallID and InstallRevision are the subject's CURRENT install, from the
+	// verified subject: prepare refuses a live connection of another install or
+	// revision, so a stale-install subject can never write an order.
+	InstallID       string
+	InstallRevision int64
 }
 
 // PrepareResult is the 200 body of /orders:prepare.
@@ -193,7 +198,7 @@ func toRefusal(err error, reason string) *Refusal {
 // Prepare runs the flow, restarting from step 1 at most maxPrepareAttempts
 // times when a concurrent prepare won the preview claim or the order key.
 func (p *Preparer) Prepare(ctx context.Context, in PrepareRequest) (*PrepareResult, *Refusal) {
-	if in.Tenant == "" || in.PrincipalID == "" || in.PreviewID == "" || in.Key == "" || len(in.Key) > 128 {
+	if in.Tenant == "" || in.PrincipalID == "" || in.PreviewID == "" || in.Key == "" || len(in.Key) > 128 || in.InstallID == "" || in.InstallRevision < 1 {
 		return nil, refusal(glovo.CodeInvalidRequest, "prepare_input")
 	}
 	for attempt := 0; attempt < maxPrepareAttempts; attempt++ {
@@ -245,6 +250,9 @@ func (p *Preparer) once(ctx context.Context, in PrepareRequest) (res *PrepareRes
 	conn, err := p.Conns.LiveConnectionTx(ctx, tx, owner)
 	if err != nil {
 		return nil, toRefusal(err, "connection")
+	}
+	if conn.InstallID != in.InstallID || conn.InstallRevision != in.InstallRevision {
+		return nil, refusal(glovo.CodeStaleInstall, "subject_install_stale")
 	}
 	reqHash := prepareRequestHash(in.PreviewID)
 
