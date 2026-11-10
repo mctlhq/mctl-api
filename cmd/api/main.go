@@ -1076,6 +1076,18 @@ func main() {
 			} else {
 				bridgeStore = bs
 				defer bs.Close()
+				if v := os.Getenv("MCTL_BRIDGE_READ_RESULT_TTL"); v != "" {
+					if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+						bs.SetReadResultTTL(d) // clamped to 1..300 s
+					} else {
+						slog.Warn("ignoring invalid MCTL_BRIDGE_READ_RESULT_TTL; using default")
+					}
+				}
+				// A read result is served only while the owner's #959 connection is
+				// live. Without the Glovo store the default checker denies.
+				if glovoStore != nil {
+					bs.SetConnectionChecker(bridge.GlovoConnectionChecker{Store: glovoStore})
+				}
 				expiryInterval := time.Duration(0)
 				if v := os.Getenv("MCTL_BRIDGE_EXPIRY_SWEEP_INTERVAL"); v != "" {
 					if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
@@ -1092,6 +1104,10 @@ func main() {
 						Name: "mctl_api_bridge_expiry_processed_total",
 						Help: "Number of bridge commands expired by the background sweep since process start.",
 					}, func() float64 { return float64(expirer.Stats().Processed) }),
+					prometheus.NewCounterFunc(prometheus.CounterOpts{
+						Name: "mctl_api_bridge_read_results_erased_total",
+						Help: "Number of stored bridge read result payloads erased at expiry since process start.",
+					}, func() float64 { return float64(bs.ReadResultsErased()) }),
 					prometheus.NewCounterFunc(prometheus.CounterOpts{
 						Name: "mctl_api_bridge_expiry_sweep_errors_total",
 						Help: "Number of failed bridge expiry sweep operations since process start, excluding shutdown cancellation.",

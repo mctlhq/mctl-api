@@ -89,7 +89,7 @@ func requireBridgeProvider(next http.Handler) http.Handler {
 func (h *Handlers) bridgeCaller(user *auth.User) bridge.Caller {
 	ref := user.BridgeProviderRef()
 	cfg := h.opts.BridgeProviders[ref]
-	return bridge.Caller{ProviderRef: ref, Actor: user.ID, Tenants: cfg.Tenants}
+	return bridge.Caller{ProviderRef: ref, Actor: user.ID, Tenants: cfg.Tenants, Versions: cfg.WireVersions()}
 }
 
 func bridgeStatus(err error) (int, string) {
@@ -101,10 +101,12 @@ func bridgeStatus(err error) (int, string) {
 		return http.StatusNotFound, code
 	case "result_inconsistent":
 		return http.StatusUnprocessableEntity, code
-	case "write_fence_unavailable":
+	case "write_fence_unavailable", "read_unavailable":
 		return http.StatusServiceUnavailable, code
-	case "write_fence_refused":
+	case "write_fence_refused", "read_not_authorized":
 		return http.StatusForbidden, code
+	case "payload_too_large":
+		return http.StatusRequestEntityTooLarge, code
 	case "":
 		return http.StatusInternalServerError, "bridge_internal"
 	}
@@ -184,7 +186,8 @@ func (h *Handlers) BridgeClaim(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, http.StatusBadRequest, "invalid_document", "invalid claim request", nil)
 		return
 	}
-	claimed, err := h.opts.Bridge.Claim(ctx, h.bridgeCaller(user), req.Max, bridge.DefaultLeaseTTL)
+	caller := h.bridgeCaller(user)
+	claimed, err := h.opts.Bridge.Claim(ctx, caller, req.Max, bridge.DefaultLeaseTTL)
 	if err != nil {
 		h.bridgeFail(w, r, user, "bridge-claim", "", err)
 		return
@@ -197,7 +200,9 @@ func (h *Handlers) BridgeClaim(w http.ResponseWriter, r *http.Request) {
 		ids = append(ids, c.CommandID)
 	}
 	h.auditBridge(r, user, "bridge-claim", "success", map[string]string{"command_ids": strings.Join(ids, ",")})
-	writeJSON(w, http.StatusOK, map[string]any{"schema_version": bridge.SchemaVersion, "commands": cmds})
+	// The envelope version follows the caller alone: a provider that declares
+	// only v1alpha1 gets the v1alpha1 envelope byte for byte as before.
+	writeJSON(w, http.StatusOK, map[string]any{"schema_version": caller.ClaimEnvelopeVersion(), "commands": cmds})
 }
 
 // BridgeResult handles POST /api/v1/bridge/commands/{command_id}/result.

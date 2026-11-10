@@ -27,6 +27,7 @@ import (
 	"log/slog"
 	"regexp"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -181,10 +182,43 @@ func IsCommandID(s string) bool { return commandIDPattern.MatchString(s) }
 // Tenants come from server-side configuration, never from a request body.
 // Tenants is only an upper bound; the tenant and owner of a command are
 // always read from its stored row.
+//
+// Versions is the closed set of wire versions the provider's server-side
+// configuration declares. Nil or empty means [WireV1alpha1]; a provider is
+// never trusted to filter what it is leased.
 type Caller struct {
 	ProviderRef string
 	Actor       string
 	Tenants     []string
+	Versions    []string
+}
+
+// wireVersions is the effective, never-empty list of Versions.
+func (c Caller) wireVersions() []string {
+	if len(c.Versions) == 0 {
+		return []string{WireV1alpha1}
+	}
+	return c.Versions
+}
+
+// SupportsV1alpha2 reports whether the provider declares the v1alpha2 wire
+// version, which also selects the claim/v1alpha2 envelope.
+func (c Caller) SupportsV1alpha2() bool {
+	for _, v := range c.Versions {
+		if v == WireV1alpha2 {
+			return true
+		}
+	}
+	return false
+}
+
+// ClaimEnvelopeVersion is the envelope schema_version of the claim response
+// for this caller.
+func (c Caller) ClaimEnvelopeVersion() string {
+	if c.SupportsV1alpha2() {
+		return ClaimEnvelopeV1alpha2
+	}
+	return SchemaVersion
 }
 
 func (c Caller) allowsTenant(tenant string) bool {
@@ -223,6 +257,10 @@ type EnqueueInput struct {
 	Sequence         int64
 	Payload          json.RawMessage
 	TTL              time.Duration
+	// WireVersion is "" or WireV1alpha1 (v1alpha1) or WireV1alpha2. v1alpha2 is
+	// accepted only for place_order_fake (mctl-agents#1059 write command) on a
+	// store with wire versions enabled; read kinds go through EnqueueRead.
+	WireVersion string
 }
 
 func (in *EnqueueInput) validate() error {
@@ -256,6 +294,15 @@ func (in *EnqueueInput) validate() error {
 	if in.TTL < 0 || in.TTL > MaxTTL {
 		return fmt.Errorf("%w: ttl out of range", ErrInvalidInput)
 	}
+	switch in.WireVersion {
+	case "", WireV1alpha1:
+	case WireV1alpha2:
+		if in.Kind != KindPlaceOrderFake || !refPatterns["approval_ref"].MatchString(in.ApprovalRef) {
+			return fmt.Errorf("%w: wire version v1alpha2 is only for place_order_fake with an approval_ref", ErrInvalidDocument)
+		}
+	default:
+		return fmt.Errorf("%w: unknown wire version", ErrInvalidDocument)
+	}
 	return nil
 }
 
@@ -279,6 +326,11 @@ type cmdRow struct {
 	ResultDigest                                                                    string
 	EffectState                                                                     string
 	CreatedAt                                                                       time.Time
+
+	// Extras of the v1alpha2 columns. They are filled only by loadExtras, for
+	// read kinds and, on a store with wire versions enabled, for
+	// place_order_fake; every other row is wire v1alpha1 with no extras.
+	WireVersion, ReadRequestID, InstallRevisionRef string
 }
 
 const cmdCols = `command_id, execution_id, work_item_id, workflow_id, run_id, tenant, owner_principal_id,
@@ -330,8 +382,15 @@ type commandDoc struct {
 }
 
 func (c *cmdRow) projection(withLease bool) ([]byte, error) {
+	if IsReadKind(c.Kind) {
+		return c.readProjection(withLease)
+	}
+	version, v2 := SchemaVersion, c.WireVersion == WireV1alpha2
+	if v2 {
+		version = WireV1alpha2
+	}
 	d := commandDoc{
-		SchemaVersion: SchemaVersion, CommandID: c.CommandID, ExecutionID: c.ExecutionID, WorkItemID: c.WorkItemID,
+		SchemaVersion: version, CommandID: c.CommandID, ExecutionID: c.ExecutionID, WorkItemID: c.WorkItemID,
 		Kind: c.Kind, Attempt: c.Attempt, TenantRef: c.TenantRef, PrincipalRef: c.PrincipalRef, OrderRef: c.OrderRef,
 		ConnectionRef: c.ConnectionRef, ApprovalRef: c.ApprovalRef, IntentHash: c.IntentHash, Issuer: "mctl-api",
 		Audience: "provider:" + c.ProviderRef, Nonce: c.CommandNonce,
@@ -345,10 +404,78 @@ func (c *cmdRow) projection(withLease bool) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := ValidateCommand(raw); err != nil {
+	validate := ValidateCommand
+	if v2 {
+		validate = ValidateWriteV2Command
+	}
+	if err := validate(raw); err != nil {
 		return nil, err
 	}
 	return raw, nil
+}
+
+// readCommandDoc is the outward v1alpha2 read command projection: the #1059
+// read binding set and no order, execution, work item or workflow field.
+type readCommandDoc struct {
+	SchemaVersion      string          `json:"schema_version"`
+	CommandID          string          `json:"command_id"`
+	RequestID          string          `json:"request_id"`
+	Kind               string          `json:"kind"`
+	Attempt            int             `json:"attempt"`
+	TenantRef          string          `json:"tenant_ref"`
+	PrincipalRef       string          `json:"principal_ref"`
+	ConnectionRef      string          `json:"connection_ref"`
+	InstallRevisionRef string          `json:"install_revision_ref"`
+	Issuer             string          `json:"issuer"`
+	Audience           string          `json:"audience"`
+	Nonce              string          `json:"nonce"`
+	IssuedAt           string          `json:"issued_at"`
+	ExpiresAt          string          `json:"expires_at"`
+	TTLSeconds         int             `json:"ttl_seconds"`
+	LeaseToken         string          `json:"lease_token,omitempty"`
+	Params             json.RawMessage `json:"params"`
+}
+
+func (c *cmdRow) readProjection(withLease bool) ([]byte, error) {
+	d := readCommandDoc{
+		SchemaVersion: WireV1alpha2, CommandID: c.CommandID, RequestID: c.ReadRequestID, Kind: c.Kind, Attempt: c.Attempt,
+		TenantRef: c.TenantRef, PrincipalRef: c.PrincipalRef, ConnectionRef: c.ConnectionRef,
+		InstallRevisionRef: c.InstallRevisionRef, Issuer: "mctl-api", Audience: "provider:" + c.ProviderRef,
+		Nonce: c.CommandNonce, IssuedAt: c.CreatedAt.UTC().Format(time.RFC3339),
+		ExpiresAt: c.ExpiresAt.UTC().Format(time.RFC3339), TTLSeconds: c.TTLSeconds, Params: c.Payload,
+	}
+	if withLease {
+		d.LeaseToken = c.LeaseToken
+	}
+	raw, err := json.Marshal(d)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateReadCommand(raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// needsExtras reports whether a row of kind carries the v1alpha2 columns that
+// loadExtras must read. cmdCols/scanCmd never mention them, so a database that
+// never ran the migrator keeps a working v1alpha1 bridge.
+func (s *Store) needsExtras(kind string) bool {
+	return IsReadKind(kind) || (kind == KindPlaceOrderFake && s.WireVersionsEnabled())
+}
+
+// loadExtras reads wire_version, read_request_id and install_revision_ref of
+// row, when the row's kind needs them.
+func (s *Store) loadExtras(ctx context.Context, q Querier, row *cmdRow) error {
+	if !s.needsExtras(row.Kind) {
+		return nil
+	}
+	err := q.QueryRow(ctx, `SELECT wire_version, COALESCE(read_request_id,''), COALESCE(install_revision_ref,'')
+		FROM bridge_commands WHERE command_id=$1`, row.CommandID).Scan(&row.WireVersion, &row.ReadRequestID, &row.InstallRevisionRef)
+	if err != nil {
+		return fmt.Errorf("bridge: read extras: %w", err)
+	}
+	return nil
 }
 
 // Store is the bridge store.
@@ -359,6 +486,11 @@ type Store struct {
 	releaseOnce sync.Once
 	mu          sync.RWMutex
 	fence       WriteFence
+
+	wireEnabled atomic.Bool
+	readTTL     atomic.Int64 // seconds; 0 means DefaultReadResultTTL
+	checker     ConnectionChecker
+	erased      atomic.Int64
 }
 
 // NewStore connects and applies the additive schema.
@@ -479,6 +611,10 @@ func (s *Store) Enqueue(ctx context.Context, tx pgx.Tx, in EnqueueInput) (comman
 	if err := in.validate(); err != nil {
 		return "", false, err
 	}
+	v2Write := in.WireVersion == WireV1alpha2
+	if v2Write && !s.WireVersionsEnabled() {
+		return "", false, fmt.Errorf("%w: wire versions are not enabled", ErrReadUnavailable)
+	}
 	var existing string
 	switch err := tx.QueryRow(ctx, `SELECT command_id FROM bridge_commands WHERE tenant=$1 AND execution_id=$2 AND operation_key=$3`,
 		in.Tenant, in.ExecutionID, in.OperationKey).Scan(&existing); {
@@ -510,6 +646,9 @@ func (s *Store) Enqueue(ctx context.Context, tx pgx.Tx, in EnqueueInput) (comman
 		Kind: in.Kind, Attempt: in.Attempt, IntentHash: in.IntentHash, ApprovalRef: in.ApprovalRef, CommandNonce: nonce,
 		CreatedAt: now, ExpiresAt: now.Add(ttl), TTLSeconds: int(ttl / time.Second), Payload: payload,
 	}
+	if v2Write {
+		row.WireVersion = WireV1alpha2
+	}
 	if row.TTLSeconds < 1 {
 		return "", false, fmt.Errorf("%w: ttl out of range", ErrInvalidInput)
 	}
@@ -528,6 +667,11 @@ func (s *Store) Enqueue(ctx context.Context, tx pgx.Tx, in EnqueueInput) (comman
 		nonce, row.TTLSeconds, row.ExpiresAt, now)
 	if err != nil {
 		return "", false, fmt.Errorf("bridge: enqueue insert: %w", err)
+	}
+	if v2Write {
+		if _, err := tx.Exec(ctx, `UPDATE bridge_commands SET wire_version=$2 WHERE command_id=$1`, row.CommandID, WireV1alpha2); err != nil {
+			return "", false, fmt.Errorf("bridge: enqueue wire version: %w", err)
+		}
 	}
 	if err := addTransition(ctx, tx, row.CommandID, "", StatusPending, 0, "control", ""); err != nil {
 		return "", false, fmt.Errorf("bridge: enqueue transition: %w", err)
@@ -592,13 +736,26 @@ func (s *Store) claimTx(ctx context.Context, tx pgx.Tx, c Caller, max int, lease
 		return nil, err
 	}
 
+	// While wire versions are enabled the version gate is a predicate of the
+	// selection, never a filter on its result, so gated rows cannot fill the
+	// batch and starve a claimable v1alpha1 command. While they are not, the
+	// statement mentions no v1alpha2 column and never selects a read kind.
+	gate, args := ` AND c.operation_kind NOT IN ('read_history','read_preview','read_basket')`, []any{c.ProviderRef, c.Tenants, max}
+	if s.WireVersionsEnabled() {
+		gate, args = ` AND c.wire_version = ANY($4)`, append(args, c.wireVersions())
+	} else if CheckReadLevel(ctx, tx) == nil {
+		// The v1alpha2 columns exist although this process has not enabled
+		// wire versions (rolling deploy, or a failed enable). Never lease a
+		// stored v1alpha2 row as a plain v1alpha1 command.
+		gate = ` AND c.wire_version = '` + WireV1alpha1 + `'`
+	}
 	idRows, err := tx.Query(ctx, `SELECT c.command_id, c.status FROM bridge_commands c
 		WHERE c.provider_ref=$1 AND c.tenant = ANY($2) AND c.expires_at > now()
-		  AND (c.status='pending' OR (c.status='leased' AND c.lease_expires_at <= now()))
+		  AND (c.status='pending' OR (c.status='leased' AND c.lease_expires_at <= now()))`+gate+`
 		  AND NOT EXISTS (SELECT 1 FROM bridge_commands p WHERE p.execution_id=c.execution_id
 		                  AND p.sequence < c.sequence AND p.status IN ('pending','leased'))
 		ORDER BY c.created_at, c.sequence LIMIT $3
-		FOR UPDATE OF c SKIP LOCKED`, c.ProviderRef, c.Tenants, max)
+		FOR UPDATE OF c SKIP LOCKED`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("bridge: claim select: %w", err)
 	}
@@ -640,6 +797,9 @@ func (s *Store) claimTx(ctx context.Context, tx pgx.Tx, c Caller, max int, lease
 		if err != nil {
 			return nil, fmt.Errorf("bridge: claim lease: %w", err)
 		}
+		if err := s.loadExtras(ctx, tx, row); err != nil {
+			return nil, err
+		}
 		doc, err := row.projection(true)
 		if err != nil {
 			return nil, err
@@ -666,6 +826,9 @@ func (s *Store) lockOwned(ctx context.Context, tx pgx.Tx, c Caller, id string) (
 	}
 	if row.ProviderRef != c.ProviderRef || !c.allowsTenant(row.Tenant) {
 		return nil, ErrCommandNotFound
+	}
+	if err := s.loadExtras(ctx, tx, row); err != nil {
+		return nil, err
 	}
 	return row, nil
 }
@@ -711,6 +874,9 @@ type SubmitOutcome struct {
 	EffectState  string
 	ResultDigest string
 	Replayed     bool
+	// ResultRef is the server-minted res_ of a stored read result; empty for
+	// every other command.
+	ResultRef string
 }
 
 func effectFor(r *Result, prior string) string {
@@ -738,10 +904,17 @@ func effectFor(r *Result, prior string) string {
 // same transaction. A replay of the same server-computed digest returns the
 // stored outcome; a different digest after completion is result_conflict.
 func (s *Store) SubmitResult(ctx context.Context, c Caller, commandID string, body []byte) (*SubmitOutcome, error) {
-	res, err := ParseResult(body)
+	// ParseResult selects the schema by the document's schema_version, so a
+	// document that fails its own version's schema is invalid_document before
+	// any binding check.
+	doc, err := parseAnyResult(body)
 	if err != nil {
 		return nil, err
 	}
+	if doc.v2 != nil {
+		return s.submitReadResult(ctx, c, commandID, doc.v2)
+	}
+	res := doc.v1
 	if res.SchemaVersion != SchemaVersion || res.CommandID != commandID {
 		return nil, fmt.Errorf("%w: command_id does not match the route", ErrBindingMismatch)
 	}
@@ -761,6 +934,10 @@ func (s *Store) submitTx(ctx context.Context, tx pgx.Tx, c Caller, res *Result, 
 	row, err := s.lockOwned(ctx, tx, c, res.CommandID)
 	if err != nil {
 		return nil, err
+	}
+	if IsReadKind(row.Kind) {
+		// A read kind takes only its stored wire version's result.
+		return nil, fmt.Errorf("%w: a read command takes a v1alpha2 result", ErrBindingMismatch)
 	}
 	if res.ExecutionID != row.ExecutionID || res.Attempt != row.Attempt || res.WorkerIdentity != "provider:"+row.ProviderRef {
 		return nil, ErrBindingMismatch
@@ -876,18 +1053,18 @@ func (s *Store) expireTx(ctx context.Context, tx pgx.Tx, provider string, tenant
 		UPDATE bridge_commands b SET status='expired', updated_at=now(),
 			effect_state = CASE WHEN b.effect_state='permitted' THEN 'unknown' ELSE b.effect_state END
 		FROM due WHERE b.command_id = due.command_id
-		RETURNING b.command_id, b.workflow_id, b.run_id, b.lease_epoch, due.old_status`, provider, tenants, limit)
+		RETURNING b.command_id, b.workflow_id, b.run_id, b.lease_epoch, due.old_status, b.operation_kind`, provider, tenants, limit)
 	if err != nil {
 		return 0, fmt.Errorf("bridge: expire: %w", err)
 	}
 	type expired struct {
-		id, wf, run, old string
-		epoch            int64
+		id, wf, run, old, kind string
+		epoch                  int64
 	}
 	var exp []expired
 	for rows.Next() {
 		var e expired
-		if err := rows.Scan(&e.id, &e.wf, &e.run, &e.epoch, &e.old); err != nil {
+		if err := rows.Scan(&e.id, &e.wf, &e.run, &e.epoch, &e.old, &e.kind); err != nil {
 			rows.Close()
 			return 0, fmt.Errorf("bridge: expire scan: %w", err)
 		}
@@ -900,6 +1077,10 @@ func (s *Store) expireTx(ctx context.Context, tx pgx.Tx, provider string, tenant
 	for _, e := range exp {
 		if err := addTransition(ctx, tx, e.id, e.old, StatusExpired, e.epoch, actor, ""); err != nil {
 			return 0, err
+		}
+		if IsReadKind(e.kind) {
+			// A read has no workflow to signal.
+			continue
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO bridge_signal_outbox (command_id, workflow_id, run_id, result_digest)
 			VALUES ($1,$2,$3,'expired') ON CONFLICT (command_id) DO NOTHING`, e.id, e.wf, e.run); err != nil {

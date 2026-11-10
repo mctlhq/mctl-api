@@ -1,0 +1,10 @@
+Vendored UNCHANGED from mctlhq/mctl-agents docs/contracts/bridge/v1alpha2/
+at commit 46ccddcec15077a188e5a80089b57d030d056e16 (mctl-agents#1059, merged
+as PR 1062). SHA256SUMS is a byte for byte copy of the upstream file; every
+other file in this directory (README.md, the four schemas and fixtures/) is
+pinned by its SHA256SUMS line, and TestVendoredV1alpha2MatchesProvenance
+enforces it. Files this slice does not vendor (approval-basket.schema.json,
+vectors/) are #988's: internal/glovo/basket/contract/ and internal/jcs/testdata/.
+
+SHA256SUMS sha256: fad9e60adf0c6fcb83928628abd870fd4e4b3b663eb12ae5588a5339e4eb336f
+note: these files must never be edited here; any change starts in mctl-agents.

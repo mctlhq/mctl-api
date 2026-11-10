@@ -132,6 +132,9 @@ security-owner and data-retention decisions.
 | `command_not_found` (also for a foreign provider or tenant) | 404 |
 | `lease_stale`, `binding_mismatch`, `command_cancelled`, `command_expired`, `result_conflict`, `already_completed`, `not_mutating`, `permit_already_issued` | 409 |
 | `result_inconsistent` | 422 |
+| `payload_too_large` (in-process cap of `JCS(payload)` over 12288 bytes) | 413 |
+| `read_unavailable` | 503 |
+| `read_not_authorized` | 403 |
 | `write_fence_refused` | 403 |
 | `write_fence_unavailable` | 503 |
 | `bridge_provider_gate`, `bridge_provider_required` | 403 |
@@ -139,6 +142,48 @@ security-owner and data-retention decisions.
 | `bridge_internal` | 500 |
 
 Every refusal rolls its transaction back: no row, outbox entry or permit changes.
+
+## v1alpha2 typed reads (mctl-api#986)
+
+The v1alpha2 contract (mctl-agents#1059) adds typed, bounded read commands
+(`read_history`, `read_preview`, `read_basket`) and the Glovo `place_order_fake`
+wire version. Its schemas and fixtures are vendored unchanged under
+`internal/bridge/schema/v1alpha2/` (pinned by `PROVENANCE` and `SHA256SUMS`);
+v1alpha1 is untouched.
+
+- **In process only.** There is no route, MCP tool, Temporal workflow or signal
+  for a read. The #957 handlers call `bridge.ReadClient.Read`, which enqueues one
+  read command, waits on the store with a bounded deadline (cancelling and
+  returning `read_unavailable` when it passes) and returns the verified bytes from
+  `Store.FetchReadResult`.
+- **Submission** reuses the result route. A v1alpha2 body runs the raw-bytes
+  pre-check (`internal/jcs`), the vendored schema, the 12288 byte cap on
+  `JCS(payload)` and the digest check; bindings come only from the stored command
+  row. A body over 16 KiB is 400 `invalid_document` at the route. The canonical
+  bytes are stored as `BYTEA` in `bridge_read_results` with a server-minted
+  `res_`, never in `bridge_commands.result`, a log or an audit row, and no
+  `bridge_signal_outbox` row is written for a read.
+- **Fetch** requires the matching tenant and owner, `glovo:read`, an unexpired
+  row, the same connection and decimal install revision, a live #959 connection
+  (`GlovoConnectionChecker`; the default denies) and an intact digest. Another
+  tenant, another owner and an unknown ref are one `command_not_found`.
+- **Retention.** Bytes are erased at `expires_at` (`MCTL_BRIDGE_READ_RESULT_TTL`,
+  default 300 s, clamped 1..300 s) and the row is deleted 24 h later by the
+  `Expirer` tick; metric `mctl_api_bridge_read_results_erased_total`.
+- **Versioning.** A provider entry in `MCTL_BRIDGE_PROVIDERS` may carry
+  `supported_versions` (closed set `bridge.mctl.ai/v1alpha1`,
+  `bridge.mctl.ai/v1alpha2`; must contain v1alpha1; default v1alpha1 only). A
+  v1alpha2 command is leased only to a provider that lists v1alpha2, and the claim
+  envelope is `bridge.mctl.ai/claim/v1alpha2` for it, `bridge.mctl.ai/v1alpha1`
+  (unchanged) otherwise. Remove the key before rolling the code back.
+- **Schema.** `bridge.ApplyReadSchemaTx(ctx, tx, runtimeRole)` owns the read DDL,
+  runs under the migration role in the caller's transaction, is guarded by catalog
+  checks (a second run takes no ACCESS EXCLUSIVE lock) and writes
+  `bridge_read_schema_version` last. `bridge.NewStore` does not call it: until the
+  migrator has run, and `Store.EnableWireVersions` succeeded, the bridge keeps its
+  plain v1alpha1 statements and every read answers `read_unavailable`.
+- **Rollback.** Cancel or expire every open read-kind command before reverting
+  the code; the added columns, CHECKs, index and table are harmless to v1alpha1.
 
 ## Authentication
 

@@ -29,6 +29,7 @@ import (
 	"io"
 	"sync"
 
+	"github.com/mctlhq/mctl-api/internal/glovo/basket"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -36,15 +37,34 @@ import (
 // (merge 14645f93fd4eb425a3ac5adeae497209431b8342). schema/PROVENANCE records
 // the pinned digests; TestVendoredSchemasMatchProvenance enforces them.
 //
+// The v1alpha2 schemas (mctl-agents#1059) are vendored unchanged under
+// schema/v1alpha2 and pinned by schema/v1alpha2/PROVENANCE and SHA256SUMS.
+//
 //go:embed schema/command.schema.json schema/result.schema.json schema/PROVENANCE
+//go:embed schema/v1alpha2/read-command.schema.json schema/v1alpha2/read-result.schema.json
+//go:embed schema/v1alpha2/command-place-order-fake.schema.json schema/v1alpha2/claim-response.schema.json
+//go:embed schema/v1alpha2/PROVENANCE schema/v1alpha2/SHA256SUMS
 var schemaFS embed.FS
 
 const (
 	commandSchemaURL = "https://mctl.ai/schemas/bridge/v1alpha1/command.schema.json"
 	resultSchemaURL  = "https://mctl.ai/schemas/bridge/v1alpha1/result.schema.json"
 
+	readCommandSchemaURL  = "https://mctl.ai/schemas/bridge/v1alpha2/read-command.schema.json"
+	readResultSchemaURL   = "https://mctl.ai/schemas/bridge/v1alpha2/read-result.schema.json"
+	writeV2CommandURL     = "https://mctl.ai/schemas/bridge/v1alpha2/command-place-order-fake.schema.json"
+	claimResponseSchemaID = "https://mctl.ai/schemas/bridge/v1alpha2/claim-response.schema.json"
+
 	// SchemaVersion is the wire version of both documents.
 	SchemaVersion = "bridge.mctl.ai/v1alpha1"
+
+	// WireV1alpha1 and WireV1alpha2 are the per-command wire versions.
+	WireV1alpha1 = SchemaVersion
+	WireV1alpha2 = "bridge.mctl.ai/v1alpha2"
+
+	// ClaimEnvelopeV1alpha2 is the claim envelope for a provider that declares
+	// v1alpha2; a v1alpha1-only provider keeps the v1alpha1 envelope.
+	ClaimEnvelopeV1alpha2 = "bridge.mctl.ai/claim/v1alpha2"
 )
 
 var (
@@ -52,6 +72,11 @@ var (
 	cmdSchema  *jsonschema.Schema
 	resSchema  *jsonschema.Schema
 	schemaErr  error
+
+	readCmdSchema   *jsonschema.Schema
+	readResSchema   *jsonschema.Schema
+	writeV2Schema   *jsonschema.Schema
+	claimRespSchema *jsonschema.Schema
 )
 
 func compileSchemas() error {
@@ -61,28 +86,56 @@ func compileSchemas() error {
 		for _, f := range []struct{ file, url string }{
 			{"schema/command.schema.json", commandSchemaURL},
 			{"schema/result.schema.json", resultSchemaURL},
+			{"schema/v1alpha2/read-command.schema.json", readCommandSchemaURL},
+			{"schema/v1alpha2/read-result.schema.json", readResultSchemaURL},
+			{"schema/v1alpha2/command-place-order-fake.schema.json", writeV2CommandURL},
+			{"schema/v1alpha2/claim-response.schema.json", claimResponseSchemaID},
 		} {
 			raw, err := schemaFS.ReadFile(f.file)
 			if err != nil {
 				schemaErr = fmt.Errorf("bridge: read %s: %w", f.file, err)
 				return
 			}
-			doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
-			if err != nil {
-				schemaErr = fmt.Errorf("bridge: parse %s: %w", f.file, err)
-				return
-			}
-			if err := c.AddResource(f.url, doc); err != nil {
-				schemaErr = fmt.Errorf("bridge: add %s: %w", f.file, err)
+			if schemaErr = addSchema(c, f.url, raw); schemaErr != nil {
+				schemaErr = fmt.Errorf("bridge: %s: %w", f.file, schemaErr)
 				return
 			}
 		}
-		if cmdSchema, schemaErr = c.Compile(commandSchemaURL); schemaErr != nil {
+		// The approval basket is #988's one vendored copy; the v1alpha2 schemas
+		// reach it by $ref.
+		basketRaw, err := basket.SchemaJSON()
+		if err != nil {
+			schemaErr = fmt.Errorf("bridge: read approval-basket schema: %w", err)
 			return
 		}
-		resSchema, schemaErr = c.Compile(resultSchemaURL)
+		if schemaErr = addSchema(c, basket.SchemaID, basketRaw); schemaErr != nil {
+			return
+		}
+		for _, t := range []struct {
+			url string
+			dst **jsonschema.Schema
+		}{
+			{commandSchemaURL, &cmdSchema}, {resultSchemaURL, &resSchema},
+			{readCommandSchemaURL, &readCmdSchema}, {readResultSchemaURL, &readResSchema},
+			{writeV2CommandURL, &writeV2Schema}, {claimResponseSchemaID, &claimRespSchema},
+		} {
+			if *t.dst, schemaErr = c.Compile(t.url); schemaErr != nil {
+				return
+			}
+		}
 	})
 	return schemaErr
+}
+
+func addSchema(c *jsonschema.Compiler, url string, raw []byte) error {
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
+	if err != nil {
+		return fmt.Errorf("parse: %w", err)
+	}
+	if err := c.AddResource(url, doc); err != nil {
+		return fmt.Errorf("add: %w", err)
+	}
+	return nil
 }
 
 // SchemaDigests returns the sha256 of the embedded command and result schema
@@ -119,6 +172,31 @@ func ValidateCommand(raw []byte) error {
 		return err
 	}
 	return validateAgainst(cmdSchema, raw)
+}
+
+// ValidateReadCommand checks raw against the vendored v1alpha2 read-command schema.
+func ValidateReadCommand(raw []byte) error {
+	if err := compileSchemas(); err != nil {
+		return err
+	}
+	return validateAgainst(readCmdSchema, raw)
+}
+
+// ValidateWriteV2Command checks raw against the vendored v1alpha2
+// place_order_fake command schema.
+func ValidateWriteV2Command(raw []byte) error {
+	if err := compileSchemas(); err != nil {
+		return err
+	}
+	return validateAgainst(writeV2Schema, raw)
+}
+
+// ValidateClaimResponse checks raw against the vendored claim-response schema.
+func ValidateClaimResponse(raw []byte) error {
+	if err := compileSchemas(); err != nil {
+		return err
+	}
+	return validateAgainst(claimRespSchema, raw)
 }
 
 // Result is the v1alpha1 result wire projection. It carries no epoch, nonce,
