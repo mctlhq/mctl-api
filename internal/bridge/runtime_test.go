@@ -21,8 +21,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -614,5 +616,52 @@ func TestCommandResultForTriples(t *testing.T) {
 	closed.Close()
 	if _, err := s.CommandResultFor(ctx, closed, []string{"acme"}, p); err == nil || errors.Is(err, ErrCommandNotFound) {
 		t.Fatalf("a failed read must be an error that is not not_found, got %v", err)
+	}
+}
+
+// A store built with NewStore never accepts v1alpha2 commands: wire versions
+// are enabled only by NewRuntimeStore.
+func TestNewStoreLeavesWireVersionsDisabled(t *testing.T) {
+	e := newRTEnv(t)
+	ctx := context.Background()
+	e.mustMig(`GRANT CREATE ON SCHEMA public TO ` + e.rt)
+	legacy, err := NewStore(ctx, e.rtURL)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer legacy.Close()
+	if legacy.WireVersionsEnabled() {
+		t.Fatal("a store built with NewStore has wire versions enabled")
+	}
+	var nilStore *Store
+	if nilStore.WireVersionsEnabled() {
+		t.Fatal("a nil store has wire versions enabled")
+	}
+}
+
+// NewRuntimeStore is the only caller of EnableWireVersions in shipped code.
+func TestEnableWireVersionsHasOneCaller(t *testing.T) {
+	var callers []string
+	err := filepath.WalkDir("../..", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		b, rerr := os.ReadFile(path) //nolint:gosec // walks the repository's own sources
+		if rerr != nil {
+			return rerr
+		}
+		if strings.Contains(string(b), ".EnableWireVersions(") {
+			callers = append(callers, filepath.ToSlash(path))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(callers) != 1 || !strings.HasSuffix(callers[0], "internal/bridge/runtime.go") {
+		t.Fatalf("EnableWireVersions callers in shipped code: %v, want only internal/bridge/runtime.go", callers)
 	}
 }
