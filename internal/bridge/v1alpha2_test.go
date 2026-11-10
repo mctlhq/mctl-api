@@ -499,3 +499,32 @@ func TestDenyConnectionChecker(t *testing.T) {
 		t.Fatal("default checker must deny")
 	}
 }
+
+// parseAnyResult picks a result's schema by its schema_version. The
+// bytes.Contains(WireV1alpha2) marker only decides whether the raw-bytes
+// pre-check runs early: it never forces a document onto the v1alpha2 path.
+func TestParseAnyResultMarkerFallback(t *testing.T) {
+	v1 := string(mustRead(t, "schema/testdata/result.valid.json"))
+	// A v1alpha1 result that merely mentions the v1alpha2 string in a free text
+	// field still parses as v1alpha1.
+	withMention := strings.Replace(v1, `"error_code": "none"`, `"error_code": "none", "error_detail": "retry on `+WireV1alpha2+`"`, 1)
+	if d, err := parseAnyResult([]byte(withMention)); err != nil || d.v1 == nil || d.v2 != nil {
+		t.Fatalf("v1alpha1 body mentioning the marker: %+v %v", d, err)
+	}
+	// A v1alpha2 body that fails the pre-check (duplicate key) is refused by
+	// the pre-check, as invalid_document.
+	dup := strings.Replace(string(v2fixture(t, "read-result.history.valid.json")), `"attempt": 1,`, `"attempt": 1, "attempt": 1,`, 1)
+	if _, err := parseAnyResult([]byte(dup)); !errors.Is(err, ErrInvalidDocument) {
+		t.Fatalf("duplicate key in a v1alpha2 body: %v", err)
+	}
+	// Bytes that are not JSON but contain the marker are invalid_document too.
+	if _, err := parseAnyResult([]byte(`{"x": ` + WireV1alpha2 + ``)); !errors.Is(err, ErrInvalidDocument) {
+		t.Fatalf("malformed body with the marker: %v", err)
+	}
+	// A v1alpha1 body that fails the pre-check while mentioning the marker is
+	// not claimed by the v1alpha2 path: it is judged by the v1alpha1 schema.
+	dupV1 := strings.Replace(withMention, `"attempt": 1,`, `"attempt": 1, "attempt": 1,`, 1)
+	if d, err := parseAnyResult([]byte(dupV1)); d != nil && d.v2 != nil {
+		t.Fatalf("v1alpha1 body routed to v1alpha2: %v", err)
+	}
+}

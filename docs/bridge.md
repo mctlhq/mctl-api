@@ -182,6 +182,15 @@ v1alpha1 is untouched.
   `bridge_read_schema_version` last. `bridge.NewStore` does not call it: until the
   migrator has run, and `Store.EnableWireVersions` succeeded, the bridge keeps its
   plain v1alpha1 statements and every read answers `read_unavailable`.
+  Calling `EnableWireVersions` is owned by mctl-api#985 (`NewRuntimeStore`), so
+  `cmd/api/main.go` deliberately does not call it: until #985 lands the flag
+  stays off and nothing enqueues or leases v1alpha2.
+- **Basket rules.** JSON Schema cannot express them, so a succeeded
+  `read_preview` or `read_basket` result and a v1alpha2 `place_order_fake`
+  payload also run `internal/glovo/basket` (sorted unique `item_code` lines,
+  subtotal and total identities) and every `display` `item_code` must be a basket
+  line; a violation is `invalid_document`, even when `payload_digest` matches.
+  `EnqueueRead` refuses a caller without `glovo:read` (`read_not_authorized`).
 - **Rollback.** Cancel or expire every open read-kind command before reverting
   the code; the added columns, CHECKs, index and table are harmless to v1alpha1.
 

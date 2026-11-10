@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/mctlhq/mctl-api/internal/glovo/basket"
 	"github.com/mctlhq/mctl-api/internal/jcs"
 )
 
@@ -186,4 +187,61 @@ func digestEqual(a, b string) bool {
 func digestOf(b []byte) string {
 	sum := sha256.Sum256(b)
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// checkBasketRules runs #988's basket validation (basket.Parse: sorted unique
+// lines, subtotal and total identities) on one approval_basket. JSON Schema
+// cannot express these rules and the contract README says every consumer MUST
+// check them, so a result or command that carries a basket never reaches the
+// store without them. There is no second implementation here.
+func checkBasketRules(raw []byte) (basket.Approval, error) {
+	a, _, err := basket.Parse(raw)
+	if err != nil {
+		return basket.Approval{}, fmt.Errorf("%w: approval_basket: %v", ErrInvalidDocument, err)
+	}
+	return a, nil
+}
+
+// checkReadPayloadRules enforces the cross-field rules of a succeeded
+// read_preview or read_basket payload: the basket rules above, every display
+// item_code a line of the basket, and (preview) unavailable_items disjoint
+// from the basket lines. read_history carries no basket and is not checked.
+func checkReadPayloadRules(kind string, payload []byte) error {
+	if kind != KindReadPreview && kind != KindReadBasket {
+		return nil
+	}
+	var p struct {
+		Display []struct {
+			ItemCode string `json:"item_code"`
+		} `json:"display"`
+		Unavailable    []string        `json:"unavailable_items"`
+		ApprovalBasket json.RawMessage `json:"approval_basket"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidDocument, err)
+	}
+	if len(p.ApprovalBasket) == 0 {
+		// empty reads have no basket; the schema forbids a missing basket
+		// on a non-empty read, so nothing is left to cross-check.
+		return nil
+	}
+	a, err := checkBasketRules(p.ApprovalBasket)
+	if err != nil {
+		return err
+	}
+	lines := make(map[string]struct{}, len(a.Lines))
+	for _, l := range a.Lines {
+		lines[l.ItemCode] = struct{}{}
+	}
+	for _, d := range p.Display {
+		if _, ok := lines[d.ItemCode]; !ok {
+			return fmt.Errorf("%w: display item_code is not a basket line", ErrInvalidDocument)
+		}
+	}
+	for _, u := range p.Unavailable {
+		if _, ok := lines[u]; ok {
+			return fmt.Errorf("%w: unavailable item_code is a basket line", ErrInvalidDocument)
+		}
+	}
+	return nil
 }
