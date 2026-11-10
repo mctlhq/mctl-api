@@ -98,6 +98,9 @@ func (s *Store) EnqueueRead(ctx context.Context, tx pgx.Tx, in ReadEnqueue) (com
 	if in.TTL < time.Second || in.TTL > MaxReadTTLSeconds*time.Second {
 		return "", "", fmt.Errorf("%w: read ttl out of range", ErrInvalidInput)
 	}
+	if !s.WireVersionsEnabled() {
+		return "", "", fmt.Errorf("%w: wire versions are not enabled", ErrReadUnavailable)
+	}
 	if err := CheckReadLevel(ctx, tx); err != nil {
 		return "", "", err
 	}

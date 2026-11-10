@@ -348,3 +348,18 @@ func TestEnqueueReadRefusals(t *testing.T) {
 		}
 	}
 }
+
+func TestEnqueueReadRefusedWhileWireVersionsDisabled(t *testing.T) {
+	h := newReadHarness(t, KindReadHistory)
+	h.s.wireEnabled.Store(false)
+	ctx := context.Background()
+	tx, err := h.s.Pool().Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, _, err = h.s.EnqueueRead(ctx, tx, ReadEnqueue{ProviderRef: "glovo", Request: h.req, TTL: 10 * time.Second})
+	if !errors.Is(err, ErrReadUnavailable) {
+		t.Fatalf("EnqueueRead with wire versions disabled = %v, want ErrReadUnavailable", err)
+	}
+}

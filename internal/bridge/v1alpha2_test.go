@@ -79,7 +79,7 @@ func TestVendoredV1alpha2MatchesProvenance(t *testing.T) {
 			t.Errorf("%s is vendored but not in SHA256SUMS", rel)
 			return nil
 		}
-		b, rerr := os.ReadFile(path)
+		b, rerr := os.ReadFile(path) //nolint:gosec // test reads vendored fixtures
 		if rerr != nil {
 			return rerr
 		}
@@ -120,7 +120,7 @@ func TestApprovalBasketRefResolves(t *testing.T) {
 
 func v2fixture(t *testing.T, name string) []byte {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(v2Dir, "fixtures", name))
+	b, err := os.ReadFile(filepath.Join(v2Dir, "fixtures", name)) //nolint:gosec // test fixture path
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestNoOwnCanonicalizer(t *testing.T) {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
 		}
-		b, _ := os.ReadFile(f)
+		b, _ := os.ReadFile(f) //nolint:gosec // test enumerates package sources
 		for _, bad := range []string{"func canonical", "func Canonical", "utf16.Encode", "sort.Strings(keys)"} {
 			if strings.Contains(string(b), bad) {
 				t.Errorf("%s contains %q: canonicalization belongs to internal/jcs", f, bad)

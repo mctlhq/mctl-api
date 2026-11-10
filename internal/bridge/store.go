@@ -743,6 +743,11 @@ func (s *Store) claimTx(ctx context.Context, tx pgx.Tx, c Caller, max int, lease
 	gate, args := ` AND c.operation_kind NOT IN ('read_history','read_preview','read_basket')`, []any{c.ProviderRef, c.Tenants, max}
 	if s.WireVersionsEnabled() {
 		gate, args = ` AND c.wire_version = ANY($4)`, append(args, c.wireVersions())
+	} else if CheckReadLevel(ctx, tx) == nil {
+		// The v1alpha2 columns exist although this process has not enabled
+		// wire versions (rolling deploy, or a failed enable). Never lease a
+		// stored v1alpha2 row as a plain v1alpha1 command.
+		gate = ` AND c.wire_version = '` + WireV1alpha1 + `'`
 	}
 	idRows, err := tx.Query(ctx, `SELECT c.command_id, c.status FROM bridge_commands c
 		WHERE c.provider_ref=$1 AND c.tenant = ANY($2) AND c.expires_at > now()
