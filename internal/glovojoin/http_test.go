@@ -359,3 +359,32 @@ func TestHTTPRouteTableIsTheContractAndOnlyTwoWrite(t *testing.T) {
 		t.Fatalf("idempotent routes = %v, want connect and prepare", writes)
 	}
 }
+
+// T8: writes have their own, smaller budget than reads, and a refused write
+// carries Retry-After. The count is taken before the body is read, so a
+// flood of malformed writes is limited too.
+func TestHTTPWritesAreLimitedSeparatelyFromReads(t *testing.T) {
+	f := newHTTPFx(t)
+	_, body := f.do("POST", jb+"/resolve", f.auth(nil), "{}")
+	var raw map[string]string
+	_ = json.Unmarshal([]byte(body), &raw)
+	f.ref = raw["scope_ref"]
+	f.rt.PerSubject, f.rt.Writes, f.rt.Aggregate = 100, 2, 1000
+	f.rt.once = sync.Once{}
+	_ = f.rt.Handler()
+	bad := `{"preview_id":"x","idempotency_key":"k"}`
+	var codes []int
+	for i := 0; i < 3; i++ {
+		resp, _ := f.do("POST", jb+"/orders:prepare", f.auth(map[string]string{"Idempotency-Key": "k"}), bad)
+		codes = append(codes, resp.StatusCode)
+		if i == 2 && resp.Header.Get("Retry-After") == "" {
+			t.Fatal("the limited write has no Retry-After")
+		}
+	}
+	if codes[2] != 429 || codes[0] == 429 || codes[1] == 429 {
+		t.Fatalf("write codes = %v, want the third limited", codes)
+	}
+	if resp, b := f.do("GET", jb+"/connection", f.auth(nil), ""); resp.StatusCode != 200 {
+		t.Fatalf("a read after the write budget = %d %s", resp.StatusCode, b)
+	}
+}

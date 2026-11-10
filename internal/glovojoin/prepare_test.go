@@ -26,6 +26,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/mctlhq/mctl-api/internal/glovo"
 )
 
@@ -266,5 +268,53 @@ func TestPrepareStoresTheCanonicalControlInput(t *testing.T) {
 	again, d2, err := in.Canonical()
 	if err != nil || !bytes.Equal(again, input) || d2 != digest {
 		t.Fatalf("stored input is not canonical: %v", err)
+	}
+}
+
+// lockOrder records the connection-store calls prepare makes, in order.
+type lockOrder struct {
+	PrepareConnections
+	calls []string
+}
+
+func (l *lockOrder) LockOwnerShared(ctx context.Context, tx pgx.Tx, tenant, principal string) error {
+	l.calls = append(l.calls, "lock")
+	return l.PrepareConnections.LockOwnerShared(ctx, tx, tenant, principal)
+}
+
+func (l *lockOrder) LiveConnectionTx(ctx context.Context, tx pgx.Tx, o glovo.Owner) (*glovo.Connection, error) {
+	l.calls = append(l.calls, "live")
+	return l.PrepareConnections.LiveConnectionTx(ctx, tx, o)
+}
+
+// T12: prepare takes the shared owner locks before it re-reads the live
+// connection, so a concurrent revoke or reconnect (which takes L2 exclusive)
+// cannot slip between the read and the writes.
+func TestPrepareLocksTheOwnerBeforeTheConnectionRead(t *testing.T) {
+	s := newStack(t)
+	s.activate("k-lock")
+	rec := &lockOrder{PrepareConnections: s.conns}
+	p := &Preparer{DB: s.rp, Conns: rec, Order: s.orders, Work: s.work}
+	if _, rf := p.Prepare(context.Background(), s.req(s.preview(stackBasket), "key-lock")); rf != nil {
+		t.Fatal(rf)
+	}
+	if len(rec.calls) < 2 || rec.calls[0] != "lock" || rec.calls[1] != "live" {
+		t.Fatalf("connection-store calls = %v, want lock then live", rec.calls)
+	}
+}
+
+// T12: a preview bound to another install revision than the live connection's
+// is stale_install, and nothing is written.
+func TestPrepareRefusesAPreviewOfAnotherInstallRevision(t *testing.T) {
+	s := newStack(t)
+	s.activate("k-rev")
+	p := s.preview(stackBasket)
+	if _, err := s.mp.Exec(context.Background(), `UPDATE glovo.join_previews SET install_revision = install_revision + 1 WHERE id = $1`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, rf := s.prepare.Prepare(context.Background(), s.req(p, "key-rev"))
+	wantCode(t, rf, glovo.CodeStaleInstall, "preview_connection_changed")
+	if w := s.writes(); w != [6]int{0, 0, 0, 0, 0, 0} {
+		t.Fatalf("wrote on a stale preview: %v", w)
 	}
 }
