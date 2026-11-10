@@ -109,20 +109,28 @@ func TestFenceRefusesIntentHashMismatch(t *testing.T) {
 	wantCode(t, err, glovo.CodeIntentMismatch)
 }
 
-// T6/T7: replay and wrong command.
+// T6/T7: a spent approval does not pass twice, and a second command that
+// names an approval reserved for another command is a replay.
 func TestFenceReplayAndForeignCommand(t *testing.T) {
-	e := newEnv(t)
-	f := e.reserved("")
-	if _, err := e.run(f, f.binding(e)); err != nil {
-		t.Fatal(err)
-	}
-	_, err := e.run(f, f.binding(e))
-	if err == nil {
-		t.Fatal("a consumed approval must not pass twice")
-	}
-	if _, ok := CodeOf(err); !ok {
-		t.Fatalf("replay not a typed refusal: %v", err)
-	}
+	t.Run("consumed approval, same command", func(t *testing.T) {
+		e := newEnv(t)
+		f := e.reserved("")
+		if _, err := e.run(f, f.binding(e)); err != nil {
+			t.Fatal(err)
+		}
+		_, err := e.run(f, f.binding(e))
+		wantCode(t, err, glovo.CodeApprovalInvalid)
+	})
+	t.Run("second command names the reserved approval", func(t *testing.T) {
+		e := newEnv(t)
+		f := e.reserved("")
+		g := e.siblingCommand(f)
+		_, err := e.run(g, g.binding(e))
+		wantCode(t, err, glovo.CodeApprovalReplayed)
+		if got := e.state(f.aar); got != workitems.ApprovalReserved {
+			t.Fatalf("state = %s, want reserved", got)
+		}
+	})
 }
 
 func TestFenceRefusals(t *testing.T) {

@@ -103,7 +103,7 @@ func TestApplyGlovoApprovalSchemaTwiceAndForeignOwner(t *testing.T) {
 	}
 
 	// An object owned by another role is refused: a foreign owner of the bindings table.
-	root := e.conn(strings.Replace(e.base, "/postgres?", "/"+e.db+"?", 1))
+	root := e.conn(e.dbURL())
 	if _, err := root.Exec(ctx, `ALTER TABLE glovo.approval_bindings OWNER TO `+e.rt); err != nil {
 		t.Fatal(err)
 	}

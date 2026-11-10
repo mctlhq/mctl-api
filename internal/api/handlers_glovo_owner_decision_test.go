@@ -83,7 +83,9 @@ func newGlovoOwnerEnv(t *testing.T) *glovoOwnerEnv {
 	t.Helper()
 	e := &glovoOwnerEnv{workItemsEnv: newWorkItemsEnv(t)}
 	e.dec = &fakeGlovoDecisions{binding: &workitems.GlovoBinding{Tenant: glovoTenant, OwnerPrincipalID: glovoOwnerPRN, OrderRef: "ordr_X"}}
-	e.members = &glovoMembers{roles: map[string]string{glovoTenant + "|" + glovoOwnerPRN: "developer"}}
+	// The other person is a live developer of the same tenant: only the
+	// binding's owner comparison keeps them out, not a missing membership.
+	e.members = &glovoMembers{roles: map[string]string{glovoTenant + "|" + glovoOwnerPRN: "developer", glovoTenant + "|" + glovoOtherPRN: "developer"}}
 	e.h.opts.GlovoApprovals = e.dec
 	e.h.opts.TenantAuthzMode = TenantAuthzPrincipal
 	e.h.opts.PrincipalMembership = e.members

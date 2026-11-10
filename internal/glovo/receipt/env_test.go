@@ -333,3 +333,21 @@ func (e *env) state(aar string) string {
 	}
 	return s
 }
+
+// siblingCommand writes a second bridge command that names f's approval, and
+// points the order fake at it as the dispatched command.
+func (e *env) siblingCommand(f fixture) fixture {
+	e.t.Helper()
+	g := f
+	g.cmd = tok("cmd_", 26)
+	if _, err := e.mp.Exec(context.Background(), `INSERT INTO bridge_commands (command_id, execution_id, work_item_id, workflow_id, tenant,
+		owner_principal_id, tenant_ref, principal_ref, order_ref, connection_ref, install_revision, provider_ref, operation_kind,
+		attempt, intent_hash, approval_ref, operation_key, sequence, payload, payload_digest, command_nonce, ttl_seconds, expires_at)
+		SELECT $1, execution_id, work_item_id, workflow_id, tenant, owner_principal_id, tenant_ref, principal_ref, order_ref,
+		connection_ref, install_revision, provider_ref, operation_kind, attempt, intent_hash, approval_ref, 'op-'||$1, 2, payload,
+		payload_digest, command_nonce, ttl_seconds, expires_at FROM bridge_commands WHERE command_id=$2`, g.cmd, f.cmd); err != nil {
+		e.t.Fatalf("insert sibling: %v", err)
+	}
+	e.ord.order.CommandID = g.cmd
+	return g
+}

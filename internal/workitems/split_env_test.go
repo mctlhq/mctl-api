@@ -156,3 +156,14 @@ func (e *splitEnv) catalogDump(c *pgx.Conn) string {
 	}
 	return out
 }
+
+// dbURL is the admin URL of the scratch database, whatever the admin URL's own
+// database is called.
+func (e *splitEnv) dbURL() string {
+	u, err := url.Parse(e.base)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	u.Path = "/" + e.db
+	return u.String()
+}

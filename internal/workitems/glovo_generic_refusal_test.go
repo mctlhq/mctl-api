@@ -16,13 +16,20 @@ func TestGenericPathsRefuseGlovoKinds(t *testing.T) {
 	ctx := context.Background()
 	check := func(t *testing.T, id, state string) {
 		t.Helper()
+		// Present the row's own identifying fields, so the only reason a generic
+		// compare-and-set can refuse is the Glovo kind predicate itself.
+		var target, artifact, requester, intent string
+		if err := g.rtp.QueryRow(ctx, `SELECT target, artifact_hash, requested_by, intent_hash
+			FROM public.action_approval_requests WHERE id=$1`, id).Scan(&target, &artifact, &requester, &intent); err != nil {
+			t.Fatal(err)
+		}
 		calls := map[string]error{}
 		_, calls["decide"] = g.store.DecideActionApproval(ctx, ActionDecisionInput{ID: id, DecidedBy: "oidc:other", Decision: DecisionApprove})
-		_, calls["consume"] = g.store.ConsumeActionApproval(ctx, id, "sha256:x")
-		_, calls["mark"] = g.store.MarkActionApprovalExecuted(ctx, id, "t", "h", GlovoRequester)
-		_, calls["reserve"] = g.store.ReserveActionApproval(ctx, id, "t", "h", GlovoRequester, time.Hour)
-		_, calls["settle"] = g.store.SettleActionApproval(ctx, id, GlovoRequester, true)
-		_, calls["settle-fail"] = g.store.SettleActionApproval(ctx, id, GlovoRequester, false)
+		_, calls["consume"] = g.store.ConsumeActionApproval(ctx, id, intent)
+		_, calls["mark"] = g.store.MarkActionApprovalExecuted(ctx, id, target, artifact, requester)
+		_, calls["reserve"] = g.store.ReserveActionApproval(ctx, id, target, artifact, requester, time.Hour)
+		_, calls["settle"] = g.store.SettleActionApproval(ctx, id, requester, true)
+		_, calls["settle-fail"] = g.store.SettleActionApproval(ctx, id, requester, false)
 		for name, err := range calls {
 			if !errors.Is(err, ErrApprovalKindNotSpendable) {
 				t.Errorf("%s on a %s Glovo row: %v, want ErrApprovalKindNotSpendable", name, state, err)
