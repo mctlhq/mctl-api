@@ -16,6 +16,7 @@ package control
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/mctlhq/mctl-api/internal/bridge"
 	"github.com/mctlhq/mctl-api/internal/glovo"
+	"github.com/mctlhq/mctl-api/internal/glovo/basket"
 	"github.com/mctlhq/mctl-api/internal/glovo/dbq"
 	"github.com/mctlhq/mctl-api/internal/glovo/orders"
 )
@@ -171,12 +173,29 @@ func TestDispatchRefusals(t *testing.T) {
 			e.setOrder(f, func(o *orders.Order) { o.InstallRevision = 4 })
 		}, std, glovo.CodeIntentMismatch},
 		{"receipt fingerprint differs from the order", func(e *env, f fixture) {
-			other := "sha256:" + rnd(32)
+			// A consistent order and snapshot of another basket, so that only
+			// the receipt's own binding can refuse.
+			_, canon, err := basket.Parse([]byte(otherBasket))
+			if err != nil {
+				e.t.Fatal(err)
+			}
+			other := basket.Fingerprint(canon)
 			e.setOrder(f, func(o *orders.Order) { o.FinalBasketFingerprint = other })
+			e.idx.mu.Lock()
+			e.idx.snaps[f.orderRef] = orders.Snapshot{OrderRef: f.orderRef, Seq: 1, Fingerprint: other, Canonical: canon}
+			e.idx.mu.Unlock()
 		}, func(e *env, f fixture) error {
 			_, err := e.d.Dispatch(context.Background(), e.tenants, f.orderRef, f.aar, e.idx.tmpl[f.orderRef].FinalBasketFingerprint)
 			return err
 		}, glovo.CodeBasketChanged},
+		{"receipt intent hash is not its binding's", func(e *env, f fixture) {
+			e.forceApproval(f, `intent_hash = 'sha256:`+strings.Repeat("a", 64)+`'`)
+		}, std, glovo.CodeIntentMismatch},
+		{"order owner moved between peek and lock", func(e *env, f fixture) {
+			e.idx.mu.Lock()
+			e.idx.peekOwner = "prn_someoneelse"
+			e.idx.mu.Unlock()
+		}, std, glovo.CodeUnavailable},
 		{"connection not active", func(e *env, f fixture) { e.conns.conn.State = glovo.Revoked }, std, glovo.CodeNoConnection},
 		{"live connection is another", func(e *env, f fixture) { e.conns.conn.ConnectionID = tok("gcn_", 26) }, std, glovo.CodeConnectionRevoked},
 		{"install revision moved", func(e *env, f fixture) { e.conns.conn.InstallRevision = 4 }, std, glovo.CodeStaleInstall},
@@ -187,6 +206,11 @@ func TestDispatchRefusals(t *testing.T) {
 		{"snapshot does not hash to the fingerprint", func(e *env, f fixture) {
 			s := e.idx.snaps[f.orderRef]
 			s.Canonical = []byte(`{"v":"mctl-approval-basket/v1","store_ref":"pst_0123456789abcdef0123","currency":"EUR","lines":[{"item_code":"FAKE-2","quantity":1,"unit_price_minor":500}],"subtotal_minor":500,"delivery_fee_minor":199,"service_fee_minor":50,"discount_minor":0,"total_minor":749}`)
+			e.idx.snaps[f.orderRef] = s
+		}, std, glovo.CodeBasketChanged},
+		{"snapshot row names another fingerprint than its basket", func(e *env, f fixture) {
+			s := e.idx.snaps[f.orderRef]
+			s.Fingerprint = "sha256:" + rnd(32)
 			e.idx.snaps[f.orderRef] = s
 		}, std, glovo.CodeBasketChanged},
 		{"snapshot unreadable", func(e *env, f fixture) { delete(e.idx.snaps, f.orderRef) }, std, glovo.CodeUnavailable},
@@ -342,8 +366,10 @@ func TestDispatchFreshnessWindow(t *testing.T) {
 		if err := e.mp.QueryRow(context.Background(), `SELECT ttl_seconds FROM bridge_commands WHERE command_id=$1`, res.CommandID).Scan(&ttl); err != nil {
 			t.Fatal(err)
 		}
-		if ttl < 290 || ttl > 300 {
-			t.Fatalf("ttl %d, want 290..300 (the receipt is fresh for 300s)", ttl)
+		// floor, never ceil: the receipt has already aged a little, so a
+		// ttl of 300 would outlive its 300s freshness bound.
+		if ttl < 290 || ttl >= 300 {
+			t.Fatalf("ttl %d, want 290..299 (the receipt is fresh for under 300s)", ttl)
 		}
 	})
 }
@@ -433,7 +459,12 @@ func TestDispatchHungMembershipDoesNotHoldLocks(t *testing.T) {
 	if !locked {
 		t.Fatal("the approval row was not locked during the membership read: the test does not observe the hold")
 	}
-	r := <-done
+	var r out
+	select {
+	case r = <-done:
+	case <-time.After(glovo.MembershipTimeout + 4*time.Second):
+		t.Fatalf("the dispatch is still waiting on the hung provider after %s", glovo.MembershipTimeout+4*time.Second)
+	}
 	wantCode(t, r.err, glovo.CodeUnavailable)
 	if r.dur > glovo.MembershipTimeout+2*time.Second {
 		t.Fatalf("the dispatch took %s with a hung provider, bound is %s", r.dur, glovo.MembershipTimeout)
@@ -444,5 +475,70 @@ func TestDispatchHungMembershipDoesNotHoldLocks(t *testing.T) {
 	if e.rowLocked(`SELECT 1 FROM ctl_fake_orders WHERE order_ref = $1 FOR UPDATE NOWAIT`, f.orderRef) {
 		t.Fatal("the order row is still locked after the timeout")
 	}
+	e.untouched(f, "approved")
+}
+
+// otherBasket is a valid basket that is not basePayload.
+const otherBasket = `{"v":"mctl-approval-basket/v1","store_ref":"pst_0123456789abcdef0123","currency":"EUR","lines":[{"item_code":"FAKE-2","quantity":1,"unit_price_minor":500}],"subtotal_minor":500,"delivery_fee_minor":199,"service_fee_minor":50,"discount_minor":0,"total_minor":749}`
+
+// A command effect that cannot be read is unavailable: it is never read as
+// effect "none", which would let the order be cancelled while a permit may
+// already have been issued.
+func TestCancelUnreadableEffectIsUnavailable(t *testing.T) {
+	e := newEnv(t)
+	f := e.finalized(fixOpt{})
+	ghost := tok("cmd_", 26)
+	e.mustMig(`UPDATE ctl_fake_orders SET state='dispatched', command_id=$2 WHERE order_ref=$1`, f.orderRef, ghost)
+	_, err := e.d.Cancel(context.Background(), e.tenants, f.orderRef)
+	wantCode(t, err, glovo.CodeUnavailable)
+	if got := e.orderState(f); got != orders.StateDispatched {
+		t.Fatalf("order is %s after an unreadable effect, want dispatched", got)
+	}
+}
+
+// A finalized order must not find a command already holding its operation key:
+// the enqueue is not "created", the call is unavailable and nothing moves.
+func TestDispatchExistingOperationKeyIsUnavailable(t *testing.T) {
+	e := newEnv(t)
+	f := e.finalized(fixOpt{})
+	e.rawCommand(f, 1, "glovo-dispatch:"+f.orderRef)
+	_, err := e.dispatch(f)
+	if err == nil {
+		t.Fatal("dispatch succeeded over an existing command for the order")
+	}
+	wantCode(t, err, glovo.CodeUnavailable)
+	if got := e.orderState(f); got != orders.StateFinalized {
+		t.Fatalf("order is %s, want finalized", got)
+	}
+	if got := e.aarState(f); got != "approved" {
+		t.Fatalf("receipt is %s, want approved", got)
+	}
+	if n := e.count(`SELECT count(*) FROM bridge_commands`); n != 1 {
+		t.Fatalf("%d command rows, want the 1 seeded", n)
+	}
+}
+
+// A row lock (L3, and L4 behind it) held past the 5 s lock_timeout is refused
+// as tenant_busy, not as a generic failure; nothing is left behind.
+func TestDispatchOrderLockTimeoutIsTenantBusy(t *testing.T) {
+	e := newEnv(t)
+	f := e.finalized(fixOpt{})
+	ctx := context.Background()
+	hold, err := e.mp.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hold.Rollback(ctx) }()
+	var one int
+	if err := hold.QueryRow(ctx, `SELECT 1 FROM ctl_fake_orders WHERE order_ref = $1 FOR UPDATE`, f.orderRef).Scan(&one); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, derr := e.dispatch(f)
+	wantCode(t, derr, glovo.CodeTenantBusy)
+	if d := time.Since(start); d < 4*time.Second || d > 9*time.Second {
+		t.Fatalf("refused after %s, want about the 5s lock_timeout", d)
+	}
+	_ = hold.Rollback(ctx)
 	e.untouched(f, "approved")
 }

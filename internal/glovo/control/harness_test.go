@@ -73,6 +73,7 @@ type fakeIndex struct {
 	marks     []string
 	markErr   error
 	lockCalls int
+	peekOwner string // when set, PeekOrderScope reports this owner
 }
 
 // BindApproval is the #988 call CreateGlovoApprovalTx makes; the fixture binds
@@ -87,6 +88,9 @@ func (f *fakeIndex) PeekOrderScope(_ context.Context, _ dbq.Querier, ref string,
 	o, ok := f.tmpl[ref]
 	if !ok || !in(tenants, o.Tenant) {
 		return orders.Scope{}, glovo.ErrNotFound
+	}
+	if f.peekOwner != "" {
+		return orders.Scope{Tenant: o.Tenant, PrincipalID: f.peekOwner}, nil
 	}
 	return orders.Scope{Tenant: o.Tenant, PrincipalID: o.OwnerPrincipalID}, nil
 }

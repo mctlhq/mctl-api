@@ -208,6 +208,28 @@ func TestProveOneDatabase(t *testing.T) {
 		p.superExec(p.db, fmt.Sprintf(`GRANT DELETE ON bridge_commands TO %s`, p.rt))
 		p.wantFail("bridge grants")
 	})
+	t.Run("a glovo store that is not ready fails", func(t *testing.T) {
+		p := newProofEnv(t)
+		// Same pool, but no explicit GLOVO_DB_URL: Ready answers not_ready.
+		gs, err := glovo.NewStore(context.Background(), p.rtp, p.rt, p.mig, glovo.WithRevocationHook(bridge.CancelOpenForConnections))
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = ProveOneDatabase(context.Background(), p.bs, gs, p.wip)
+		if err == nil || !strings.Contains(err.Error(), "glovo store") {
+			t.Fatalf("a store that is not ready passed the proof: %v", err)
+		}
+	})
+	t.Run("a nonce that cannot be deleted fails the proof", func(t *testing.T) {
+		p := newProofEnv(t)
+		p.superExec(p.db,
+			`CREATE FUNCTION public.refuse_probe_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'no delete'; END $$`,
+			`CREATE TRIGGER refuse_probe_delete BEFORE DELETE ON public.bridge_colocation_probe FOR EACH ROW EXECUTE FUNCTION public.refuse_probe_delete()`)
+		err := p.prove()
+		if err == nil || !strings.Contains(err.Error(), "delete nonce") {
+			t.Fatalf("a proof that left its nonce behind passed: %v", err)
+		}
+	})
 	t.Run("a disabled guard trigger fails", func(t *testing.T) {
 		p := newProofEnv(t)
 		p.superExec(p.db, `ALTER TABLE public.action_approval_requests DISABLE TRIGGER aar_guard`)

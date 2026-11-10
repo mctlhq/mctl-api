@@ -377,3 +377,30 @@ func deadlockOf(err error) error {
 	}
 	return nil
 }
+
+// A dispatch that cannot get L2 within the 5 s lock_timeout is refused as
+// tenant_busy (409, retryable) and leaves nothing behind; it neither waits
+// forever nor reports a generic failure.
+func TestDispatchLockTimeoutIsTenantBusy(t *testing.T) {
+	e := newRealEnv(t)
+	f, rc := e.realFixture()
+	_, rev := e.installTenant()
+	paused, release := make(chan struct{}), make(chan struct{})
+	revoker := make(chan error, 1)
+	go func() {
+		_, err := e.gs.Reconnect(context.Background(), glovo.ConnectInput{Owner: ownerOf, ExpectedInstallRevision: rev,
+			IdempotencyKey: "re-" + rnd(6), Actor: ownerActor,
+			AfterLocks: func(context.Context, pgx.Tx) error { close(paused); <-release; return nil }}, rc.ref)
+		revoker <- err
+	}()
+	<-paused
+	dispatch := make(chan error, 1)
+	go func() { _, err := e.dispatch(f); dispatch <- err }()
+	err := within(t, "the dispatch", 15*time.Second, dispatch)
+	close(release)
+	if rerr := within(t, "the revoker", 5*time.Second, revoker); rerr != nil {
+		t.Fatalf("Reconnect: %v", rerr)
+	}
+	wantCode(t, err, glovo.CodeTenantBusy)
+	e.untouched(f, "approved")
+}

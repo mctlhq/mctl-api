@@ -38,8 +38,13 @@ regenerates them after a deliberate change.
 
 Replay is answered first (same approval, same command: 200 with
 `Idempotent-Replayed: true`). The command TTL is
-`min(900s, time left until the approval's fresh_until)`; the 120 s reserve
-margin is enforced by the receipt reservation. Lock order: tenant, owner, live
+`min(900s, floor of the time left until the approval's fresh_until)`. A receipt
+whose `fresh_until` is 120 s (`workitems.ReservePermitMargin`) or less away is
+refused as `approval_expired` before the command is enqueued, so no command row
+exists that the permit reservation would later refuse. The live membership read
+taken under the row locks is bounded (`glovo.BoundedMembership`, 2 s, shorter
+than the 5 s lock timeout); a timeout is `unavailable`, never "not a member".
+Lock order: tenant, owner, live
 connection read, order, approval receipt, bridge commands; a lock timeout is
 `tenant_busy`. Cancel and read outcomes are a total table over command status
 and effect state; a pair outside it is 503 `unavailable` with rollback.
@@ -55,7 +60,16 @@ standby, an owning runtime role and a trigger on the bridge relations.
 ## Write fence
 
 `SetFence` is called only when all six hold: the gate is open, hold
-mctl-gitops#2457 is lifted, the one-database proof passed, the #959 revocation
-hook is installed, `MembershipRevocationWired()` is true, and `receipt.Ready`
-passes. Until then the bridge keeps its refusing fence. A fence refusal of
+mctl-gitops#2457 is lifted, the one-database proof passed, the installed
+revocation hook IS `bridge.CancelOpenForConnections` (checked by function
+identity, `Store.RevocationHookIs`, not merely non-nil), `MembershipRevocationWired()`
+is true, and `receipt.Ready` passes. With `MCTL_GLOVO_CONTROL_ENABLED=true` the
+binary installs that hook and refuses to boot if the installed hook is anything
+else, so the synthetic no-op hook can never satisfy the condition.
+
+`MembershipRevocationWired()` needs a positive signal: a probe installed with
+`WithMembershipRevocationProbe` (a detector heartbeat or an end-to-end proof)
+that returns true. A label alone (`WithMembershipRevoker`), no probe, a nil
+store or a panicking probe answer false, the interim state named `refusing`.
+Until all six hold the bridge keeps its refusing fence. A fence refusal of
 `cancel_order_fake` is `approval_invalid`.
