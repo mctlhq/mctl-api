@@ -20,6 +20,7 @@
 package glovobasket
 
 import (
+	"bytes"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -234,7 +235,7 @@ func verifyFrozen(r Revision) error {
 		return glovo.Refuse(glovo.CodeInvalidRequest)
 	}
 	a, canonical, err := basket.Parse(r.Canonical)
-	if err != nil || string(canonical) != string(r.Canonical) || basket.Fingerprint(canonical) != r.Fingerprint {
+	if err != nil || !bytes.Equal(canonical, r.Canonical) || basket.Fingerprint(canonical) != r.Fingerprint {
 		return glovo.Refuse(glovo.CodeFingerprintChanged)
 	}
 	if len(a.Lines) != len(r.Lines) || a.TotalMinor != r.Totals.TotalMinor || a.StoreRef != r.StoreRef {
