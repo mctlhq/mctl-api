@@ -297,7 +297,9 @@ func TestVerifyFrozenRefusesATamperedRevision(t *testing.T) {
 			r.Canonical = []byte(strings.Replace(string(r.Canonical), `"quantity":2`, `"quantity":3`, 1))
 		},
 		"fingerprint": func(r *Revision) { r.Fingerprint = "sha256:" + strings.Repeat("0", 64) },
-		"lines":       func(r *Revision) { r.Lines = append([]Line(nil), Line{ItemCode: "FAKE-APPLE", Quantity: 9, UnitPriceMinor: 45}) },
+		"lines": func(r *Revision) {
+			r.Lines = append([]Line(nil), Line{ItemCode: "FAKE-APPLE", Quantity: 9, UnitPriceMinor: 45})
+		},
 	} {
 		c := r
 		c.Canonical = append([]byte(nil), r.Canonical...)
