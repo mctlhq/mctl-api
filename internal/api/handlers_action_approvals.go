@@ -59,6 +59,8 @@ const (
 	aarCodeConsumed            = "approval_consumed"
 	aarCodeNotConsumed         = "approval_not_consumed"
 	aarCodeExecuted            = "approval_executed"
+	aarCodeKindNotSpendable    = "approval_kind_not_spendable_here"
+	aarCodeKindNotCreatable    = "approval_kind_not_creatable_here"
 	aarCodeInFlight            = "approval_in_flight"
 	aarCodeTargetMismatch      = "approval_target_mismatch"
 	aarCodeRequesterForbidden  = "approval_requester_forbidden"
@@ -223,6 +225,8 @@ var actionApprovalRefusals = []struct {
 	{workitems.ErrApprovalExecuted, http.StatusConflict, aarCodeExecuted, false},
 	{workitems.ErrApprovalInFlight, http.StatusConflict, aarCodeInFlight, false},
 	{workitems.ErrApprovalTargetMismatch, http.StatusConflict, aarCodeTargetMismatch, false},
+	{workitems.ErrApprovalKindNotSpendable, http.StatusConflict, aarCodeKindNotSpendable, false},
+	{workitems.ErrApprovalKindNotCreatable, http.StatusBadRequest, aarCodeKindNotCreatable, false},
 }
 
 // actionApprovalRefusalCode is the typed code of a store refusal, or "" for
