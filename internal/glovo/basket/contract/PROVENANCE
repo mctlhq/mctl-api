@@ -1,0 +1,10 @@
+Vendored UNCHANGED from mctlhq/mctl-agents docs/contracts/bridge/v1alpha2/
+(schema at the top level, vectors under vectors/) at commit
+46ccddcec15077a188e5a80089b57d030d056e16 (mctl-agents#1059, merged).
+Each file is pinned by its SHA256SUMS entry; TestVendoredContractMatchesProvenance
+enforces it. must-reject.json is not copied here: it lives once, in
+internal/jcs/testdata/.
+
+da86bae104d86cdab17b77070d460ecf9d733c271491480ada01fc2ff1b38fb3  approval-basket.schema.json
+15c61d94d5e12835a06c8cf30447c34139516874ae69225344bf4c588d4d44cc  basket-fingerprint.json
+6a376b6f5fbf226e9505b0a6f45c1ccfd8a53e5ceaa9334fe507f18fe3f3e22b  pattern-parity.json

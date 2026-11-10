@@ -18,6 +18,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/mctlhq/mctl-api/internal/glovo/dbq"
 )
 
 // Reasons Ready reports. Every one is a not_ready.
@@ -180,6 +182,30 @@ SELECT (SELECT count(*) FROM pg_namespace WHERE nspname = 'glovo' AND pg_get_use
 // checkGrants compares the runtime role's table-level and column-level rights
 // on one table with its registered row, in both directions.
 func (s *Store) checkGrants(ctx context.Context, oid uint32, row GrantRow) error {
+	return checkGrantsOn(ctx, s.pool, oid, row)
+}
+
+// VerifyGrants compares the current user's table-level and column-level
+// rights on glovo.<table> with the row another slice registered with
+// RegisterGrants, in both directions, so a slice reuses the one registry and
+// hand-codes no copy of it. A table with no registered row, a missing table or
+// a mismatch is a not_ready answer; a check that could not run is too.
+func VerifyGrants(ctx context.Context, q dbq.Querier, table string) error {
+	row, ok := grantFor(table)
+	if !ok {
+		return notReady(NotReadyUnregistered)
+	}
+	var oid *uint32
+	if err := q.QueryRow(ctx, `SELECT to_regclass('glovo.' || quote_ident($1))::oid`, table).Scan(&oid); err != nil {
+		return checkFailed(err)
+	}
+	if oid == nil {
+		return notReady(NotReadyTableMissing)
+	}
+	return checkGrantsOn(ctx, q, *oid, row)
+}
+
+func checkGrantsOn(ctx context.Context, q dbq.Querier, oid uint32, row GrantRow) error {
 	expectTable := map[string]bool{}
 	for _, p := range row.Privileges {
 		expectTable[p] = true
@@ -193,7 +219,7 @@ func (s *Store) checkGrants(ctx context.Context, oid uint32, row GrantRow) error
 	for i := range got {
 		dest[i] = &got[i]
 	}
-	if err := s.pool.QueryRow(ctx, "SELECT "+strings.Join(sel, ", "), oid).Scan(dest...); err != nil {
+	if err := q.QueryRow(ctx, "SELECT "+strings.Join(sel, ", "), oid).Scan(dest...); err != nil {
 		return checkFailed(err)
 	}
 	for i, p := range tablePrivileges {
@@ -206,7 +232,7 @@ func (s *Store) checkGrants(ctx context.Context, oid uint32, row GrantRow) error
 	for _, p := range columnPrivileges {
 		cs = append(cs, fmt.Sprintf("has_column_privilege(current_user, a.attrelid, a.attnum, '%s')", p))
 	}
-	rows, err := s.pool.Query(ctx, `SELECT a.attname, `+strings.Join(cs, ", ")+` FROM pg_attribute a
+	rows, err := q.Query(ctx, `SELECT a.attname, `+strings.Join(cs, ", ")+` FROM pg_attribute a
  WHERE a.attrelid = $1::oid AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attname`, oid)
 	if err != nil {
 		return checkFailed(err)
