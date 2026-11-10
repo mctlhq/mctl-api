@@ -75,6 +75,9 @@ func grantFor(table string) (GrantRow, bool) {
 	return r, ok
 }
 
+// GrantFor returns the registered row of a table in schema glovo.
+func GrantFor(table string) (GrantRow, bool) { return grantFor(table) }
+
 // grantsSnapshot renders the registry as the text of testdata/grants.golden.
 func grantsSnapshot() string {
 	grantsMu.Lock()

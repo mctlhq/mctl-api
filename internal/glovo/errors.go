@@ -131,6 +131,10 @@ func refuse(c Code) *Error {
 	return &Error{Code: c, Description: codeInfo[c].desc}
 }
 
+// Refuse returns the refusal of c with its fixed description and nothing else,
+// for the Glovo stores that live in other packages.
+func Refuse(c Code) *Error { return refuse(c) }
+
 // ErrNotFound is the one value for a missing and a foreign entity, so the two
 // cannot be told apart.
 var ErrNotFound = refuse(CodeNotFound)

@@ -1,0 +1,7 @@
+Vendored UNCHANGED from mctlhq/mctl-agents docs/contracts/bridge/v1alpha2/vectors/
+at commit 46ccddcec15077a188e5a80089b57d030d056e16 (mctl-agents#1059, merged).
+Each file is pinned by its docs/contracts/bridge/v1alpha2/SHA256SUMS entry;
+TestVendoredVectorsMatchProvenance enforces it.
+
+eadb56bf8582fdeead0f220c28bb4a382466ecca821c22d8b3e6450b66826bf9  jcs-digest.json
+99c7308cf358608c0991d1446f3b324985dba21fa3d2a2374a3d62eefefb6db9  must-reject.json
