@@ -488,8 +488,10 @@ type Store struct {
 	now  func() time.Time
 
 	releaseOnce sync.Once
-	mu          sync.RWMutex
-	fence       WriteFence
+	// borrowed marks a pool the wiring owns (NewRuntimeStore): Close leaves it.
+	borrowed bool
+	mu       sync.RWMutex
+	fence    WriteFence
 
 	wireEnabled atomic.Bool
 	readTTL     atomic.Int64 // seconds; 0 means DefaultReadResultTTL
@@ -540,7 +542,7 @@ func OpenExistingStore(ctx context.Context, connStr string) (*Store, error) {
 
 // Close releases the pool.
 func (s *Store) Close() {
-	if s != nil && s.pool != nil {
+	if s != nil && s.pool != nil && !s.borrowed {
 		s.releaseOnce.Do(func() { pgshared.Release(s.pool) })
 	}
 }
@@ -1020,12 +1022,7 @@ func (s *Store) Cancel(ctx context.Context, tx pgx.Tx, commandID, actor string) 
 	case StatusCompleted, StatusExpired:
 		return ErrAlreadyCompleted
 	}
-	if _, err := tx.Exec(ctx, `UPDATE bridge_commands SET status='cancelled', cancel_requested=true, updated_at=now(),
-			effect_state = CASE WHEN effect_state='permitted' THEN 'unknown' ELSE effect_state END
-		WHERE command_id=$1`, commandID); err != nil {
-		return fmt.Errorf("bridge: cancel: %w", err)
-	}
-	return addTransition(ctx, tx, commandID, row.Status, StatusCancelled, row.LeaseEpoch, actor, "")
+	return cancelRow(ctx, tx, commandID, row.Status, row.LeaseEpoch, actor)
 }
 
 // Outcome is the read-back control code uses before any retry.

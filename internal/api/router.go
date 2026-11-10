@@ -309,6 +309,11 @@ type Options struct {
 	// GlovoAllowlist writes the Glovo pilot allowlist (GLOVO_ENABLED, the
 	// glovo store). Nil makes the allowlist routes answer 503.
 	GlovoAllowlist GlovoAllowlist
+	// GlovoControl configures the internal Glovo control routes (mctl-api#985):
+	// dispatch, cancel and the two reads of the DevLoop control worker. Nil,
+	// a closed build gate or MCTL_GLOVO_CONTROL_ENABLED unset leaves them
+	// unmounted (404).
+	GlovoControl *GlovoControlRoutes
 	// Glovo configures the synthetic Glovo connection routes (mctl-api#961):
 	// facade, tenant installation and worker. Nil, or Enabled false, makes
 	// every one of them answer 503 not_ready.
@@ -615,6 +620,9 @@ func NewRouter(opts Options) http.Handler {
 		// The Glovo worker reaches the worker routes and nothing else
 		// (mctl-api#961).
 		r.Use(h.glovoWorkerGate)
+		// The Glovo control worker reaches the four control routes and
+		// nothing else (mctl-api#985).
+		r.Use(h.glovoControlWorkerGate)
 		// The registry publisher reaches the registry publication routes and
 		// nothing else (mctlhq/mctl-agents#470).
 		r.Use(registryPublisherGate)
@@ -901,6 +909,19 @@ func NewRouter(opts Options) http.Handler {
 					r.Post("/commands/claim", h.BridgeClaim)
 					r.Post("/commands/{command_id}/result", h.BridgeResult)
 					r.Post("/commands/{command_id}/write-permit", h.BridgeWritePermit)
+				})
+			}
+
+			// Glovo control routes (mctl-api#985): dark. Mounted only when the
+			// build gate is open and MCTL_GLOVO_CONTROL_ENABLED is set; the
+			// control-worker principal only.
+			if opts.GlovoControl.mounted() {
+				r.Route("/internal/glovo", func(r chi.Router) {
+					r.Use(requireGlovoControlWorker)
+					r.Post("/orders/{order_ref}/dispatch", h.GlovoControlDispatch)
+					r.Post("/orders/{order_ref}/cancel", h.GlovoControlCancel)
+					r.Get("/commands/{command_id}", h.GlovoControlReadCommand)
+					r.Get("/approvals/{approval_ref}", h.GlovoControlReadApproval)
 				})
 			}
 

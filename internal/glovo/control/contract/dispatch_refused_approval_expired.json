@@ -1,0 +1,16 @@
+{
+  "name": "dispatch refused approval_expired",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/internal/glovo/orders/ordr_ABCDEFGHIJKLMNOP0123/dispatch",
+    "body": {
+      "approval_ref": "aar_ABCDEFGHIJKLMNOP0123",
+      "fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+    }
+  },
+  "status": 409,
+  "response": {
+    "error": "approval_expired",
+    "error_description": "the approval expired"
+  }
+}

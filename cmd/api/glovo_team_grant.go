@@ -27,8 +27,10 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
 	"github.com/mctlhq/mctl-api/internal/auth/teamgrant"
+	"github.com/mctlhq/mctl-api/internal/bridge"
 	"github.com/mctlhq/mctl-api/internal/glovo"
 	"github.com/mctlhq/mctl-api/internal/glovo/connect"
+	"github.com/mctlhq/mctl-api/internal/glovo/dbq"
 	"github.com/mctlhq/mctl-api/internal/glovo/scope"
 	"github.com/mctlhq/mctl-api/internal/pgshared"
 )
@@ -58,6 +60,9 @@ type glovoTeamGrantDeps struct {
 	RefreshStore    *refreshstore.PostgresStore
 	Membership      scope.MembershipReader
 	ExplicitOAuthDB bool
+	// ProveBridgeHook is the boot-time proof that bridge_commands and the
+	// runtime grants exist on the Glovo pool; nil means proveBridgeHookTables.
+	ProveBridgeHook func(ctx context.Context, q dbq.Querier) error
 }
 
 // configureGlovoTeamGrants wires the team grant store, the live eligibility
@@ -98,7 +103,14 @@ func configureGlovoTeamGrants(ctx context.Context, d glovoTeamGrantDeps, lookup 
 	if err != nil {
 		return nil, nil, fmt.Errorf("glovo store: connect: %w", err)
 	}
-	store, err := glovo.NewStore(ctx, pool, runtimeRole, migrationRole, glovoStoreOptions()...)
+	prove := d.ProveBridgeHook
+	if prove == nil {
+		prove = proveBridgeHookTables
+	}
+	store, err := openGlovoStore(ctx, pool, lookup, glovo.ControlDefault.Open, prove,
+		func(opts []glovo.Option) (*glovo.Store, error) {
+			return glovo.NewStore(ctx, pool, runtimeRole, migrationRole, opts...)
+		})
 	if err != nil {
 		pgshared.Release(pool)
 		return nil, nil, err
@@ -131,9 +143,17 @@ func configureGlovoTeamGrants(ctx context.Context, d glovoTeamGrantDeps, lookup 
 // end purger (mctl-api#961) removes a connection's unconsumed handoff
 // references when it ends, and is required so the readiness probe reports
 // not_ready instead of serving without it.
-func glovoStoreOptions() []glovo.Option {
+//
+// With the control routes enabled the hook is bridge.CancelOpenForConnections,
+// which cancels the open bridge commands of an ended connection; otherwise it
+// is the synthetic no-op, which must never satisfy the write-fence conditions.
+func glovoStoreOptions(controlEnabled bool) []glovo.Option {
+	hook := glovo.RevocationHook(syntheticRevocationHook)
+	if controlEnabled {
+		hook = bridge.CancelOpenForConnections
+	}
 	return []glovo.Option{
-		glovo.WithExplicitURL(true), glovo.WithRevocationHook(syntheticRevocationHook),
+		glovo.WithExplicitURL(true), glovo.WithRevocationHook(hook),
 		glovo.WithEndPurger(glovo.PurgeHandoffRefs), glovo.WithEndPurgerRequired(true),
 		glovo.WithLockTimeout(5 * time.Second),
 	}
@@ -143,6 +163,77 @@ func glovoStoreOptions() []glovo.Option {
 // holds no secret, cookie or consumer credential, so there is nothing to
 // release when a connection ends. A real provider replaces it.
 func syntheticRevocationHook(context.Context, pgx.Tx, []string, string) error { return nil }
+
+// assertControlHook is the startup assertion of mctl-api#985: with the control
+// routes on, the installed hook must be the one that cancels open bridge
+// commands, not merely a non-nil one.
+func assertControlHook(controlEnabled bool, s *glovo.Store) error {
+	if controlEnabled && !s.RevocationHookIs(bridge.CancelOpenForConnections) {
+		return errors.New("MCTL_GLOVO_CONTROL_ENABLED=true needs bridge.CancelOpenForConnections as the revocation hook")
+	}
+	return nil
+}
+
+// openGlovoStore is the sequence that chooses the revocation hook and builds the
+// store with it: decide (flag, gate, proof), build with exactly that decision,
+// then assert the installed hook. The gate, the proof and the constructor are
+// parameters so every branch can be driven without a database or a fixture
+// build. An error means the boot is refused.
+func openGlovoStore(ctx context.Context, q dbq.Querier, lookup func(string) (string, bool), gateOpen bool,
+	prove func(context.Context, dbq.Querier) error, newStore func([]glovo.Option) (*glovo.Store, error)) (*glovo.Store, error) {
+	realHook, err := decideRealRevocationHook(ctx, q, lookup, gateOpen, prove)
+	if err != nil {
+		return nil, err
+	}
+	store, err := newStore(glovoStoreOptions(realHook))
+	if err != nil {
+		return nil, err
+	}
+	if err := assertControlHook(realHook, store); err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
+// decideRealRevocationHook is the one place that chooses the connection-end
+// hook. The real hook (bridge.CancelOpenForConnections) runs SELECT ... FOR
+// UPDATE on bridge_commands inside every connection-ending transaction, and an
+// error there rolls the whole end back, so it is installed only when
+// MCTL_GLOVO_CONTROL_ENABLED is on AND the build gate is open AND prove shows
+// the table and its grants on this pool. A proof that fails with the flag and
+// the gate on refuses the boot; it never falls back to the synthetic hook. With
+// the flag off or the gate closed (every release build) prove is not called and
+// the #959 lifecycle is untouched.
+func decideRealRevocationHook(ctx context.Context, q dbq.Querier, lookup func(string) (string, bool), gateOpen bool,
+	prove func(context.Context, dbq.Querier) error) (bool, error) {
+	if !glovoControlEnabled(lookup) || !gateOpen {
+		return false, nil
+	}
+	if err := prove(ctx, q); err != nil {
+		return false, fmt.Errorf("MCTL_GLOVO_CONTROL_ENABLED=true needs bridge_commands and its runtime grants on the GLOVO_DB_URL pool, refusing to boot: %w", err)
+	}
+	return true, nil
+}
+
+// proveBridgeHookTables is the default proof: the bridge schema was applied and
+// the runtime role holds exactly the grants the hook and the fence need.
+func proveBridgeHookTables(ctx context.Context, q dbq.Querier) error {
+	migrated, err := bridge.SchemaMigrated(ctx, q)
+	if err != nil {
+		return err
+	}
+	if !migrated {
+		return errors.New("the bridge schema is not applied")
+	}
+	return bridge.VerifyRuntimeGrants(ctx, q)
+}
+
+// glovoControlEnabled reads MCTL_GLOVO_CONTROL_ENABLED leniently: only "true"
+// is on, and a malformed value is rejected by configureGlovoControl.
+func glovoControlEnabled(lookup func(string) (string, bool)) bool {
+	v, _ := lookup("MCTL_GLOVO_CONTROL_ENABLED")
+	return strings.EqualFold(strings.TrimSpace(v), "true")
+}
 
 // glovoAllowlist avoids a typed-nil interface: with the Glovo store absent
 // the allowlist routes answer 503.

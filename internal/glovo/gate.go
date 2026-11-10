@@ -23,6 +23,12 @@ type Gate struct{ Open bool }
 // nothing can open it before the later slices exist.
 var Default = Gate{Open: false}
 
+// ControlDefault is the gate of the control-worker routes (mctl-api#985). It
+// is backed by an unexported constant of the build (gate_release.go, or
+// gate_fixture.go under the glovojoin_fixture tag), so a configuration value
+// can never open it.
+var ControlDefault = Gate{Open: controlGateOpen}
+
 // Authorize returns nil only for an open gate and a Glovo-audience caller
 // with a resolved principal. Closed: not_ready for everyone. Admin status
 // grants nothing.

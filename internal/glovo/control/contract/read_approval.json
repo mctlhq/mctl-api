@@ -1,0 +1,14 @@
+{
+  "name": "read approval",
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/internal/glovo/approvals/aar_ABCDEFGHIJKLMNOP0123"
+  },
+  "status": 200,
+  "response": {
+    "approval_ref": "aar_ABCDEFGHIJKLMNOP0123",
+    "expires_at": "2026-11-10T12:00:00Z",
+    "order_ref": "ordr_ABCDEFGHIJKLMNOP0123",
+    "state": "approved"
+  }
+}

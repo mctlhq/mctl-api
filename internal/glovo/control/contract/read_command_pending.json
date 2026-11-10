@@ -1,0 +1,14 @@
+{
+  "name": "read command pending",
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/internal/glovo/commands/cmd_ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+  },
+  "status": 200,
+  "response": {
+    "command_id": "cmd_ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "effect_state": "none",
+    "order_ref": "ordr_ABCDEFGHIJKLMNOP0123",
+    "status": "pending"
+  }
+}

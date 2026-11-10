@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/mctlhq/mctl-api/internal/bridge"
 	"github.com/mctlhq/mctl-api/internal/glovo"
 )
 
@@ -34,7 +35,8 @@ const glovoOptsTestPW = "pw-glovo-opts-test" //nolint:gosec // throwaway passwor
 // Required is observable through Ready: with a slice 961 table missing, a
 // store that requires the purger reports not_ready (table_missing); one that
 // does not, never looks for the table.
-func TestGlovoStoreOptionsInstallAndRequireEndPurger(t *testing.T) {
+func newGlovoOptsDB(t *testing.T, tag string) (urlFor func(string) string, rt, mig string) {
+	t.Helper()
 	base := os.Getenv("TEST_DATABASE_URL")
 	if base == "" {
 		if os.Getenv("CI") != "" {
@@ -43,7 +45,7 @@ func TestGlovoStoreOptionsInstallAndRequireEndPurger(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 	ctx := context.Background()
-	sfx := fmt.Sprintf("%x", os.Getpid()) + fmt.Sprintf("%d", len(t.Name()))
+	sfx := fmt.Sprintf("%x", os.Getpid()) + fmt.Sprintf("%d", len(t.Name())) + tag
 	db, mig, rt := "g961opts_"+sfx, "g961optsm_"+sfx, "g961optsr_"+sfx
 	admin, err := pgx.Connect(ctx, base)
 	if err != nil {
@@ -71,7 +73,7 @@ func TestGlovoStoreOptionsInstallAndRequireEndPurger(t *testing.T) {
 		_, _ = c.Exec(context.Background(), fmt.Sprintf(`DROP ROLE IF EXISTS %s`, rt))
 		_, _ = c.Exec(context.Background(), fmt.Sprintf(`DROP ROLE IF EXISTS %s`, mig))
 	})
-	urlFor := func(user string) string {
+	urlFor = func(user string) string {
 		u, err := url.Parse(base)
 		if err != nil {
 			t.Fatal(err)
@@ -80,6 +82,12 @@ func TestGlovoStoreOptionsInstallAndRequireEndPurger(t *testing.T) {
 		u.Path = "/" + db
 		return u.String()
 	}
+	return urlFor, rt, mig
+}
+
+func TestGlovoStoreOptionsInstallAndRequireEndPurger(t *testing.T) {
+	ctx := context.Background()
+	urlFor, rt, mig := newGlovoOptsDB(t, "a")
 	if err := glovo.ApplySchema(ctx, urlFor(mig), rt); err != nil {
 		t.Fatalf("ApplySchema: %v", err)
 	}
@@ -88,7 +96,7 @@ func TestGlovoStoreOptionsInstallAndRequireEndPurger(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	store, err := glovo.NewStore(ctx, pool, rt, mig, glovoStoreOptions()...)
+	store, err := glovo.NewStore(ctx, pool, rt, mig, glovoStoreOptions(false)...)
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
@@ -110,5 +118,43 @@ func TestGlovoStoreOptionsInstallAndRequireEndPurger(t *testing.T) {
 	var nr *glovo.NotReadyError
 	if err := store.Ready(ctx); !errors.As(err, &nr) || nr.Reason != glovo.NotReadyTableMissing {
 		t.Fatalf("a required purger with its table missing must be not_ready table_missing, got %v", err)
+	}
+}
+
+// The boot-time proof of the real revocation hook: without the bridge schema on
+// the Glovo pool it fails (so a flag-on boot is refused, never given a hook
+// that would break every connection end); once the schema is applied with the
+// runtime grants it passes.
+func TestProveBridgeHookTablesOnTheGlovoPool(t *testing.T) {
+	ctx := context.Background()
+	urlFor, rt, mig := newGlovoOptsDB(t, "b")
+	if err := glovo.ApplySchema(ctx, urlFor(mig), rt); err != nil {
+		t.Fatalf("ApplySchema: %v", err)
+	}
+	pool, err := pgxpool.New(ctx, urlFor(rt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	if err := proveBridgeHookTables(ctx, pool); err == nil {
+		t.Fatal("the proof passed on a database with no bridge schema")
+	}
+	if err := bridge.ApplySchema(ctx, urlFor(mig), rt); err != nil {
+		t.Fatalf("bridge.ApplySchema: %v", err)
+	}
+	if err := proveBridgeHookTables(ctx, pool); err != nil {
+		t.Fatalf("the proof failed with the schema and grants in place: %v", err)
+	}
+	// A grant the hook needs, taken away, fails the proof.
+	mp, err := pgxpool.New(ctx, urlFor(mig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(mp.Close)
+	if _, err := mp.Exec(ctx, `REVOKE UPDATE ON bridge_commands FROM `+rt); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if err := proveBridgeHookTables(ctx, pool); err == nil {
+		t.Fatal("the proof passed with UPDATE on bridge_commands revoked")
 	}
 }

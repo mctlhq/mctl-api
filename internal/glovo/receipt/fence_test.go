@@ -5,8 +5,10 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/mctlhq/mctl-api/internal/bridge"
 	"github.com/mctlhq/mctl-api/internal/glovo"
@@ -41,6 +43,33 @@ func TestFenceHappyPathConsumesAndKeepsLockOrder(t *testing.T) {
 	}
 	if strings.Join(e.log[:2], ",") != "L1L2,L3" {
 		t.Fatalf("lock order %v: L1-L2 then L3 first", e.log)
+	}
+}
+
+// T21: PreLock takes L4 itself, so the approval row is locked before the
+// caller's own statements run, never first reached from the consume.
+func TestFencePreLockHoldsTheApprovalRow(t *testing.T) {
+	e := newEnv(t)
+	f := e.reserved("")
+	ctx := context.Background()
+	tx, err := e.rtp.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := e.fence.PreLock(ctx, tx, e.caller, f.cmd); err != nil {
+		t.Fatal(err)
+	}
+	probe, err := e.rtp.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = probe.Rollback(ctx) }()
+	var one int
+	err = probe.QueryRow(ctx, `SELECT 1 FROM public.action_approval_requests WHERE id=$1 FOR UPDATE NOWAIT`, f.aar).Scan(&one)
+	var pg *pgconn.PgError
+	if !errors.As(err, &pg) || pg.Code != "55P03" {
+		t.Fatalf("the approval row is not locked after PreLock: %v", err)
 	}
 }
 
@@ -237,4 +266,36 @@ func TestIncompleteFenceIsNotReady(t *testing.T) {
 			wantCode(t, err, glovo.CodeNotReady)
 		})
 	}
+}
+
+// A hung membership provider cannot hold L3, L4 and L5 past the bound: the
+// permit is refused as unavailable, the approval stays reserved, and the rows
+// are free again.
+func TestFenceHungMembershipIsBoundedAndUnavailable(t *testing.T) {
+	e := newEnv(t)
+	f := e.reserved("")
+	e.members.hang = make(chan struct{})
+	t.Cleanup(func() { close(e.members.hang) })
+	start := time.Now()
+	errc := make(chan error, 1)
+	go func() { _, err := e.run(f, f.binding(e)); errc <- err }()
+	var err error
+	select {
+	case err = <-errc:
+	case <-time.After(glovo.MembershipTimeout + 4*time.Second):
+		t.Fatalf("the fence is still waiting on the hung provider after %s", glovo.MembershipTimeout+4*time.Second)
+	}
+	if dur := time.Since(start); dur > glovo.MembershipTimeout+2*time.Second {
+		t.Fatalf("the fence took %s, bound is %s", dur, glovo.MembershipTimeout)
+	}
+	wantCode(t, err, glovo.CodeUnavailable)
+	if got := e.state(f.aar); got != workitems.ApprovalReserved {
+		t.Fatalf("state %s, want reserved", got)
+	}
+	e.tx(func(tx pgx.Tx) {
+		var one int
+		if err := tx.QueryRow(context.Background(), `SELECT 1 FROM public.action_approval_requests WHERE id=$1 FOR UPDATE NOWAIT`, f.aar).Scan(&one); err != nil {
+			t.Fatalf("the approval row is still locked: %v", err)
+		}
+	})
 }

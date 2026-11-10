@@ -1,0 +1,13 @@
+{
+  "name": "cancel before dispatch",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/internal/glovo/orders/ordr_ABCDEFGHIJKLMNOP0123/cancel",
+    "body": {}
+  },
+  "status": 200,
+  "response": {
+    "effect_state": "none",
+    "order_state": "cancelled"
+  }
+}

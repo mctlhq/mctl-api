@@ -89,9 +89,15 @@ func (f *fakeConns) LiveConnectionTx(context.Context, pgx.Tx, glovo.Owner) (*glo
 type fakeMembers struct {
 	member bool
 	err    error
+	hang   chan struct{} // a non-nil channel blocks the read until it is closed
 }
 
-func (f *fakeMembers) IsMember(string, string) (bool, error) { return f.member, f.err }
+func (f *fakeMembers) IsMember(context.Context, string, string) (bool, error) {
+	if f.hang != nil {
+		<-f.hang // ignores ctx on purpose: the bound must not rely on the provider
+	}
+	return f.member, f.err
+}
 
 // env is a scratch database with the three roles of the owner-confirmed model,
 // the generic and Glovo schemas, and the bridge schema.
