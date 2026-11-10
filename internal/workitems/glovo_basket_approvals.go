@@ -372,3 +372,66 @@ func ReadGlovoBasketApprovalStatus(ctx context.Context, q dbq.Querier, tenant, o
 	st.State = GlovoBasketReceiptState(stored, expires, fresh, now)
 	return &st, nil
 }
+
+// GlovoBasketDecisions is the ledger side of an owner decision on a basket
+// approval, for the decision route (api.GlovoApprovalDecisions). It reads
+// and writes on the Glovo pool only: the binding lives in schema glovo.
+type GlovoBasketDecisions struct {
+	// Reader is the Glovo pool (glovo_runtime).
+	Reader dbq.Querier
+	// Begin opens a transaction of the Glovo pool.
+	Begin func(ctx context.Context) (pgx.Tx, error)
+	// ReadyFn is the basket MCP's own readiness (enabled, schema verified).
+	ReadyFn func(ctx context.Context) error
+	// Now is the clock of the pre-read; nil is time.Now.
+	Now func() time.Time
+}
+
+func (d *GlovoBasketDecisions) complete() bool {
+	return d != nil && !glovo.IsNil(d.Reader) && d.Begin != nil && d.ReadyFn != nil
+}
+
+// Ready is nil only when every dependency is wired and ReadyFn passes.
+func (d *GlovoBasketDecisions) Ready(ctx context.Context) error {
+	if !d.complete() {
+		return glovo.Refuse(glovo.CodeNotReady)
+	}
+	return d.ReadyFn(ctx)
+}
+
+// ForDecision is GlovoBasketApprovalForDecision with the binding projected
+// onto the GlovoBinding shape the decision route reads.
+func (d *GlovoBasketDecisions) ForDecision(ctx context.Context, id string) (*ActionApprovalRequest, *GlovoBinding, error) {
+	if !d.complete() {
+		return nil, nil, glovo.Refuse(glovo.CodeNotReady)
+	}
+	now := time.Now()
+	if d.Now != nil {
+		now = d.Now()
+	}
+	a, b, err := GlovoBasketApprovalForDecision(ctx, d.Reader, id, now)
+	if err != nil {
+		return nil, nil, err
+	}
+	return a, b.AsGlovoBinding(), nil
+}
+
+// Decide runs DecideGlovoBasketApprovalTx in its own transaction.
+func (d *GlovoBasketDecisions) Decide(ctx context.Context, in ActionDecisionInput) (*ActionApprovalRequest, error) {
+	if !d.complete() {
+		return nil, glovo.Refuse(glovo.CodeNotReady)
+	}
+	tx, err := d.Begin(ctx)
+	if err != nil {
+		return nil, mapGlovoPgErr("begin glovo basket decision", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	a, err := DecideGlovoBasketApprovalTx(ctx, tx, in)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, mapGlovoPgErr("commit glovo basket decision", err)
+	}
+	return a, nil
+}
