@@ -38,6 +38,9 @@ type ApprovalRequest struct {
 	State       string    `json:"state"`
 	ExpiresAt   time.Time `json:"expires_at"`
 	Created     bool      `json:"created"`
+	// ApprovalURL is the owner approval page of this approval; empty when
+	// no page is configured (Config.ApprovalPageBaseURL).
+	ApprovalURL string `json:"approval_url,omitempty"`
 }
 
 // ApprovalStatus is the approval's state plus whether it authorizes the

@@ -1411,6 +1411,9 @@ func main() {
 	// Glovo basket MCP (mctl-api#1006): dark unless GLOVO_BASKET_MCP_ENABLED
 	// is true; set without its dependencies or schemas, the boot is refused.
 	basketCtx, cancelBasket := context.WithTimeout(rootCtx, 15*time.Second)
+	// ApprovalPageBaseURL stays empty until the owner approval page
+	// (mctl-api#1007) is mounted; that change sets it to the API's public
+	// origin when the page is enabled.
 	glovoBasketRoutes, err := configureGlovoBasket(basketCtx, glovoBasketDeps{
 		OAuth: oauthServer, Glovo: glovoRoutes, Pool: glovoPoolOf(glovoStore), Ledger: workItemsStore,
 	}, os.LookupEnv)

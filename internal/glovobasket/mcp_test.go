@@ -154,6 +154,9 @@ func TestBasketFlowAndRevisions(t *testing.T) {
 	if ap["state"] != "pending" || ap["basket_fingerprint"] != fp1 || ap["revision"].(float64) != 2 {
 		t.Fatalf("request: %v", ap)
 	}
+	if _, ok := ap["approval_url"]; ok {
+		t.Fatalf("approval_url without a configured page: %v", ap)
+	}
 	// Asking again for the same revision is the same approval.
 	if again := u.must(ctx, ToolRequestApproval, map[string]any{"basket_id": id, "expected_revision": 2}); again["approval_ref"] != ref {
 		t.Fatalf("second request: %v", again)
@@ -335,3 +338,25 @@ func TestHandlerRefusesOversizeBodies(t *testing.T) {
 }
 
 var timeZero = mustTime("2026-11-10T00:00:00Z")
+
+func TestRequestApprovalReturnsThePageURL(t *testing.T) {
+	u := newUnit(t, Config{ApprovalPageBaseURL: "https://api.example/"})
+	ctx := as(prnOwner, "alpha")
+	id, _, _, _ := basketOf(u.must(ctx, ToolCreateBasket, map[string]any{"client_key": "k1"}))
+	u.must(ctx, ToolUpdateBasket, map[string]any{"basket_id": id, "expected_revision": 1, "ops": []any{
+		map[string]any{"op": "add", "item_code": "FAKE-RICE-1KG", "quantity": 1},
+	}})
+	for i := 0; i < 2; i++ { // the first request and the idempotent repeat
+		ap := u.must(ctx, ToolRequestApproval, map[string]any{"basket_id": id, "expected_revision": 2})
+		ref, _ := ap["approval_ref"].(string)
+		if ref == "" || ap["approval_url"] != "https://api.example/glovo/basket/approvals/"+ref {
+			t.Fatalf("request %d: %v", i, ap)
+		}
+	}
+	for _, bad := range []string{"http://api.example", "https://api.example/x", "https://api.example?a=1", "https://u@api.example",
+		"api.example", "https://"} {
+		if _, err := newMCPServer(Config{Store: newMemStore(), ApprovalPageBaseURL: bad}); err == nil {
+			t.Errorf("%q: accepted", bad)
+		}
+	}
+}

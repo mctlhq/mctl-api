@@ -37,6 +37,10 @@ type glovoBasketDeps struct {
 	Glovo  *api.GlovoRoutes
 	Pool   *pgxpool.Pool
 	Ledger *workitems.Store
+	// ApprovalPageBaseURL is the API's public https origin when the owner
+	// approval page (mctl-api#1007) is mounted, else empty: only then does
+	// glovo_request_approval return an approval_url.
+	ApprovalPageBaseURL string
 }
 
 // configureGlovoBasket wires the Glovo basket MCP (mctl-api#1006). It is dark:
@@ -78,7 +82,8 @@ func configureGlovoBasket(ctx context.Context, d glovoBasketDeps, lookup func(st
 		return nil, fmt.Errorf("glovo basket: %w", err)
 	}
 	store := &glovobasket.PGStore{Pool: d.Pool}
-	h, err := glovobasket.NewHandler(glovobasket.Config{Store: store, Resolver: d.Glovo.Resolver})
+	h, err := glovobasket.NewHandler(glovobasket.Config{Store: store, Resolver: d.Glovo.Resolver,
+		ApprovalPageBaseURL: d.ApprovalPageBaseURL})
 	if err != nil {
 		return nil, err
 	}

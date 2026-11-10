@@ -19,8 +19,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -65,6 +67,30 @@ type Config struct {
 	Now func() time.Time
 	// Logger receives the audit lines; nil is slog.Default().
 	Logger *slog.Logger
+	// ApprovalPageBaseURL is the https origin of the owner approval page
+	// (mctl-api#1007), e.g. https://api.mctl.ai. When set,
+	// glovo_request_approval also returns approval_url =
+	// <origin>/glovo/basket/approvals/<approval_ref>, the link the client
+	// shows the owner. The link carries no secret and grants nothing. Empty
+	// means no page is mounted and no URL is returned.
+	ApprovalPageBaseURL string
+}
+
+// ApprovalPagePath is the owner approval page's path prefix (mctl-api#1007).
+const ApprovalPagePath = "/glovo/basket/approvals/"
+
+// approvalPageOrigin checks that base is a bare https origin and returns it
+// without a trailing slash.
+func approvalPageOrigin(base string) (string, error) {
+	if base == "" {
+		return "", nil
+	}
+	u, err := url.Parse(base)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || (u.Path != "" && u.Path != "/") ||
+		u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("glovo basket: approval page base URL must be an https origin, got %q", base)
+	}
+	return "https://" + u.Host, nil
 }
 
 type service struct {
@@ -125,6 +151,11 @@ func newMCPServer(cfg Config) (*server.MCPServer, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	origin, err := approvalPageOrigin(cfg.ApprovalPageBaseURL)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ApprovalPageBaseURL = origin
 	s := &service{cfg: cfg, limiter: &limiter{per: cfg.CallsPerMinute, now: cfg.Now, seen: map[string]*window{}}}
 	mcpSrv := server.NewMCPServer("mctl-glovo-basket", "1.0.0", server.WithToolCapabilities(false), server.WithRecovery())
 	s.register(mcpSrv)
@@ -305,8 +336,9 @@ func (s *service) register(m *server.MCPServer) {
 		}))
 
 	m.AddTool(mcp.NewTool(ToolRequestApproval, opts(write, mcp.WithIdempotentHintAnnotation(true),
-		mcp.WithDescription("Ask the basket's owner to approve its current revision. Returns an approval_ref; the owner decides "+
-			"outside this tool set. Nothing is ordered."), basketID, expected)...),
+		mcp.WithDescription("Ask the basket's owner to approve its current revision. Returns an approval_ref and, when the "+
+			"approval page is enabled, an approval_url to show the owner; the owner decides outside this tool set. "+
+			"Nothing is ordered."), basketID, expected)...),
 		s.wrap(ToolRequestApproval, func(ctx context.Context, o Owner, req mcp.CallToolRequest, a *auditLine) (any, error) {
 			var in struct {
 				BasketID         string `json:"basket_id"`
@@ -321,6 +353,11 @@ func (s *service) register(m *server.MCPServer) {
 				return nil, err
 			}
 			a.ref = r.ApprovalRef
+			if s.cfg.ApprovalPageBaseURL != "" {
+				out := *r
+				out.ApprovalURL = s.cfg.ApprovalPageBaseURL + ApprovalPagePath + url.PathEscape(r.ApprovalRef)
+				return &out, nil
+			}
 			return r, nil
 		}))
 
