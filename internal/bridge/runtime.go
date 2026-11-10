@@ -408,6 +408,78 @@ func (s *Store) CommandEffect(ctx context.Context, q dbq.Querier, tenants []stri
 	return status, effectState, nil
 }
 
+// CommandResult is the terminal triple of a Glovo place_order_fake command as
+// mctl-api#985 section 4 reads it: what the worker reports for a completed
+// command, and what the bridge itself proves for one that never completed.
+type CommandResult struct {
+	Tenant      string
+	CommandID   string
+	OrderRef    string
+	Status      string
+	EffectState string
+	// ResultDigest is the stored result digest; empty until completed.
+	ResultDigest string
+	// Outcome, ProviderEffect and ErrorCode are empty while the command is
+	// pending or leased: a command with no verdict has no triple.
+	Outcome        string
+	ProviderEffect string
+	ErrorCode      string
+}
+
+// CommandResultFor reads the status, the effect state and the stored result of
+// a place_order_fake command and derives the triple. A completed command
+// returns the stored outcome, provider_effect and error_code; a cancelled one
+// is (cancelled, none, none) and an expired one (failed_terminal, none,
+// expired) only while the effect state proves nothing was done (none or
+// not_performed); with any other effect state the provider may have acted, so
+// provider_effect is unknown. A completed command whose result cannot be read
+// or has no outcome is an error, never a made-up triple. An absent, foreign or
+// other-kind command is ErrCommandNotFound.
+func (s *Store) CommandResultFor(ctx context.Context, q dbq.Querier, tenants []string, commandID string) (*CommandResult, error) {
+	if tenants == nil {
+		tenants = []string{}
+	}
+	var (
+		r                CommandResult
+		oc, effect, errc *string
+		hasResult        bool
+	)
+	err := q.QueryRow(ctx, `SELECT command_id, tenant, order_ref, status, effect_state, result_digest, result IS NOT NULL,
+		result->>'outcome', result->>'provider_effect', result->>'error_code'
+		FROM bridge_commands
+		WHERE command_id = $1 AND operation_kind = 'place_order_fake' AND tenant = ANY($2)`, commandID, tenants).
+		Scan(&r.CommandID, &r.Tenant, &r.OrderRef, &r.Status, &r.EffectState, &r.ResultDigest, &hasResult, &oc, &effect, &errc)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrCommandNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("bridge: read command result: %w", err)
+	}
+	switch r.Status {
+	case StatusPending, StatusLeased:
+		return &r, nil
+	case StatusCompleted:
+		if !hasResult || oc == nil || effect == nil || errc == nil || *oc == "" || *effect == "" || *errc == "" {
+			return nil, fmt.Errorf("%w: completed command has no readable result", ErrResultInconsistent)
+		}
+		r.Outcome, r.ProviderEffect, r.ErrorCode = *oc, *effect, *errc
+		return &r, nil
+	case StatusCancelled, StatusExpired:
+		proven := r.EffectState == EffectNone || r.EffectState == EffectNotPerformed
+		r.ProviderEffect, r.ErrorCode = "none", "none"
+		if !proven {
+			r.ProviderEffect = "unknown"
+		}
+		if r.Status == StatusCancelled {
+			r.Outcome = "cancelled"
+		} else {
+			r.Outcome, r.ErrorCode = "failed_terminal", "expired"
+		}
+		return &r, nil
+	}
+	return nil, fmt.Errorf("%w: unknown command status", ErrResultInconsistent)
+}
+
 // cancelRow applies the Cancel semantics to a locked, open command: cancelled,
 // cancel_requested, and a permitted effect becomes unknown because the
 // provider may already have acted.

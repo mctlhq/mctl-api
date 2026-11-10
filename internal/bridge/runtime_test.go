@@ -532,3 +532,87 @@ func TestCancelOpenForConnectionsLocksInCommandOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestCommandResultForTriples(t *testing.T) {
+	e := newRTEnv(t)
+	e.apply()
+	s := e.runtimeStore()
+	ctx := context.Background()
+	mk := func(n int) string {
+		return enqueueRT(t, s, "acme", KindPlaceOrderFake, fmt.Sprintf("aar_TRIPLE%017d", n), fmt.Sprintf("gcn_TRIPLE%017d", n))
+	}
+	read := func(id string) *CommandResult {
+		t.Helper()
+		r, err := s.CommandResultFor(ctx, e.rtPool, []string{"acme"}, id)
+		if err != nil {
+			t.Fatalf("CommandResultFor: %v", err)
+		}
+		return r
+	}
+	// Pending and leased have no triple.
+	p := mk(1)
+	if r := read(p); r.Status != StatusPending || r.Outcome != "" || r.ProviderEffect != "" || r.ErrorCode != "" || r.OrderRef == "" || r.Tenant != "acme" {
+		t.Fatalf("pending: %+v", r)
+	}
+	// Cancelled and expired, per effect state.
+	cases := []struct {
+		status, effect, outcome, pe, code string
+	}{
+		{StatusCancelled, "none", "cancelled", "none", "none"},
+		{StatusCancelled, "not_performed", "cancelled", "none", "none"},
+		{StatusCancelled, "unknown", "cancelled", "unknown", "none"},
+		{StatusCancelled, "permitted", "cancelled", "unknown", "none"},
+		{StatusCancelled, "succeeded", "cancelled", "unknown", "none"},
+		{StatusExpired, "none", "failed_terminal", "none", "expired"},
+		{StatusExpired, "not_performed", "failed_terminal", "none", "expired"},
+		{StatusExpired, "failed", "failed_terminal", "unknown", "expired"},
+		{StatusExpired, "unknown", "failed_terminal", "unknown", "expired"},
+	}
+	for i, c := range cases {
+		id := mk(10 + i)
+		e.mustMig(`UPDATE bridge_commands SET status=$2, effect_state=$3 WHERE command_id=$1`, id, c.status, c.effect)
+		r := read(id)
+		if r.Outcome != c.outcome || r.ProviderEffect != c.pe || r.ErrorCode != c.code {
+			t.Errorf("%s/%s: got (%s,%s,%s) want (%s,%s,%s)", c.status, c.effect, r.Outcome, r.ProviderEffect, r.ErrorCode, c.outcome, c.pe, c.code)
+		}
+	}
+	// Completed returns the stored triple and digest.
+	done := mk(30)
+	e.mustMig(`UPDATE bridge_commands SET status='completed', effect_state='succeeded', result_digest='sha256:aa',
+		result='{"outcome":"succeeded","provider_effect":"applied","error_code":"none"}'::jsonb WHERE command_id=$1`, done)
+	if r := read(done); r.Outcome != "succeeded" || r.ProviderEffect != "applied" || r.ErrorCode != "none" || r.ResultDigest != "sha256:aa" {
+		t.Fatalf("completed: %+v", r)
+	}
+	// A completed command without a readable result is an error, not a triple.
+	for i, res := range []string{"NULL", `'{}'::jsonb`, `'{"outcome":"succeeded"}'::jsonb`, `'{"outcome":"succeeded","provider_effect":"applied"}'::jsonb`} {
+		id := mk(40 + i)
+		e.mustMig(`UPDATE bridge_commands SET status='completed', effect_state='succeeded', result=`+res+` WHERE command_id=$1`, id)
+		if _, err := s.CommandResultFor(ctx, e.rtPool, []string{"acme"}, id); !errors.Is(err, ErrResultInconsistent) {
+			t.Errorf("completed with result %s: want ErrResultInconsistent, got %v", res, err)
+		}
+	}
+	// Absent, foreign tenant, empty bound and another kind are one answer.
+	for name, f := range map[string]func() error{
+		"absent": func() error {
+			_, err := s.CommandResultFor(ctx, e.rtPool, []string{"acme"}, "cmd_ABSENT00000000000000000A")
+			return err
+		},
+		"foreign": func() error { _, err := s.CommandResultFor(ctx, e.rtPool, []string{"other"}, p); return err },
+		"empty":   func() error { _, err := s.CommandResultFor(ctx, e.rtPool, nil, p); return err },
+		"kind": func() error {
+			q := enqueueRT(t, s, "acme", KindQuote, "", "gcn_TRIPLE00000000000000099")
+			_, err := s.CommandResultFor(ctx, e.rtPool, []string{"acme"}, q)
+			return err
+		},
+	} {
+		if err := f(); !errors.Is(err, ErrCommandNotFound) {
+			t.Errorf("%s: want ErrCommandNotFound, got %v", name, err)
+		}
+	}
+	// A failed read is an error that is not not_found.
+	closed := e.pool(e.rtURL)
+	closed.Close()
+	if _, err := s.CommandResultFor(ctx, closed, []string{"acme"}, p); err == nil || errors.Is(err, ErrCommandNotFound) {
+		t.Fatalf("a failed read must be an error that is not not_found, got %v", err)
+	}
+}
