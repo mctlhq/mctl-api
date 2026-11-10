@@ -509,10 +509,11 @@ func (h *Handlers) readBasketApproval(r *http.Request, d *basketDecider, user *a
 	// The decision ledger's binding: the same owner the decision handler
 	// will require. An admin reads every aar_, so this, not the read above,
 	// is what keeps another owner's basket hidden.
-	if h.opts.GlovoApprovals == nil {
+	ledger := h.basketApprovalLedger()
+	if ledger == nil {
 		return nil, basketNotFound("no glovo approvals ledger")
 	}
-	_, binding, err := h.opts.GlovoApprovals.ForDecision(r.Context(), ref)
+	_, binding, err := ledger.ForDecision(r.Context(), ref)
 	switch {
 	case errors.Is(err, workitems.ErrApprovalNotFound):
 		return nil, basketNotFound("no binding")
@@ -545,6 +546,15 @@ func (h *Handlers) readBasketApproval(r *http.Request, d *basketDecider, user *a
 		approvalRef: ref, state: got.Approval.State, expiresAt: got.Approval.ExpiresAt,
 		contextDigest: got.Context.Digest, snap: snap, table: table,
 	}, nil
+}
+
+// basketApprovalLedger is the ledger the decision handler decides a basket
+// approval with, so the page checks the very binding the decision will.
+// On main that is GlovoApprovals; once the basket ledger lands as its own
+// decisions (mctl-api#1006 slice 1, glovoDecisionsFor), this returns
+// h.glovoDecisionsFor(GlovoBasketApprovalKind) instead.
+func (h *Handlers) basketApprovalLedger() GlovoApprovalDecisions {
+	return h.opts.GlovoApprovals
 }
 
 // basketTableOf checks a snapshot's arithmetic and formats it. A page that
