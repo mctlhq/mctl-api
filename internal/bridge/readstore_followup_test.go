@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mctlhq/mctl-api/internal/glovo/basket"
 	"github.com/mctlhq/mctl-api/internal/jcs"
 )
 
@@ -66,7 +67,9 @@ func tamperedResult(t *testing.T, claimed json.RawMessage, fixtureName string, m
 	return out
 }
 
-func basketOf(payload map[string]any) map[string]any { return payload["approval_basket"].(map[string]any) }
+func basketOf(payload map[string]any) map[string]any {
+	return payload["approval_basket"].(map[string]any)
+}
 
 func bumpMinor(m map[string]any, key string) {
 	n, _ := m[key].(json.Number).Int64()
@@ -472,6 +475,43 @@ func TestClaimFallbackPinsV1alpha1WithoutWireVersions(t *testing.T) {
 	for _, id := range []string{v2, readID} {
 		if st := pgStatus(t, h, id); st != StatusPending {
 			t.Errorf("%s is %s, want pending", id, st)
+		}
+	}
+}
+
+// A basket.Parse failure that is not basket.ErrInvalid (a server-side fault,
+// such as a schema that does not compile) must surface as an internal error,
+// never as the caller's invalid_document, on both call paths.
+func TestBasketRulesServerFaultIsNotInvalidDocument(t *testing.T) {
+	orig := parseBasket
+	t.Cleanup(func() { parseBasket = orig })
+	boom := errors.New("basket: compile schema: boom")
+	parseBasket = func([]byte) (basket.Approval, []byte, error) { return basket.Approval{}, nil, boom }
+
+	_, err := checkBasketRules([]byte(`{}`))
+	if err == nil || errors.Is(err, ErrInvalidDocument) || errors.Is(err, ErrInvalidInput) || !errors.Is(err, boom) {
+		t.Fatalf("checkBasketRules: want internal error wrapping boom, got %v", err)
+	}
+	err = checkReadPayloadRules(KindReadBasket, []byte(`{"approval_basket":{}}`))
+	if err == nil || errors.Is(err, ErrInvalidDocument) || errors.Is(err, ErrInvalidInput) || !errors.Is(err, boom) {
+		t.Fatalf("checkReadPayloadRules: want internal error wrapping boom, got %v", err)
+	}
+
+	// A genuine ErrInvalid keeps both classes in the chain.
+	parseBasket = func([]byte) (basket.Approval, []byte, error) {
+		return basket.Approval{}, nil, fmt.Errorf("%w: x", basket.ErrInvalid)
+	}
+	_, err = checkBasketRules([]byte(`{}`))
+	if !errors.Is(err, ErrInvalidDocument) || !errors.Is(err, basket.ErrInvalid) {
+		t.Fatalf("ErrInvalid: want invalid_document and ErrInvalid in chain, got %v", err)
+	}
+}
+
+// A read payload without approval_basket (an empty read) passes the rules.
+func TestCheckReadPayloadRulesOmittedBasket(t *testing.T) {
+	for _, k := range []string{KindReadPreview, KindReadBasket} {
+		if err := checkReadPayloadRules(k, []byte(`{"display":[],"unavailable_items":["x"]}`)); err != nil {
+			t.Fatalf("%s: %v", k, err)
 		}
 	}
 }
