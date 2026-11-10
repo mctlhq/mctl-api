@@ -157,7 +157,7 @@ func (r *Reader) History(ctx context.Context, sub Subject, limit int, cursor str
 			return HistoryView{}, toRefusal(err, "cursor")
 		}
 		if !ok {
-			return HistoryView{}, refusal(glovo.CodeNotFound, "cursor_not_issued")
+			return HistoryView{}, refusal(glovo.CodeNotFound, "read_ref_not_issued")
 		}
 		params["cursor"] = cursor
 	}
@@ -203,7 +203,7 @@ func (r *Reader) Preview(ctx context.Context, sub Subject, pho string) (*Preview
 		return nil, toRefusal(err, "pho")
 	}
 	if !ok {
-		return nil, refusal(glovo.CodeNotFound, "pho_not_issued")
+		return nil, refusal(glovo.CodeNotFound, "read_ref_not_issued")
 	}
 	res, rf := r.read(ctx, sc, map[string]any{"history_order_ref": pho})
 	if rf != nil {

@@ -126,9 +126,9 @@ func TestReadsRefuseRefsNobodyIssued(t *testing.T) {
 	rd := s.reader(b)
 	ctx := context.Background()
 	_, rf := rd.Preview(ctx, s.subject(), "pho_00000000000000000009")
-	wantCode(t, rf, glovo.CodeNotFound, "pho_not_issued")
+	wantCode(t, rf, glovo.CodeNotFound, "read_ref_not_issued")
 	_, rf = rd.History(ctx, s.subject(), 5, "Zm9yZ2VkLWN1cnNvcg")
-	wantCode(t, rf, glovo.CodeNotFound, "cursor_not_issued")
+	wantCode(t, rf, glovo.CodeNotFound, "read_ref_not_issued")
 	_, rf = rd.Preview(ctx, s.subject(), "not-a-pho")
 	wantCode(t, rf, glovo.CodeInvalidRequest, "pho_shape")
 	if got := b.n(); got != 0 {
