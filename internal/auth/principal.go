@@ -151,6 +151,8 @@ func (u *User) Identity() (Identity, bool) {
 		return Identity{Provider: ProviderService, Subject: EvidenceWriterUserID, Display: EvidenceWriterUserID, Kind: KindService}, true
 	case u.glovoWorker:
 		return Identity{Provider: ProviderService, Subject: GlovoWorkerUserID, Display: GlovoWorkerUserID, Kind: KindService}, true
+	case u.glovoFacade:
+		return Identity{Provider: ProviderService, Subject: GlovoFacadeUserID, Display: GlovoFacadeUserID, Kind: KindService}, true
 	case u.glovoControlWorker:
 		return Identity{Provider: ProviderService, Subject: GlovoControlWorkerUserID, Display: GlovoControlWorkerUserID, Kind: KindService}, true
 	case u.registryPublisher:

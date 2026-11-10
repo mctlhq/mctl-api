@@ -1,0 +1,2 @@
+200
+{"contract_version":"glovo-facade-mctl-api/v1alpha1","contract_digest":"<digest>","api_version":"v1alpha1","dependencies":{"connection_registry":"not_ready","provider_orders":"not_ready","read_bridge":"not_ready","control_worker":"not_ready","provider_worker":"not_ready"},"deploy_ready":false}

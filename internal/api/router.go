@@ -314,6 +314,10 @@ type Options struct {
 	// a closed build gate or MCTL_GLOVO_CONTROL_ENABLED unset leaves them
 	// unmounted (404).
 	GlovoControl *GlovoControlRoutes
+	// GlovoJoin configures the Glovo join facade routes (mctl-api#957): the
+	// nine routes under /api/v1/assistants/glovo/v1alpha1. Nil, or Enabled
+	// false (GLOVO_JOIN_ENABLED), leaves them unmounted (404).
+	GlovoJoin *GlovoJoinRoutes
 	// Glovo configures the synthetic Glovo connection routes (mctl-api#961):
 	// facade, tenant installation and worker. Nil, or Enabled false, makes
 	// every one of them answer 503 not_ready.
@@ -572,6 +576,9 @@ func NewRouter(opts Options) http.Handler {
 		// reach; this group also mounts /mcp.
 		r.Use(h.glovoAudienceGate)
 		r.Use(h.supportAudienceGate)
+		// The Glovo join facade reaches only the join prefix, and nothing else
+		// reaches the join prefix (mctl-api#957).
+		r.Use(h.glovoJoinGate)
 		// A surface principal's ceiling counts every call it makes, so it
 		// runs before the gate: the gate turns a relay call into the linked
 		// human, and a refused relay still costs a link lookup.
@@ -642,12 +649,12 @@ func NewRouter(opts Options) http.Handler {
 		// not used on this group; Traefik cannot spoof RemoteAddr as loopback.
 		// The write 20/min group below does NOT skip loopback — MCP deploys
 		// must still be throttled.
-		r.Use(skipLoopbackRateLimit(httprate.Limit(300, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+		r.Use(skipGlovoFacadeRateLimit(skipLoopbackRateLimit(httprate.Limit(300, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
 			if user := auth.UserFromContext(r.Context()); user != nil {
 				return "user:" + rateLimitSubject(r, user), nil
 			}
 			return keyByTrustedIP(r)
-		}))))
+		})))))
 		// Shadow comparison of tenant authorization (mctl-api#377). After
 		// every gate that substitutes a relayed or delegated human, so the
 		// caller compared is the one the handlers authorize, and after the
@@ -923,6 +930,15 @@ func NewRouter(opts Options) http.Handler {
 					r.Get("/commands/{command_id}", h.GlovoControlReadCommand)
 					r.Get("/approvals/{approval_ref}", h.GlovoControlReadApproval)
 				})
+			}
+
+			// Glovo join facade (mctl-api#957): dark. Mounted only when
+			// GLOVO_JOIN_ENABLED is set. The facade principal is confined to
+			// this prefix by glovoJoinGate; the routes carry their own
+			// limiters (60/10 per subject, 600 aggregate), so the global
+			// per-principal limiter above skips the facade.
+			if opts.GlovoJoin.mounted() {
+				r.Mount(glovoJoinMount, opts.GlovoJoin.handler())
 			}
 
 			// Glovo pilot allowlist: per (tenant, principal), human admins only.
