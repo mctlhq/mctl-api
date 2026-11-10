@@ -1061,12 +1061,9 @@ func main() {
 	var bridgeStore *bridge.Store
 	bridgeEnabled := os.Getenv("MCTL_BRIDGE_ENABLED") == "true"
 	if bridgeEnabled {
-		bridgeDBURL := postgresURL(os.Getenv("COMMERCE_DB_URL"))
+		bridgeDBURL := bridgeStoreDSN()
 		if bridgeDBURL == "" {
-			bridgeDBURL = postgresURL(os.Getenv("AUDIT_DB_URL"))
-		}
-		if bridgeDBURL == "" {
-			slog.Error("MCTL_BRIDGE_ENABLED is set but no COMMERCE_DB_URL or AUDIT_DB_URL; /api/v1/bridge routes will return 503")
+			slog.Error("MCTL_BRIDGE_ENABLED is set but COMMERCE_DB_URL is not; /api/v1/bridge routes will return 503 (AUDIT_DB_URL is deliberately not a fallback)")
 		} else {
 			bs, bsErr := initStore(initCtx, storeFailures, "command bridge", func(ctx context.Context) (*bridge.Store, error) {
 				return bridge.NewStore(ctx, bridgeDBURL)
@@ -1965,6 +1962,15 @@ func loadConfig() config {
 
 // postgresURL requires TLS to CNPG unless ALLOW_INSECURE_DB is set.
 // The returned string is never logged — it may contain credentials.
+// bridgeStoreDSN is the connection string of the command bridge store. It
+// reads COMMERCE_DB_URL only: the order transaction and the bridge Enqueue
+// must provably share one pgx.Tx, and an implicit AUDIT_DB_URL fallback could
+// quietly put them on different databases (mctl-api#987). An empty result
+// means the bridge stays not_ready and no store is opened.
+func bridgeStoreDSN() string {
+	return postgresURL(os.Getenv("COMMERCE_DB_URL"))
+}
+
 func postgresURL(raw string) string {
 	if raw == "" {
 		return ""
