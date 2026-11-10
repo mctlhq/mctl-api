@@ -26,7 +26,7 @@ type GlovoDecisions struct {
 }
 
 func (d *GlovoDecisions) complete() bool {
-	return d != nil && d.Store != nil && d.Reader != nil && d.Begin != nil && d.ReadyFn != nil
+	return d != nil && !glovo.IsNil(d.Store) && !glovo.IsNil(d.Reader) && d.Begin != nil && d.ReadyFn != nil
 }
 
 // Ready is nil only when every dependency is wired and ReadyFn passes.
