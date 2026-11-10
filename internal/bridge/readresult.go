@@ -20,6 +20,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 
@@ -189,15 +190,25 @@ func digestOf(b []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
+// parseBasket is a seam so tests can inject a server-side Parse failure.
+var parseBasket = basket.Parse
+
 // checkBasketRules runs #988's basket validation (basket.Parse: sorted unique
 // lines, subtotal and total identities) on one approval_basket. JSON Schema
 // cannot express these rules and the contract README says every consumer MUST
 // check them, so a result or command that carries a basket never reaches the
 // store without them. There is no second implementation here.
+//
+// Only basket.ErrInvalid means the caller's document is bad. Any other Parse
+// error (for example a failure to compile the embedded schema) is a server
+// fault and must not be reported as invalid_document.
 func checkBasketRules(raw []byte) (basket.Approval, error) {
-	a, _, err := basket.Parse(raw)
+	a, _, err := parseBasket(raw)
 	if err != nil {
-		return basket.Approval{}, fmt.Errorf("%w: approval_basket: %v", ErrInvalidDocument, err)
+		if errors.Is(err, basket.ErrInvalid) {
+			return basket.Approval{}, fmt.Errorf("%w: approval_basket: %w", ErrInvalidDocument, err)
+		}
+		return basket.Approval{}, fmt.Errorf("bridge: approval_basket check: %w", err)
 	}
 	return a, nil
 }
