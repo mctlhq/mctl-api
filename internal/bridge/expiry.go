@@ -34,6 +34,12 @@ type ExpirySweeper interface {
 	ExpiryBacklog(ctx context.Context) (int64, float64, error)
 }
 
+// ReadEraser is optionally implemented by the ExpirySweeper: it erases the
+// stored bytes of expired read results and deletes the rows 24 h later.
+type ReadEraser interface {
+	EraseExpiredReads(ctx context.Context, limit int) (erased, deleted int, err error)
+}
+
 // Expirer expires due commands in the background, independent of any provider
 // poll. Each tick runs at most MaxBatches batches of Batch rows; a larger
 // backlog continues on later ticks. There is no one-interval guarantee under
@@ -108,6 +114,11 @@ func (e *Expirer) RunOnce(ctx context.Context) (int, error) {
 		e.processed.Add(int64(n))
 		if n < batch {
 			break
+		}
+	}
+	if er, ok := e.Store.(ReadEraser); ok {
+		if _, _, err := er.EraseExpiredReads(ctx, batch); err != nil {
+			return recordError(err)
 		}
 	}
 	// A failed backlog query must not quietly overwrite the previous healthy

@@ -121,3 +121,34 @@ func TestBridgeProviderTokenThatCouldBeConfusedIsRefused(t *testing.T) {
 		})
 	}
 }
+
+func TestParseBridgeProvidersSupportedVersions(t *testing.T) {
+	entry := func(v string) string {
+		return `[{"ref":"glovo","issuer":"https://issuer.example","subject":"s","audience":"mctl-api-bridge","tenants":["acme"]` + v + `}]`
+	}
+	got, err := ParseBridgeProviders(entry(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := got[0].WireVersions(); len(v) != 1 || v[0] != BridgeWireV1alpha1 {
+		t.Fatalf("absent key must mean [v1alpha1], got %v", v)
+	}
+	got, err = ParseBridgeProviders(entry(`,"supported_versions":["bridge.mctl.ai/v1alpha1","bridge.mctl.ai/v1alpha2"]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := got[0].WireVersions(); len(v) != 2 || v[1] != BridgeWireV1alpha2 {
+		t.Fatalf("versions = %v", v)
+	}
+	for name, bad := range map[string]string{
+		"unknown":       `,"supported_versions":["bridge.mctl.ai/v1alpha1","bridge.mctl.ai/v9"]`,
+		"duplicate":     `,"supported_versions":["bridge.mctl.ai/v1alpha1","bridge.mctl.ai/v1alpha1"]`,
+		"empty":         `,"supported_versions":[]`,
+		"without v1":    `,"supported_versions":["bridge.mctl.ai/v1alpha2"]`,
+		"empty element": `,"supported_versions":[""]`,
+	} {
+		if _, err := ParseBridgeProviders(entry(bad)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

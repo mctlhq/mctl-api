@@ -38,6 +38,14 @@ var contractFS embed.FS
 
 const schemaURL = "https://mctl.ai/schemas/bridge/v1alpha2/approval-basket.schema.json"
 
+// SchemaID is the $id of the vendored approval-basket schema, the one the
+// bridge v1alpha2 read and write schemas name by $ref.
+const SchemaID = schemaURL
+
+// SchemaJSON returns the vendored approval-basket schema bytes, so the bridge
+// registers this one copy instead of vendoring a second.
+func SchemaJSON() ([]byte, error) { return contractFS.ReadFile("contract/approval-basket.schema.json") }
+
 // ErrInvalid is wrapped by every refusal of Parse and Validate. The text
 // names the reason code only, never a value.
 var ErrInvalid = errors.New("basket: invalid")

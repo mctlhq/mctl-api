@@ -34,6 +34,13 @@ var (
 	ErrPermitExists          = errors.New("permit_already_issued")
 	ErrWriteFenceUnavailable = errors.New("write_fence_unavailable")
 	ErrWriteFenceRefused     = errors.New("write_fence_refused")
+	// ErrPayloadTooLarge is JCS(payload) over the #1059 cap of 12288 bytes.
+	ErrPayloadTooLarge = errors.New("payload_too_large")
+	// ErrReadUnavailable is the fail-closed answer of the read path: read schema
+	// level missing, deadline passed, integrity failure or a checker error.
+	ErrReadUnavailable = errors.New("read_unavailable")
+	// ErrReadNotAuthorized is a fetch without the glovo:read scope.
+	ErrReadNotAuthorized = errors.New("read_not_authorized")
 	// ErrSignalTargetNotFound is what a BridgeSignaler returns when the stored
 	// workflow/run no longer exists.
 	ErrSignalTargetNotFound = errors.New("signal_target_not_found")
@@ -44,6 +51,7 @@ var codedErrors = []error{
 	ErrBindingMismatch, ErrCommandCancelled, ErrCommandExpired, ErrResultConflict,
 	ErrResultInconsistent, ErrAlreadyCompleted, ErrNotMutating, ErrPermitExists,
 	ErrWriteFenceUnavailable, ErrWriteFenceRefused,
+	ErrPayloadTooLarge, ErrReadUnavailable, ErrReadNotAuthorized,
 }
 
 // Code is the stable error code of err, or "" when err is not a typed bridge

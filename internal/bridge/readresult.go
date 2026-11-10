@@ -1,0 +1,186 @@
+// Copyright 2026 MCTL Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package bridge
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+
+	"github.com/mctlhq/mctl-api/internal/jcs"
+)
+
+// Read command kinds of the v1alpha2 contract (mctl-agents#1059). Prepare is
+// not a read kind: it is the #957 write.
+const (
+	KindReadHistory = "read_history"
+	KindReadPreview = "read_preview"
+	KindReadBasket  = "read_basket"
+
+	// MaxReadPayload is the #1059 cap on JCS(payload).
+	MaxReadPayload = 12288
+	// MaxReadTTLSeconds is the #1059 ceiling of a read command's ttl_seconds and
+	// of the stored result's lifetime.
+	MaxReadTTLSeconds = 300
+)
+
+// IsReadKind reports whether kind is one of the v1alpha2 read kinds.
+func IsReadKind(kind string) bool {
+	switch kind {
+	case KindReadHistory, KindReadPreview, KindReadBasket:
+		return true
+	}
+	return false
+}
+
+// ReadResultDoc is the v1alpha2 read-result wire document. It carries no
+// tenant_ref, principal_ref, connection_ref or install_revision_ref:
+// bindings come only from the stored command row.
+type ReadResultDoc struct {
+	SchemaVersion  string          `json:"schema_version"`
+	CommandID      string          `json:"command_id"`
+	RequestID      string          `json:"request_id"`
+	Kind           string          `json:"kind"`
+	LeaseToken     string          `json:"lease_token"`
+	Attempt        int             `json:"attempt"`
+	WorkerIdentity string          `json:"worker_identity"`
+	Outcome        string          `json:"outcome"`
+	ProviderEffect string          `json:"provider_effect"`
+	ErrorCode      string          `json:"error_code,omitempty"`
+	ErrorDetail    string          `json:"error_detail,omitempty"`
+	CompletedAt    string          `json:"completed_at"`
+	Payload        json.RawMessage `json:"payload,omitempty"`
+	PayloadDigest  string          `json:"payload_digest,omitempty"`
+
+	body []byte
+}
+
+// parsedResult is a result document of either version.
+type parsedResult struct {
+	v1 *Result
+	v2 *ReadResultDoc
+}
+
+// parseAnyResult selects the schema by the document's schema_version
+// (design 2a). A v1alpha2 body runs the raw-bytes pre-check before it is
+// parsed; a v1alpha1 body takes today's path untouched.
+func parseAnyResult(body []byte) (*parsedResult, error) {
+	marked := bytes.Contains(body, []byte(WireV1alpha2))
+	if marked {
+		if err := rawCheck(body); err != nil {
+			return nil, err
+		}
+	}
+	var peek struct {
+		SchemaVersion string `json:"schema_version"`
+	}
+	if err := json.Unmarshal(body, &peek); err == nil && peek.SchemaVersion == WireV1alpha2 {
+		if !marked {
+			if err := rawCheck(body); err != nil {
+				return nil, err
+			}
+		}
+		r, err := parseReadResult(body)
+		if err != nil {
+			return nil, err
+		}
+		return &parsedResult{v2: r}, nil
+	}
+	r, err := ParseResult(body)
+	if err != nil {
+		return nil, err
+	}
+	return &parsedResult{v1: r}, nil
+}
+
+// ParseReadResult validates raw against the vendored v1alpha2 read-result
+// schema (after the raw-bytes pre-check) and decodes it strictly.
+func ParseReadResult(raw []byte) (*ReadResultDoc, error) {
+	if err := rawCheck(raw); err != nil {
+		return nil, err
+	}
+	return parseReadResult(raw)
+}
+
+func parseReadResult(raw []byte) (*ReadResultDoc, error) {
+	if err := compileSchemas(); err != nil {
+		return nil, err
+	}
+	if err := validateAgainst(readResSchema, raw); err != nil {
+		return nil, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var r ReadResultDoc
+	if err := dec.Decode(&r); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidDocument, err)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("%w: trailing data", ErrInvalidDocument)
+	}
+	r.body = raw
+	return &r, nil
+}
+
+// Digest is the server-computed digest of a read result: sha256 over the RFC
+// 8785 form of the body without its lease_token, so key order and whitespace
+// do not matter and the bearer token never feeds anything stored.
+func (r *ReadResultDoc) Digest() (string, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(r.body, &m); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrInvalidDocument, err)
+	}
+	delete(m, "lease_token")
+	b, err := json.Marshal(m)
+	if err != nil {
+		return "", err
+	}
+	canon, err := jcs.Canonicalize(b)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrInvalidDocument, err)
+	}
+	return "sha256:" + sha256Hex(canon), nil
+}
+
+// canonicalPayload canonicalizes the payload with RFC 8785, enforces the
+// 12288 byte cap and verifies payload_digest. A payload over the cap is
+// ErrPayloadTooLarge, a digest that does not match is ErrBindingMismatch.
+func (r *ReadResultDoc) canonicalPayload() ([]byte, error) {
+	canon, err := jcs.Canonicalize(r.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidDocument, err)
+	}
+	if len(canon) > MaxReadPayload {
+		return nil, ErrPayloadTooLarge
+	}
+	if !digestEqual("sha256:"+sha256Hex(canon), r.PayloadDigest) {
+		return nil, fmt.Errorf("%w: payload_digest does not match the canonical payload", ErrBindingMismatch)
+	}
+	return canon, nil
+}
+
+func digestEqual(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+// digestOf is "sha256:" plus the lowercase hex sha256 of b.
+func digestOf(b []byte) string {
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}

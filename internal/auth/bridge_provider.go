@@ -66,6 +66,25 @@ type BridgeProviderConfig struct {
 	Subject  string   `json:"subject"`
 	Audience string   `json:"audience"`
 	Tenants  []string `json:"tenants"`
+	// SupportedVersions is the closed set of bridge wire versions the provider
+	// declares. Absent means [bridge.mctl.ai/v1alpha1]. It must contain
+	// bridge.mctl.ai/v1alpha1; mctl-api leases a v1alpha2 command only to a
+	// provider whose entry lists bridge.mctl.ai/v1alpha2.
+	SupportedVersions []string `json:"supported_versions,omitempty"`
+}
+
+// Bridge wire versions a provider may declare in supported_versions.
+const (
+	BridgeWireV1alpha1 = "bridge.mctl.ai/v1alpha1"
+	BridgeWireV1alpha2 = "bridge.mctl.ai/v1alpha2"
+)
+
+// WireVersions is the provider's declared wire versions, never empty.
+func (c BridgeProviderConfig) WireVersions() []string {
+	if len(c.SupportedVersions) == 0 {
+		return []string{BridgeWireV1alpha1}
+	}
+	return append([]string(nil), c.SupportedVersions...)
 }
 
 // NewBridgeProviderUser builds the principal of the provider named ref.
@@ -122,6 +141,23 @@ func ParseBridgeProviders(raw string) ([]BridgeProviderConfig, error) {
 		}
 		if len(c.Tenants) == 0 {
 			return nil, fmt.Errorf("%s entry %q: tenants must not be empty", bridgeProvidersEnv, c.Ref)
+		}
+		if c.SupportedVersions != nil {
+			haveV1 := false
+			seenV := map[string]bool{}
+			for _, v := range c.SupportedVersions {
+				if v != BridgeWireV1alpha1 && v != BridgeWireV1alpha2 {
+					return nil, fmt.Errorf("%s entry %q: unknown supported_versions value", bridgeProvidersEnv, c.Ref)
+				}
+				if seenV[v] {
+					return nil, fmt.Errorf("%s entry %q: duplicate supported_versions value %q", bridgeProvidersEnv, c.Ref, v)
+				}
+				seenV[v] = true
+				haveV1 = haveV1 || v == BridgeWireV1alpha1
+			}
+			if !haveV1 {
+				return nil, fmt.Errorf("%s entry %q: supported_versions must contain %q", bridgeProvidersEnv, c.Ref, BridgeWireV1alpha1)
+			}
 		}
 		for j, t := range c.Tenants {
 			c.Tenants[j] = strings.TrimSpace(t)
