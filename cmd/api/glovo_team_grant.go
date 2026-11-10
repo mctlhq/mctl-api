@@ -30,6 +30,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/bridge"
 	"github.com/mctlhq/mctl-api/internal/glovo"
 	"github.com/mctlhq/mctl-api/internal/glovo/connect"
+	"github.com/mctlhq/mctl-api/internal/glovo/dbq"
 	"github.com/mctlhq/mctl-api/internal/glovo/scope"
 	"github.com/mctlhq/mctl-api/internal/pgshared"
 )
@@ -59,6 +60,9 @@ type glovoTeamGrantDeps struct {
 	RefreshStore    *refreshstore.PostgresStore
 	Membership      scope.MembershipReader
 	ExplicitOAuthDB bool
+	// ProveBridgeHook is the boot-time proof that bridge_commands and the
+	// runtime grants exist on the Glovo pool; nil means proveBridgeHookTables.
+	ProveBridgeHook func(ctx context.Context, q dbq.Querier) error
 }
 
 // configureGlovoTeamGrants wires the team grant store, the live eligibility
@@ -99,12 +103,21 @@ func configureGlovoTeamGrants(ctx context.Context, d glovoTeamGrantDeps, lookup 
 	if err != nil {
 		return nil, nil, fmt.Errorf("glovo store: connect: %w", err)
 	}
-	store, err := glovo.NewStore(ctx, pool, runtimeRole, migrationRole, glovoStoreOptions(glovoControlEnabled(lookup))...)
+	prove := d.ProveBridgeHook
+	if prove == nil {
+		prove = proveBridgeHookTables
+	}
+	realHook, err := decideRealRevocationHook(ctx, pool, lookup, prove)
 	if err != nil {
 		pgshared.Release(pool)
 		return nil, nil, err
 	}
-	if err := assertControlHook(glovoControlEnabled(lookup), store); err != nil {
+	store, err := glovo.NewStore(ctx, pool, runtimeRole, migrationRole, glovoStoreOptions(realHook)...)
+	if err != nil {
+		pgshared.Release(pool)
+		return nil, nil, err
+	}
+	if err := assertControlHook(realHook, store); err != nil {
 		pgshared.Release(pool)
 		return nil, nil, err
 	}
@@ -165,6 +178,39 @@ func assertControlHook(controlEnabled bool, s *glovo.Store) error {
 		return errors.New("MCTL_GLOVO_CONTROL_ENABLED=true needs bridge.CancelOpenForConnections as the revocation hook")
 	}
 	return nil
+}
+
+// decideRealRevocationHook is the one place that chooses the connection-end
+// hook. The real hook (bridge.CancelOpenForConnections) runs SELECT ... FOR
+// UPDATE on bridge_commands inside every connection-ending transaction, and an
+// error there rolls the whole end back, so it is installed only when
+// MCTL_GLOVO_CONTROL_ENABLED is on AND the build gate is open AND prove shows
+// the table and its grants on this pool. A proof that fails with the flag and
+// the gate on refuses the boot; it never falls back to the synthetic hook. With
+// the flag off or the gate closed (every release build) prove is not called and
+// the #959 lifecycle is untouched.
+func decideRealRevocationHook(ctx context.Context, q dbq.Querier, lookup func(string) (string, bool),
+	prove func(context.Context, dbq.Querier) error) (bool, error) {
+	if !glovoControlEnabled(lookup) || !glovo.ControlDefault.Open {
+		return false, nil
+	}
+	if err := prove(ctx, q); err != nil {
+		return false, fmt.Errorf("MCTL_GLOVO_CONTROL_ENABLED=true needs bridge_commands and its runtime grants on the GLOVO_DB_URL pool, refusing to boot: %w", err)
+	}
+	return true, nil
+}
+
+// proveBridgeHookTables is the default proof: the bridge schema was applied and
+// the runtime role holds exactly the grants the hook and the fence need.
+func proveBridgeHookTables(ctx context.Context, q dbq.Querier) error {
+	migrated, err := bridge.SchemaMigrated(ctx, q)
+	if err != nil {
+		return err
+	}
+	if !migrated {
+		return errors.New("the bridge schema is not applied")
+	}
+	return bridge.VerifyRuntimeGrants(ctx, q)
 }
 
 // glovoControlEnabled reads MCTL_GLOVO_CONTROL_ENABLED leniently: only "true"

@@ -1062,11 +1062,15 @@ func main() {
 	bridgeEnabled := os.Getenv("MCTL_BRIDGE_ENABLED") == "true"
 	if bridgeEnabled {
 		bridgeDBURL := bridgeStoreDSN()
-		if bridgeDBURL == "" {
+		if bridgeDBURL == "" && glovoStore == nil {
 			slog.Error("MCTL_BRIDGE_ENABLED is set but COMMERCE_DB_URL is not; /api/v1/bridge routes will return 503 (AUDIT_DB_URL is deliberately not a fallback)")
 		} else {
+			// The mode is decided once: the runtime-role store on the shared
+			// GLOVO_DB_URL pool when bridge_schema_version exists, the legacy
+			// store otherwise (mctl-api#985 task 4).
 			bs, bsErr := initStore(initCtx, storeFailures, "command bridge", func(ctx context.Context) (*bridge.Store, error) {
-				return bridge.NewStore(ctx, bridgeDBURL)
+				st, _, err := openBridgeStore(ctx, bridgeOpenDeps{GlovoPool: glovoPoolOf(glovoStore), LegacyDSN: bridgeDBURL})
+				return st, err
 			})
 			if bsErr != nil {
 				slog.Error("command bridge store init failed; /api/v1/bridge routes will return 503", "error", bsErr)
@@ -1147,6 +1151,25 @@ func main() {
 		slog.Error("invalid configuration", "error", gcErr)
 		stopSignals()
 		os.Exit(1)
+	}
+	// The one place the write fence is installed: only when all six
+	// preconditions hold. The hold flag is a const false and the receipt
+	// collaborators are not constructed here, so this never installs it.
+	if bridgeStore != nil {
+		installed, pre := installWriteFence(rootCtx, fenceInstall{
+			Gate: glovo.ControlDefault.Open, HoldLifted: glovoWriteFenceHoldLifted,
+			Proof: func(ctx context.Context) error {
+				return controlProof(ctx, os.LookupEnv, bridgeStore, glovoStore, nil)
+			},
+			Glovo: glovoStore,
+			Build: func(context.Context) (bridge.WriteFence, error) {
+				return nil, errors.New("the receipt fence collaborators are not constructed in this build")
+			},
+			Set: bridgeStore.SetFence,
+		})
+		slog.Info("glovo write fence", "installed", installed, "gate_open", pre.GateOpen, "hold_lifted", pre.HoldLifted,
+			"one_database_proof", pre.OneDatabaseProof, "revocation_hook", pre.RevocationHookReady,
+			"membership_revocation", pre.MembershipRevocation, "receipt_ready", pre.ReceiptReady)
 	}
 	var bridgeService mctlapi.BridgeService
 	if bridgeStore != nil {
