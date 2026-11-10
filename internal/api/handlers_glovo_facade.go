@@ -49,7 +49,7 @@ func (h *Handlers) glovoFacadeScope(w http.ResponseWriter, r *http.Request, rout
 	}
 	sc, refusal := h.glovoRoutes().Resolver.Resolve(r.Context(), user)
 	if refusal != nil {
-		glovoRefuse(w, route, refusal)
+		_ = glovoRefuse(w, route, refusal)
 		return glovoFacadeCall{}, false
 	}
 	return glovoFacadeCall{
@@ -78,12 +78,12 @@ func (h *Handlers) GlovoFacadeContext(w http.ResponseWriter, r *http.Request) {
 	store := h.glovoRoutes().Store
 	inst, err := store.GetInstall(r.Context(), call.owner.TenantID)
 	if err != nil {
-		glovoRefuse(w, call.route, err)
+		_ = glovoRefuse(w, call.route, err)
 		return
 	}
 	views, err := store.ListOwnerConnections(r.Context(), call.owner, 10)
 	if err != nil {
-		glovoRefuse(w, call.route, err)
+		_ = glovoRefuse(w, call.route, err)
 		return
 	}
 	out := wire.Context{
@@ -104,18 +104,18 @@ func (h *Handlers) GlovoFacadeConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	key, ok := glovoIdempotencyKey(r)
 	if !ok {
-		glovoRefuse(w, call.route, glovo.Refuse(glovo.CodeInvalidRequest))
+		_ = glovoRefuse(w, call.route, glovo.Refuse(glovo.CodeInvalidRequest))
 		return
 	}
 	var body wire.Empty
 	if e := wire.Decode(w, r, &body, wire.SchemaConnectRequest, true); e != nil {
-		glovoRefuse(w, call.route, e)
+		_ = glovoRefuse(w, call.route, e)
 		return
 	}
 	rt := h.glovoRoutes()
 	inst, err := rt.Store.GetInstall(r.Context(), call.owner.TenantID)
 	if err != nil {
-		glovoRefuse(w, call.route, err)
+		_ = glovoRefuse(w, call.route, err)
 		return
 	}
 	out, err := rt.Connect.ConnectWithoutHandoff(r.Context(), call.joinScope(inst.InstallRevision), key)
@@ -135,7 +135,7 @@ func (h *Handlers) GlovoFacadeConnect(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) glovoWriteConnection(w http.ResponseWriter, r *http.Request, call glovoFacadeCall, id string, created int, replayed bool) {
 	v, err := h.glovoRoutes().Store.GetConnectionView(r.Context(), call.owner, id)
 	if err != nil {
-		glovoRefuse(w, call.route, err)
+		_ = glovoRefuse(w, call.route, err)
 		return
 	}
 	status := created
@@ -154,7 +154,7 @@ func (h *Handlers) GlovoFacadeGetConnection(w http.ResponseWriter, r *http.Reque
 	}
 	v, err := h.glovoRoutes().Store.GetConnectionView(r.Context(), call.owner, chi.URLParam(r, "id"))
 	if err != nil {
-		glovoRefuse(w, call.route, err)
+		_ = glovoRefuse(w, call.route, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, wire.FromConnection(*v, false))
@@ -170,7 +170,7 @@ func (h *Handlers) GlovoFacadeHandoff(w http.ResponseWriter, r *http.Request) {
 	}
 	var body wire.Empty
 	if e := wire.Decode(w, r, &body, wire.SchemaActionRequest, true); e != nil {
-		glovoRefuse(w, call.route, e)
+		_ = glovoRefuse(w, call.route, e)
 		return
 	}
 	id := chi.URLParam(r, "id")
@@ -195,7 +195,7 @@ func (h *Handlers) GlovoFacadeRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	var body wire.Empty
 	if e := wire.Decode(w, r, &body, wire.SchemaActionRequest, true); e != nil {
-		glovoRefuse(w, call.route, e)
+		_ = glovoRefuse(w, call.route, e)
 		return
 	}
 	id := chi.URLParam(r, "id")
@@ -217,19 +217,19 @@ func (h *Handlers) GlovoFacadeReconnect(w http.ResponseWriter, r *http.Request) 
 	}
 	key, ok := glovoIdempotencyKey(r)
 	if !ok {
-		glovoRefuse(w, call.route, glovo.Refuse(glovo.CodeInvalidRequest))
+		_ = glovoRefuse(w, call.route, glovo.Refuse(glovo.CodeInvalidRequest))
 		return
 	}
 	var body wire.Empty
 	if e := wire.Decode(w, r, &body, wire.SchemaConnectRequest, true); e != nil {
-		glovoRefuse(w, call.route, e)
+		_ = glovoRefuse(w, call.route, e)
 		return
 	}
 	rt := h.glovoRoutes()
 	prior := chi.URLParam(r, "id")
 	inst, err := rt.Store.GetInstall(r.Context(), call.owner.TenantID)
 	if err != nil {
-		glovoRefuse(w, call.route, err)
+		_ = glovoRefuse(w, call.route, err)
 		return
 	}
 	res, err := rt.Connect.Reconnect(r.Context(), call.joinScope(inst.InstallRevision), key, prior)

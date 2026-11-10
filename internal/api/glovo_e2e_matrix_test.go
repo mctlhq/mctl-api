@@ -1118,24 +1118,71 @@ func TestGlovoE2EWorkerOwnerPath(t *testing.T) {
 	}
 }
 
-// A connect retry after /handoff must not invalidate the issued reference: the
-// facade connect response carries none, so it must not rotate it.
-func TestGlovoE2EConnectRetryKeepsHandoff(t *testing.T) {
+// A retried facade connect with the same Idempotency-Key must not disturb the
+// reference the client already got from /handoff: the replay issues no
+// reference, deletes none and writes no handoff_issued audit row, and the
+// worker still activates with the first reference (mctl-api#994 review).
+func TestGlovoE2EConnectReplayKeepsIssuedHandoff(t *testing.T) {
 	e := newE2E(t, e2eOpts{})
 	rev, _ := e.readyAlphaBeta()
 	a1 := e.mint(prnA1, "alpha")
+
 	key := e.key()
 	code, m := e.callJSON(http.MethodPost, facade+"/connections", a1, nil, "Idempotency-Key", key)
 	if code != http.StatusCreated {
 		t.Fatalf("connect: %d %v", code, m)
 	}
 	id := m["connection_id"].(string)
-	ref := e.handoffAs(a1, id)
-	code, m = e.callJSON(http.MethodPost, facade+"/connections", a1, nil, "Idempotency-Key", key)
-	if code != http.StatusOK || m["replayed"] != true {
-		t.Fatalf("retry: %d %v", code, m)
+	if n := e.count(`SELECT count(*) FROM glovo.glovo_handoff_refs WHERE connection_id = $1`, id); n != 0 {
+		t.Fatalf("connect itself issued %d handoff references", n)
 	}
-	if code, m := e.activate(id, rev, ref); code != http.StatusOK {
-		t.Fatalf("handoff ref invalidated by connect retry: %d %v", code, m)
+	refA := e.handoffAs(a1, id)
+	issued := e.count(`SELECT count(*) FROM glovo.glovo_audit_events WHERE entity_id = $1 AND event = 'handoff_issued'`, id)
+	if issued != 1 {
+		t.Fatalf("handoff_issued rows after /handoff: %d", issued)
+	}
+
+	code, m = e.callJSON(http.MethodPost, facade+"/connections", a1, nil, "Idempotency-Key", key)
+	if code != http.StatusOK || m["replayed"] != true || m["connection_id"] != id {
+		t.Fatalf("replay: %d %v", code, m)
+	}
+	if n := e.count(`SELECT count(*) FROM glovo.glovo_handoff_refs WHERE connection_id = $1 AND consumed_at IS NULL`, id); n != 1 {
+		t.Fatalf("a replayed connect changed the unconsumed references: %d", n)
+	}
+	if n := e.count(`SELECT count(*) FROM glovo.glovo_audit_events WHERE entity_id = $1 AND event = 'handoff_issued'`, id); n != issued {
+		t.Fatalf("a replayed connect wrote a handoff_issued row: %d -> %d", issued, n)
+	}
+	if code, m := e.activate(id, rev, refA); code != http.StatusOK {
+		t.Fatalf("activate with the reference issued before the replay: %d %v", code, m)
+	}
+	// The consume UPDATE ran: the reference row carries consumed_at.
+	if n := e.count(`SELECT count(*) FROM glovo.glovo_handoff_refs WHERE connection_id = $1 AND consumed_at IS NOT NULL`, id); n != 1 {
+		t.Fatalf("consumed_at not written on the activated reference: %d", n)
+	}
+	if n := e.count(`SELECT count(*) FROM glovo.glovo_handoff_refs WHERE connection_id = $1 AND consumed_at IS NULL`, id); n != 0 {
+		t.Fatalf("an unconsumed reference remains after activation: %d", n)
+	}
+}
+
+// A principal that belongs to two tenants reads only the connection of the
+// tenant in its own scope: the tenant predicate of GetConnectionView, not the
+// principal one, separates them.
+func TestGlovoE2EConnectionReadIsTenantScoped(t *testing.T) {
+	e := newE2E(t, e2eOpts{})
+	e.readyAlphaBeta()
+	e.members.set("beta", prnA1, "developer")
+	e.allow("beta", prnA1) // prnA1 is now a member of alpha and beta
+	a1 := e.mint(prnA1, "alpha")
+	id := e.connectAs(a1)
+
+	if _, err := e.store.GetConnectionView(context.Background(), glovo.Owner{TenantID: "alpha", PrincipalID: prnA1}, id); err != nil {
+		t.Fatalf("own tenant read: %v", err)
+	}
+	if _, err := e.store.GetConnectionView(context.Background(), glovo.Owner{TenantID: "beta", PrincipalID: prnA1}, id); !errors.Is(err, glovo.ErrNotFound) {
+		t.Fatalf("the same principal read alpha's connection under beta: %v", err)
+	}
+	b1 := e.mint(prnA1, "beta")
+	if code, m := e.callJSON(http.MethodGet, facade+"/connections/"+id, b1, nil); code != http.StatusNotFound {
+		t.Fatalf("beta-scoped token read alpha's connection: %d %v", code, m)
 	}
 }

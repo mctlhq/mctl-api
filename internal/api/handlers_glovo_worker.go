@@ -43,7 +43,7 @@ const glovoConnectionTTL = 24 * time.Hour
 // the service token, not a bridge provider, not a Glovo-audience token.
 func (h *Handlers) requireGlovoWorker(w http.ResponseWriter, r *http.Request, route string) bool {
 	if user := auth.UserFromContext(r.Context()); user == nil || !user.IsGlovoWorker() {
-		glovoRefuse(w, route, glovo.Refuse(glovo.CodeNotAuthorized))
+		_ = glovoRefuse(w, route, glovo.Refuse(glovo.CodeNotAuthorized))
 		return false
 	}
 	return true
@@ -88,38 +88,38 @@ func (h *Handlers) GlovoWorkerCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	var req wire.WorkerCheckRequest
 	if e := wire.Decode(w, r, &req, wire.SchemaWorkerCheckReq, false); e != nil {
-		glovoRefuse(w, route, e)
+		_ = glovoRefuse(w, route, e)
 		return
 	}
 	store := h.glovoRoutes().Store
 	v, err := store.WorkerConnectionView(r.Context(), req.ConnectionID)
 	if err != nil {
-		glovoRefuse(w, route, err)
+		_ = glovoRefuse(w, route, err)
 		return
 	}
 	inst, err := store.GetInstall(r.Context(), v.Owner.TenantID)
 	if err != nil {
-		glovoRefuse(w, route, err, "connection_id", v.ConnectionID)
+		_ = glovoRefuse(w, route, err, "connection_id", v.ConnectionID)
 		return
 	}
 	if req.InstallRevision != inst.InstallRevision || v.InstallRevision != inst.InstallRevision {
-		glovoRefuse(w, route, glovo.Refuse(glovo.CodeStaleInstall), "connection_id", v.ConnectionID)
+		_ = glovoRefuse(w, route, glovo.Refuse(glovo.CodeStaleInstall), "connection_id", v.ConnectionID)
 		return
 	}
 	if err := h.glovoRederiveOwner(r.Context(), v.Owner); err != nil {
-		glovoRefuse(w, route, err, "connection_id", v.ConnectionID)
+		_ = glovoRefuse(w, route, err, "connection_id", v.ConnectionID)
 		return
 	}
 	state := v.EffectiveState()
 	switch state {
 	case glovo.Revoked:
-		glovoRefuse(w, route, glovo.Refuse(glovo.CodeConnectionRevoked), "connection_id", v.ConnectionID)
+		_ = glovoRefuse(w, route, glovo.Refuse(glovo.CodeConnectionRevoked), "connection_id", v.ConnectionID)
 		return
 	case glovo.Expired:
-		glovoRefuse(w, route, glovo.Refuse(glovo.CodeConnectionExpired), "connection_id", v.ConnectionID)
+		_ = glovoRefuse(w, route, glovo.Refuse(glovo.CodeConnectionExpired), "connection_id", v.ConnectionID)
 		return
 	case glovo.Failed:
-		glovoRefuse(w, route, glovo.Refuse(glovo.CodeNoConnection), "connection_id", v.ConnectionID)
+		_ = glovoRefuse(w, route, glovo.Refuse(glovo.CodeNoConnection), "connection_id", v.ConnectionID)
 		return
 	}
 	resp := wire.WorkerCheckResponse{
@@ -143,14 +143,14 @@ func (h *Handlers) GlovoWorkerActivate(w http.ResponseWriter, r *http.Request) {
 	}
 	var req wire.WorkerActivateRequest
 	if e := wire.Decode(w, r, &req, wire.SchemaWorkerActivate, false); e != nil {
-		glovoRefuse(w, route, e)
+		_ = glovoRefuse(w, route, e)
 		return
 	}
 	id := chi.URLParam(r, "id")
 	store := h.glovoRoutes().Store
 	v, err := store.WorkerConnectionView(r.Context(), id)
 	if err != nil {
-		glovoRefuse(w, route, err)
+		_ = glovoRefuse(w, route, err)
 		return
 	}
 	fail := func(err error) {
@@ -181,14 +181,14 @@ func (h *Handlers) GlovoWorkerExpire(w http.ResponseWriter, r *http.Request) {
 	}
 	var body wire.Empty
 	if e := wire.Decode(w, r, &body, wire.SchemaActionRequest, true); e != nil {
-		glovoRefuse(w, route, e)
+		_ = glovoRefuse(w, route, e)
 		return
 	}
 	id := chi.URLParam(r, "id")
 	store := h.glovoRoutes().Store
 	v, err := store.WorkerConnectionView(r.Context(), id)
 	if err != nil {
-		glovoRefuse(w, route, err)
+		_ = glovoRefuse(w, route, err)
 		return
 	}
 	c, err := store.Transition(glovo.WithActor(r.Context(), glovoWorkerActor), v.Owner, id, glovo.Expired, v.Version, "synthetic_expire", nil)

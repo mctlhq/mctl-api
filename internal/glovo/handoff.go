@@ -317,10 +317,11 @@ func (s *Store) IssueHandoff(ctx context.Context, owner Owner, connectionID stri
 // ActivateWithHandoff consumes the raw handoff reference and activates the
 // connection in one transaction: ActivateTx (L1 shared, L2 exclusive) with an
 // AfterLocks that takes the reference row FOR UPDATE (L2b) and consumes it.
-// The state, install revision and version checks of ActivateTx run first, so
-// a revoked or expired connection reports its own code; an unknown, foreign,
-// expired or already consumed reference is the one not_found, decided after
-// them, and commits nothing. in.AfterLocks is replaced.
+// AfterLocks runs right after the locks, before ActivateTx's state, install
+// revision and version checks, so the reference is consumed on the same
+// transaction and a refusal by any of those checks rolls the consume back. An
+// unknown, foreign, expired or already consumed reference is the one
+// not_found, decided after those checks, and commits nothing. in.AfterLocks is replaced.
 func (s *Store) ActivateWithHandoff(ctx context.Context, in ActivateInput, rawRef string) (*Connection, error) {
 	hash := HandoffRefHash(rawRef)
 	var out *Connection

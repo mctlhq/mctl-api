@@ -107,6 +107,9 @@ func (s *Service) input(sc JoinScope, key string) glovo.ConnectInput {
 // single-use handoff reference; the raw value is never stored, so a replay
 // returns a fresh one and the older one no longer activates.
 func (s *Service) Connect(ctx context.Context, sc JoinScope, idempotencyKey string) (*ConnectOutcome, error) {
+	if err := s.ready(); err != nil {
+		return nil, err
+	}
 	out, err := s.ConnectWithoutHandoff(ctx, sc, idempotencyKey)
 	if err != nil {
 		return nil, err
@@ -127,10 +130,11 @@ func (s *Service) Connect(ctx context.Context, sc JoinScope, idempotencyKey stri
 // ConnectWithoutHandoff is Connect without issuing a handoff reference. The
 // facade uses it: its response carries no reference, so issuing one would
 // delete a previously issued unconsumed reference on an idempotent retry and
-// discard the new one. The facade /handoff route issues the reference.
+// discard the new one. The facade /handoff route issues the reference. It
+// needs no handoff base URL: no URL is built.
 func (s *Service) ConnectWithoutHandoff(ctx context.Context, sc JoinScope, idempotencyKey string) (*ConnectOutcome, error) {
-	if err := s.ready(); err != nil {
-		return nil, err
+	if s == nil || s.Store == nil {
+		return nil, glovo.Refuse(glovo.CodeNotReady)
 	}
 	in := s.input(sc, idempotencyKey)
 	cur, err := s.Store.LiveConnection(ctx, in.Owner)

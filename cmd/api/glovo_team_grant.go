@@ -98,9 +98,7 @@ func configureGlovoTeamGrants(ctx context.Context, d glovoTeamGrantDeps, lookup 
 	if err != nil {
 		return nil, nil, fmt.Errorf("glovo store: connect: %w", err)
 	}
-	store, err := glovo.NewStore(ctx, pool, runtimeRole, migrationRole, glovo.WithExplicitURL(true),
-		glovo.WithRevocationHook(syntheticRevocationHook), glovo.WithEndPurger(glovo.PurgeHandoffRefs), glovo.WithEndPurgerRequired(true),
-		glovo.WithLockTimeout(5*time.Second))
+	store, err := glovo.NewStore(ctx, pool, runtimeRole, migrationRole, glovoStoreOptions()...)
 	if err != nil {
 		pgshared.Release(pool)
 		return nil, nil, err
@@ -127,6 +125,18 @@ func configureGlovoTeamGrants(ctx context.Context, d glovoTeamGrantDeps, lookup 
 		ReadyTTL: 5 * time.Second,
 	}
 	return store, routes, nil
+}
+
+// glovoStoreOptions is the production configuration of the Glovo store. The
+// end purger (mctl-api#961) removes a connection's unconsumed handoff
+// references when it ends, and is required so the readiness probe reports
+// not_ready instead of serving without it.
+func glovoStoreOptions() []glovo.Option {
+	return []glovo.Option{
+		glovo.WithExplicitURL(true), glovo.WithRevocationHook(syntheticRevocationHook),
+		glovo.WithEndPurger(glovo.PurgeHandoffRefs), glovo.WithEndPurgerRequired(true),
+		glovo.WithLockTimeout(5 * time.Second),
+	}
 }
 
 // syntheticRevocationHook is the revocation hook of the synthetic provider: it
