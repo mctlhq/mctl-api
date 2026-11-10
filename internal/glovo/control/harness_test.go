@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -36,6 +37,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/glovo/basket"
 	"github.com/mctlhq/mctl-api/internal/glovo/dbq"
 	"github.com/mctlhq/mctl-api/internal/glovo/orders"
+	"github.com/mctlhq/mctl-api/internal/glovojoin"
 	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
@@ -229,6 +231,8 @@ type env struct {
 	rtURL       string
 	mp, rtp     *pgxpool.Pool
 	st          *workitems.Store
+	gs          *glovo.Store // set by newRealEnv only
+	connTTL     time.Duration
 	bs          *bridge.Store
 	idx         *fakeIndex
 	conns       *fakeConns
@@ -292,11 +296,30 @@ func newBase(t *testing.T) *env {
 	return e
 }
 
-func newEnv(t *testing.T) *env {
+func newEnv(t *testing.T) *env { return newEnvWith(t, false) }
+
+// newRealEnv is newEnv with the real Glovo connection store (its schema, the
+// L1 and L2 advisory locks, the live-connection read and the revocation hook
+// bridge.CancelOpenForConnections) in place of fakeConns. Only the orders index
+// stays a fake.
+func newRealEnv(t *testing.T) *env { return newEnvWith(t, true) }
+
+func newEnvWith(t *testing.T, real bool) *env {
 	t.Helper()
 	e := newBase(t)
 	ctx := context.Background()
 	var err error
+	if real {
+		if err := glovo.ApplySchema(ctx, e.migURL, e.rt); err != nil {
+			t.Fatalf("glovo.ApplySchema: %v", err)
+		}
+		if err := glovojoin.ApplySchema(ctx, e.migURL, e.rt); err != nil {
+			t.Fatalf("glovojoin.ApplySchema: %v", err)
+		}
+		if err := orders.ApplySchema(ctx, e.migURL, e.rt); err != nil {
+			t.Fatalf("orders.ApplySchema: %v", err)
+		}
+	}
 	if err := workitems.ApplyGlovoApprovalSchema(ctx, e.migURL, e.rt, workitems.WithWorkItemsRole(e.wi)); err != nil {
 		t.Fatalf("ApplyGlovoApprovalSchema: %v", err)
 	}
@@ -325,6 +348,15 @@ func newEnv(t *testing.T) *env {
 	t.Cleanup(st.Close)
 	e.st = st
 	e.conns = &fakeConns{}
+	var conns Connections = e.conns
+	if real {
+		e.gs, err = glovo.NewStore(ctx, e.rtp, e.rt, e.mig, glovo.WithExplicitURL(true),
+			glovo.WithRevocationHook(bridge.CancelOpenForConnections), glovo.WithLockTimeout(5*time.Second))
+		if err != nil {
+			t.Fatalf("glovo.NewStore: %v", err)
+		}
+		conns = e.gs
+	}
 	e.members = &fakeMembers{member: true}
 	e.joins = &fakeJoins{}
 	e.execs = &fakeExecs{tenant: tenant, owner: ownerPrn}
@@ -334,7 +366,7 @@ func newEnv(t *testing.T) *env {
 	}
 	e.fingerprint = basket.Fingerprint(e.canon)
 	e.d = &Dispatcher{
-		DB: e.rtp, Bridge: e.bs, Orders: e.idx, Receipts: e.st, Conns: e.conns, Members: e.members, Joins: e.joins, Execs: e.execs,
+		DB: e.rtp, Bridge: e.bs, Orders: e.idx, Receipts: e.st, Conns: conns, Members: e.members, Joins: e.joins, Execs: e.execs,
 		ControlStart: func(ctx context.Context, q dbq.Querier, _ string) (string, string, error) {
 			if e.startHook != nil {
 				if err := e.startHook(ctx, q); err != nil {
@@ -415,7 +447,16 @@ type fixture struct {
 	aar, orderRef, connRef, exec, wi, wf string
 }
 
+// realConn is a connection made through the real store: its id, the install
+// id and the install revision the order and the receipt must carry.
+type realConn struct {
+	ref, installID string
+	rev            int64
+}
+
 type fixOpt struct {
+	real *realConn // nil: the constants and fakeConns
+
 	freshFor time.Duration // 0 means 15 minutes
 	noDecide bool          // leave the receipt pending
 }
@@ -426,6 +467,11 @@ func (e *env) finalized(o fixOpt) fixture {
 	var f fixture
 	f.wf = "wf-" + rnd(4)
 	f.orderRef, f.connRef = tok("ordr_", 26), tok("gcn_", 26)
+	instID, instRev := install, int64(3)
+	if o.real != nil {
+		f.connRef, instID, instRev = o.real.ref, o.real.installID, o.real.rev
+	}
+	revStr := strconv.FormatInt(instRev, 10)
 	e.tx(func(tx pgx.Tx) {
 		wi, we, err := e.st.CreateGlovoExecutionTx(ctx, tx, workitems.GlovoExecutionInput{
 			Tenant: tenant, OwnerPrincipalID: ownerPrn, WorkflowID: f.wf, Actor: "service:glovo-prepare"})
@@ -434,7 +480,7 @@ func (e *env) finalized(o fixOpt) fixture {
 		}
 		f.wi, f.exec = wi, we
 		a, created, err := e.st.CreateGlovoApprovalTx(ctx, tx, workitems.GlovoApprovalInput{Tenant: tenant, OwnerPrincipalID: ownerPrn,
-			WorkItemID: wi, ExecutionID: we, OrderRef: f.orderRef, ConnectionRef: f.connRef, InstallID: install, InstallRevision: revision,
+			WorkItemID: wi, ExecutionID: we, OrderRef: f.orderRef, ConnectionRef: f.connRef, InstallID: instID, InstallRevision: revStr,
 			BasketFingerprint: e.fingerprint, Provider: provider, ExpiresIn: time.Hour})
 		if err != nil || !created {
 			e.t.Fatalf("CreateGlovoApprovalTx: %v %v", err, created)
@@ -456,12 +502,12 @@ func (e *env) finalized(o fixOpt) fixture {
 	}
 	e.idx.mu.Lock()
 	e.idx.tmpl[f.orderRef] = orders.Order{OrderRef: f.orderRef, Tenant: tenant, OwnerPrincipalID: ownerPrn, ConnectionID: f.connRef,
-		InstallID: install, InstallRevision: 3, FinalBasketFingerprint: e.fingerprint, FinalSnapshotSeq: 1, ApprovalRef: f.aar, ExecutionID: f.exec}
+		InstallID: instID, InstallRevision: instRev, FinalBasketFingerprint: e.fingerprint, FinalSnapshotSeq: 1, ApprovalRef: f.aar, ExecutionID: f.exec}
 	e.idx.snaps[f.orderRef] = orders.Snapshot{OrderRef: f.orderRef, Seq: 1, Fingerprint: e.fingerprint, Canonical: e.canon}
 	e.idx.mu.Unlock()
 	e.mustMig(`INSERT INTO ctl_fake_orders (order_ref, state) VALUES ($1, 'finalized')`, f.orderRef)
 	e.conns.conn = glovo.Connection{ConnectionID: f.connRef, Owner: glovo.Owner{TenantID: tenant, PrincipalID: ownerPrn},
-		InstallID: install, InstallRevision: 3, State: glovo.Active}
+		InstallID: instID, InstallRevision: instRev, State: glovo.Active}
 	e.execs.wi, e.execs.wf = f.wi, f.wf
 	e.startWF = f.wf
 	return f
@@ -593,4 +639,58 @@ func (e *env) rowLocked(q string, args ...any) bool {
 	}
 	e.t.Fatalf("rowLocked: %v", err)
 	return false
+}
+
+var (
+	adminActor  = glovo.Actor{PrincipalID: "prn_ADMIN00000000000000000001", Kind: glovo.ActorAdmin}
+	ownerActor  = glovo.Actor{PrincipalID: ownerPrn, Kind: glovo.ActorUser}
+	workerActor = glovo.Actor{PrincipalID: "worker", Kind: glovo.ActorWorker}
+	ownerOf     = glovo.Owner{TenantID: tenant, PrincipalID: ownerPrn}
+)
+
+// installTenant installs the tenant in the real store and returns its revision
+// and install id. It is idempotent for the one tenant of the test.
+func (e *env) installTenant() (string, int64) {
+	e.t.Helper()
+	i, err := e.gs.Install(context.Background(), tenant, adminActor)
+	if err != nil {
+		e.t.Fatalf("Install: %v", err)
+	}
+	return i.InstallID, i.InstallRevision
+}
+
+// activateNew makes the owner a connection through the real store, Connect
+// then ActivateTx, the way the #961 worker does.
+func (e *env) activateNew(key string) *realConn {
+	e.t.Helper()
+	ctx := context.Background()
+	instID, rev := e.installTenant()
+	r, err := e.gs.Connect(ctx, glovo.ConnectInput{Owner: ownerOf, ExpectedInstallRevision: rev, IdempotencyKey: key, Actor: ownerActor})
+	if err != nil {
+		e.t.Fatalf("Connect: %v", err)
+	}
+	return e.activate(r.Connection, instID, rev)
+}
+
+func (e *env) activate(c *glovo.Connection, instID string, rev int64) *realConn {
+	e.t.Helper()
+	ctx := context.Background()
+	ttl := time.Hour
+	if e.connTTL > 0 {
+		ttl = e.connTTL
+	}
+	tx, err := e.rtp.Begin(ctx)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	a, err := e.gs.ActivateTx(ctx, tx, glovo.ActivateInput{Owner: ownerOf, ConnectionID: c.ConnectionID, ExpectedVersion: c.Version,
+		ExpectedInstallRevision: rev, ExpiresIn: ttl, Actor: workerActor})
+	if err != nil {
+		e.t.Fatalf("ActivateTx: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		e.t.Fatal(err)
+	}
+	return &realConn{ref: a.ConnectionID, installID: instID, rev: rev}
 }
