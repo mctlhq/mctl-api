@@ -73,7 +73,7 @@ type Connections interface {
 
 // Membership is the GitOps membership read, best effort.
 type Membership interface {
-	IsMember(tenant, principalID string) (bool, error)
+	IsMember(ctx context.Context, tenant, principalID string) (bool, error)
 }
 
 // JoinRefs resolves the opaque tnr_ and prr_ refs of the bridge payload.
@@ -311,8 +311,11 @@ func (d *Dispatcher) Dispatch(ctx context.Context, tenants []string, orderRef, a
 	if !hasFresh {
 		return nil, refuse(glovo.CodeApprovalInvalid, "an approved receipt has no freshness bound")
 	}
-	if !live || left < 1 {
-		return nil, refuse(glovo.CodeApprovalExpired, "past expires_at or fresh_until")
+	// The receipt must stay fresh past the reserve margin: Reserve refuses a
+	// fresh_until closer than ReservePermitMargin, and by then the command row
+	// would already exist. Refuse here, before the enqueue.
+	if !live || left <= workitems.ReservePermitMargin.Seconds() {
+		return nil, refuse(glovo.CodeApprovalExpired, "past expires_at, or fresh_until within the reserve margin")
 	}
 	if err := bindingMatches(o, a, b); err != nil {
 		return nil, err
@@ -331,7 +334,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, tenants []string, orderRef, a
 	if conn.InstallRevision != o.InstallRevision {
 		return nil, refuse(glovo.CodeStaleInstall, "the install revision moved")
 	}
-	member, err := d.Members.IsMember(o.Tenant, o.OwnerPrincipalID)
+	member, err := glovo.BoundedMembership(ctx, 0, func(c context.Context) (bool, error) {
+		return d.Members.IsMember(c, o.Tenant, o.OwnerPrincipalID)
+	})
 	if err != nil {
 		return nil, unavailable("membership read: ", err)
 	}

@@ -42,7 +42,7 @@ type Conns interface {
 // GitOps read, best effort, taken outside any row lock; the transactional
 // guarantee is #985 section 7.3.
 type Membership interface {
-	IsMember(tenant, principalID string) (bool, error)
+	IsMember(ctx context.Context, tenant, principalID string) (bool, error)
 }
 
 // preLockTTL bounds how long a PreLock record waits for its Check. A permit
@@ -262,7 +262,9 @@ func (f *Fence) Check(ctx context.Context, tx pgx.Tx, b bridge.FenceBinding) (st
 		return "", refuse(glovo.CodeIntentMismatch)
 	}
 	// Step 6: live membership, best effort.
-	member, err := f.members.IsMember(cmdTenant, cmdOwner)
+	member, err := glovo.BoundedMembership(ctx, 0, func(c context.Context) (bool, error) {
+		return f.members.IsMember(c, cmdTenant, cmdOwner)
+	})
 	if err != nil {
 		return "", refuse(glovo.CodeUnavailable)
 	}

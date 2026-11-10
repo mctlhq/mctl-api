@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/mctlhq/mctl-api/internal/bridge"
@@ -186,9 +187,15 @@ func (f *fakeConns) LiveConnectionTx(context.Context, pgx.Tx, glovo.Owner) (*glo
 type fakeMembers struct {
 	member bool
 	err    error
+	hang   chan struct{} // a non-nil channel blocks the read until it is closed
 }
 
-func (f *fakeMembers) IsMember(string, string) (bool, error) { return f.member, f.err }
+func (f *fakeMembers) IsMember(_ context.Context, _, _ string) (bool, error) {
+	if f.hang != nil {
+		<-f.hang // deliberately ignores ctx: the bound must not rely on the provider
+	}
+	return f.member, f.err
+}
 
 type fakeJoins struct{ err error }
 
@@ -563,4 +570,27 @@ func (e *env) forceApproval(f fixture, set string) {
 func (e *env) fresh() *Dispatcher {
 	return &Dispatcher{DB: e.d.DB, Bridge: e.d.Bridge, Orders: e.d.Orders, Receipts: e.d.Receipts, Conns: e.d.Conns, Members: e.d.Members,
 		Joins: e.d.Joins, Execs: e.d.Execs, ControlStart: e.d.ControlStart, ReadyCheck: e.d.ReadyCheck}
+}
+
+// rowLocked reports whether the NOWAIT row lock query fails with lock_not_available
+// from another session, using the runtime role in its own short transaction.
+func (e *env) rowLocked(q string, args ...any) bool {
+	e.t.Helper()
+	ctx := context.Background()
+	tx, err := e.mp.Begin(ctx)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var one int
+	err = tx.QueryRow(ctx, q, args...).Scan(&one)
+	if err == nil {
+		return false
+	}
+	var pg *pgconn.PgError
+	if errors.As(err, &pg) && pg.Code == "55P03" {
+		return true
+	}
+	e.t.Fatalf("rowLocked: %v", err)
+	return false
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -237,4 +238,29 @@ func TestIncompleteFenceIsNotReady(t *testing.T) {
 			wantCode(t, err, glovo.CodeNotReady)
 		})
 	}
+}
+
+// A hung membership provider cannot hold L3, L4 and L5 past the bound: the
+// permit is refused as unavailable, the approval stays reserved, and the rows
+// are free again.
+func TestFenceHungMembershipIsBoundedAndUnavailable(t *testing.T) {
+	e := newEnv(t)
+	f := e.reserved("")
+	e.members.hang = make(chan struct{})
+	t.Cleanup(func() { close(e.members.hang) })
+	start := time.Now()
+	_, err := e.run(f, f.binding(e))
+	if dur := time.Since(start); dur > glovo.MembershipTimeout+2*time.Second {
+		t.Fatalf("the fence took %s, bound is %s", dur, glovo.MembershipTimeout)
+	}
+	wantCode(t, err, glovo.CodeUnavailable)
+	if got := e.state(f.aar); got != workitems.ApprovalReserved {
+		t.Fatalf("state %s, want reserved", got)
+	}
+	e.tx(func(tx pgx.Tx) {
+		var one int
+		if err := tx.QueryRow(context.Background(), `SELECT 1 FROM public.action_approval_requests WHERE id=$1 FOR UPDATE NOWAIT`, f.aar).Scan(&one); err != nil {
+			t.Fatalf("the approval row is still locked: %v", err)
+		}
+	})
 }

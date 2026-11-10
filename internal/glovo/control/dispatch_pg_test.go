@@ -304,6 +304,31 @@ func TestDispatchFreshnessWindow(t *testing.T) {
 		wantCode(t, err, glovo.CodeApprovalExpired)
 		e.untouched(f, "approved")
 	})
+	// fresh_until within ReservePermitMargin (120s) is refused before any
+	// command row exists; just outside it dispatches.
+	t.Run("boundary at the reserve margin", func(t *testing.T) {
+		e := newEnv(t)
+		f := e.finalized(fixOpt{freshFor: 119 * time.Second})
+		_, err := e.dispatch(f)
+		wantCode(t, err, glovo.CodeApprovalExpired)
+		e.untouched(f, "approved")
+		if n := e.count(`SELECT count(*) FROM bridge_commands WHERE approval_ref = $1`, f.aar); n != 0 {
+			t.Fatalf("%d command rows exist after the refusal", n)
+		}
+		e2 := newEnv(t)
+		f2 := e2.finalized(fixOpt{freshFor: 121 * time.Second})
+		res, err := e2.dispatch(f2)
+		if err != nil {
+			t.Fatalf("121s: %v", err)
+		}
+		var ttl int
+		if err := e2.mp.QueryRow(context.Background(), `SELECT ttl_seconds FROM bridge_commands WHERE command_id=$1`, res.CommandID).Scan(&ttl); err != nil {
+			t.Fatal(err)
+		}
+		if ttl < 119 || ttl > 121 {
+			t.Fatalf("ttl %d, want 119..121", ttl)
+		}
+	})
 	t.Run("ttl is capped at fresh_until", func(t *testing.T) {
 		e := newEnv(t)
 		// The receipt must stay fresh past the reserve margin (120s), so the
@@ -379,4 +404,45 @@ func TestDispatchIsOneTransaction(t *testing.T) {
 	if _, err := e.dispatch(f); err != nil {
 		t.Fatalf("a retry after the rollback: %v", err)
 	}
+}
+
+// A hung membership provider holds L3 and L4 for at most the membership bound,
+// then the dispatch is unavailable and both rows are free again. The provider
+// here ignores its context, so the bound cannot rely on it.
+func TestDispatchHungMembershipDoesNotHoldLocks(t *testing.T) {
+	e := newEnv(t)
+	f := e.finalized(fixOpt{freshFor: 20 * time.Minute})
+	e.members.hang = make(chan struct{})
+	t.Cleanup(func() { close(e.members.hang) })
+	type out struct {
+		err error
+		dur time.Duration
+	}
+	done := make(chan out, 1)
+	go func() {
+		start := time.Now()
+		_, err := e.dispatch(f)
+		done <- out{err, time.Since(start)}
+	}()
+	// While the read hangs, the approval row (L4) is locked.
+	locked := false
+	for i := 0; i < 40 && !locked; i++ {
+		time.Sleep(50 * time.Millisecond)
+		locked = e.rowLocked(`SELECT 1 FROM public.action_approval_requests WHERE id = $1 FOR UPDATE NOWAIT`, f.aar)
+	}
+	if !locked {
+		t.Fatal("the approval row was not locked during the membership read: the test does not observe the hold")
+	}
+	r := <-done
+	wantCode(t, r.err, glovo.CodeUnavailable)
+	if r.dur > glovo.MembershipTimeout+2*time.Second {
+		t.Fatalf("the dispatch took %s with a hung provider, bound is %s", r.dur, glovo.MembershipTimeout)
+	}
+	if e.rowLocked(`SELECT 1 FROM public.action_approval_requests WHERE id = $1 FOR UPDATE NOWAIT`, f.aar) {
+		t.Fatal("the approval row is still locked after the timeout")
+	}
+	if e.rowLocked(`SELECT 1 FROM ctl_fake_orders WHERE order_ref = $1 FOR UPDATE NOWAIT`, f.orderRef) {
+		t.Fatal("the order row is still locked after the timeout")
+	}
+	e.untouched(f, "approved")
 }
