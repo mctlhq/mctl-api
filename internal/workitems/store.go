@@ -211,6 +211,10 @@ type Store struct {
 	now         func() time.Time
 	// queueWhileActive: see queue_switch.go.
 	queueWhileActive bool
+	// glovoOrders is the #988 collaborator CreateGlovoApprovalTx binds the
+	// order's approval_ref through. Nil makes every Glovo approval write
+	// answer not_ready.
+	glovoOrders GlovoOrders
 }
 
 // StoreOption configures a Store.
@@ -232,25 +236,24 @@ func NewStore(ctx context.Context, connStr string, opts ...StoreOption) (*Store,
 	if err != nil {
 		return nil, fmt.Errorf("workitems: connect: %w", err)
 	}
-	if _, err := pool.Exec(ctx, schema); err != nil {
+	owns, err := ownsTables(ctx, pool)
+	if err != nil {
 		pgshared.Release(pool)
-		return nil, fmt.Errorf("workitems: create schema: %w", err)
+		return nil, fmt.Errorf("workitems: probe table ownership: %w", err)
 	}
-	if _, err := pool.Exec(ctx, snapshotSchema); err != nil {
+	if owns {
+		// Owner mode (every deployment before mctl-api#989, and a database
+		// no migration role has set up): this store creates its schema.
+		for _, b := range genericSchemaBlocks {
+			if _, err := pool.Exec(ctx, b.sql); err != nil {
+				pgshared.Release(pool)
+				return nil, fmt.Errorf("workitems: create %s: %w", b.name, err)
+			}
+		}
+	} else if err := verifySchemaVersion(ctx, pool); err != nil {
+		// The tables belong to a migration role (ApplySchema): send no DDL.
 		pgshared.Release(pool)
-		return nil, fmt.Errorf("workitems: create snapshot schema: %w", err)
-	}
-	if _, err := pool.Exec(ctx, actionApprovalSchema); err != nil {
-		pgshared.Release(pool)
-		return nil, fmt.Errorf("workitems: create action approval schema: %w", err)
-	}
-	if _, err := pool.Exec(ctx, executionRequestSchema); err != nil {
-		pgshared.Release(pool)
-		return nil, fmt.Errorf("workitems: create execution request schema: %w", err)
-	}
-	if _, err := pool.Exec(ctx, agentRunTokenSchema); err != nil {
-		pgshared.Release(pool)
-		return nil, fmt.Errorf("workitems: create agent run token schema: %w", err)
+		return nil, err
 	}
 	slog.Info("work-items store initialized")
 	st := &Store{pool: pool, now: func() time.Time { return time.Now().UTC() }}
