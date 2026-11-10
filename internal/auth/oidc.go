@@ -184,6 +184,10 @@ type User struct {
 	// Glovo-audience token; empty for every other credential.
 	teamGrantID    string
 	selectedTenant string
+	// glovoControlWorker is set only on the Glovo control-worker principal
+	// (mctl-api#985). Unexported for the same reason as service.
+	glovoControlWorker bool
+
 	// glovoWorker is set only on the Glovo worker principal, built by
 	// NewGlovoWorkerUser from the test-only worker credential.
 	glovoWorker bool
@@ -644,6 +648,9 @@ func (u *User) HasPermission(permission string) bool {
 	case PermissionBridgeProvider:
 		// Only the bridge provider itself: not an admin, not a service.
 		return u.bridgeProvider != ""
+	case PermissionGlovoControlDispatch:
+		// Only the control worker itself: not an admin, not a service.
+		return u.glovoControlWorker
 	case PermissionSecurityRemediate:
 		// Held by the direct service principal and, through the agent
 		// branch above, by an agent run minted with it. Not by a
