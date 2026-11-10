@@ -240,7 +240,7 @@ func (d *Dispatcher) effectOf(ctx context.Context, q dbq.Querier, o *orders.Orde
 	}
 	status, effect, err = d.Bridge.CommandEffect(ctx, q, []string{o.Tenant}, o.CommandID)
 	if err != nil {
-		return "", "", unavailable("read command effect: ", err)
+		return "", "", unavailable("read command effect", err)
 	}
 	return status, effect, nil
 }
@@ -273,7 +273,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, tenants []string, orderRef, a
 			return nil, err
 		}
 		if err := tx.Commit(ctx); err != nil {
-			return nil, unavailable("commit: ", err)
+			return nil, unavailable("commit", err)
 		}
 		return &Result{OrderRef: o.OrderRef, CommandID: o.CommandID, OrderState: o.State, EffectState: effect, Replayed: true}, nil
 	}
@@ -306,7 +306,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, tenants []string, orderRef, a
 	if err := tx.QueryRow(ctx, `SELECT expires_at > clock_timestamp(), fresh_until IS NOT NULL,
 		COALESCE(EXTRACT(EPOCH FROM (fresh_until - clock_timestamp())), 0)::float8
 		FROM public.action_approval_requests WHERE id = $1`, a.ID).Scan(&live, &hasFresh, &left); err != nil {
-		return nil, unavailable("read approval window: ", err)
+		return nil, unavailable("read approval window", err)
 	}
 	if !hasFresh {
 		return nil, refuse(glovo.CodeApprovalInvalid, "an approved receipt has no freshness bound")
@@ -338,7 +338,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, tenants []string, orderRef, a
 		return d.Members.IsMember(c, o.Tenant, o.OwnerPrincipalID)
 	})
 	if err != nil {
-		return nil, unavailable("membership read: ", err)
+		return nil, unavailable("membership read", err)
 	}
 	if !member {
 		return nil, refuse(glovo.CodeNoTenant, "the owner is no longer a tenant member")
@@ -348,12 +348,12 @@ func (d *Dispatcher) Dispatch(ctx context.Context, tenants []string, orderRef, a
 	// backstop, and a collision is unavailable and retryable.
 	var sequence int64
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(sequence), 0) + 1 FROM bridge_commands WHERE execution_id = $1`, o.ExecutionID).Scan(&sequence); err != nil {
-		return nil, unavailable("read sequence: ", err)
+		return nil, unavailable("read sequence", err)
 	}
 	// Step 11: the snapshot is the payload, byte for byte.
 	snap, err := d.Orders.Snapshot(ctx, tx, sc, o.OrderRef, o.FinalSnapshotSeq)
 	if err != nil {
-		return nil, unavailable("read final snapshot: ", err)
+		return nil, unavailable("read final snapshot", err)
 	}
 	if _, canonical, perr := basket.Parse(snap.Canonical); perr != nil || basket.Fingerprint(canonical) != o.FinalBasketFingerprint ||
 		snap.Fingerprint != o.FinalBasketFingerprint {
@@ -361,22 +361,22 @@ func (d *Dispatcher) Dispatch(ctx context.Context, tenants []string, orderRef, a
 	}
 	tenantRef, err := d.Joins.LookupJoinRefTx(ctx, tx, orders.JoinTenant, o.Tenant, "", o.Tenant)
 	if err != nil {
-		return nil, unavailable("tenant ref: ", err)
+		return nil, unavailable("tenant ref", err)
 	}
 	principalRef, err := d.Joins.LookupJoinRefTx(ctx, tx, orders.JoinPrincipal, o.Tenant, o.OwnerPrincipalID, o.OwnerPrincipalID)
 	if err != nil {
-		return nil, unavailable("principal ref: ", err)
+		return nil, unavailable("principal ref", err)
 	}
 	execTenant, execOwner, workItemID, workflowID, err := d.Execs.ExecutionBindingTx(ctx, tx, o.ExecutionID)
 	if err != nil {
-		return nil, unavailable("execution binding: ", err)
+		return nil, unavailable("execution binding", err)
 	}
 	if execTenant != o.Tenant || execOwner != o.OwnerPrincipalID || workItemID != b.WorkItemID {
 		return nil, refuse(glovo.CodeIntentMismatch, "the execution is not this order's")
 	}
 	startWorkflow, runID, err := d.ControlStart(ctx, tx, o.OrderRef)
 	if err != nil {
-		return nil, unavailable("control start: ", err)
+		return nil, unavailable("control start", err)
 	}
 	if startWorkflow != workflowID {
 		return nil, refuse(glovo.CodeIntentMismatch, "the control start names another workflow")
@@ -415,7 +415,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, tenants []string, orderRef, a
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return nil, unavailable("commit: ", err)
+		return nil, unavailable("commit", err)
 	}
 	return &Result{OrderRef: o.OrderRef, CommandID: cmdID, OrderState: o.State, EffectState: bridge.EffectNone}, nil
 }
@@ -510,7 +510,7 @@ func (d *Dispatcher) Cancel(ctx context.Context, tenants []string, orderRef stri
 		res.EffectState = effect
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return nil, unavailable("commit: ", err)
+		return nil, unavailable("commit", err)
 	}
 	res.OrderState = o.State
 	return res, nil
@@ -538,7 +538,7 @@ func (d *Dispatcher) ReadCommand(ctx context.Context, tenants []string, commandI
 		if errors.Is(err, bridge.ErrCommandNotFound) {
 			return nil, glovo.ErrNotFound
 		}
-		return nil, unavailable("read command: ", err)
+		return nil, unavailable("read command", err)
 	}
 	tx, o, _, err := d.scoped(ctx, first.OrderRef, tenants)
 	if err != nil {
@@ -554,13 +554,13 @@ func (d *Dispatcher) ReadCommand(ctx context.Context, tenants []string, commandI
 		if errors.Is(err, bridge.ErrCommandNotFound) {
 			return nil, glovo.ErrNotFound
 		}
-		return nil, unavailable("read command: ", err)
+		return nil, unavailable("read command", err)
 	}
 	if err := d.reconcileOrder(ctx, tx, o, commandID, r.Status, r.EffectState); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return nil, unavailable("commit: ", err)
+		return nil, unavailable("commit", err)
 	}
 	return &CommandView{CommandID: r.CommandID, OrderRef: r.OrderRef, Status: r.Status, EffectState: r.EffectState,
 		Outcome: r.Outcome, ProviderEffect: r.ProviderEffect, ErrorCode: r.ErrorCode, ResultDigest: r.ResultDigest}, nil
