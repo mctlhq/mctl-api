@@ -31,7 +31,7 @@ func TestVendoredContractMatchesProvenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, f := range []string{"approval-basket.schema.json", "basket-fingerprint.json", "pattern-parity.json"} {
-		raw, err := os.ReadFile("contract/" + f)
+		raw, err := os.ReadFile("contract/" + f) //nolint:gosec // fixed vendored contract file names
 		if err != nil {
 			t.Fatal(err)
 		}

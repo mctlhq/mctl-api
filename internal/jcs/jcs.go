@@ -277,7 +277,7 @@ func hex4(b []byte) (rune, bool) {
 			return 0, false
 		}
 	}
-	return rune(v), true
+	return rune(v), true //nolint:gosec // G115: v is parsed with ParseUint(.., 16, 32), so it fits
 }
 
 // str reads one string token. In strict mode an escape inside an object key

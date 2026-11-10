@@ -129,6 +129,12 @@ func TestReadyOwnershipAndGrants(t *testing.T) {
 		{"table owned by the runtime role", func(e *env) {
 			mustExec(t, e.root(), `ALTER TABLE glovo.join_refs OWNER TO `+e.rt)
 		}},
+		{"table owned by an unrelated role", func(e *env) {
+			r := e.root()
+			e.extraRoles = append(e.extraRoles, "oth_"+e.rt)
+			mustExec(t, r, fmt.Sprintf(`CREATE ROLE oth_%s NOLOGIN`, e.rt))
+			mustExec(t, r, fmt.Sprintf(`ALTER TABLE glovo.order_effects OWNER TO oth_%s`, e.rt))
+		}},
 		{"table owned by a role the runtime role inherits", func(e *env) {
 			r := e.root()
 			e.extraRoles = append(e.extraRoles, "inh_"+e.rt)

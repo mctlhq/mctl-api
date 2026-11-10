@@ -32,7 +32,7 @@ func TestVendoredVectorsMatchProvenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, f := range []string{"jcs-digest.json", "must-reject.json"} {
-		raw, err := os.ReadFile("testdata/" + f)
+		raw, err := os.ReadFile("testdata/" + f) //nolint:gosec // fixed vendored vector names
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -131,7 +131,7 @@ func TestNoOtherCanonicalizer(t *testing.T) {
 			if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
 				return err
 			}
-			raw, err := os.ReadFile(p)
+			raw, err := os.ReadFile(p) //nolint:gosec // path comes from WalkDir over the repo source tree
 			if err != nil {
 				return err
 			}
