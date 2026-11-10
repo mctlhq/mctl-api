@@ -211,6 +211,10 @@ type Store struct {
 	now         func() time.Time
 	// queueWhileActive: see queue_switch.go.
 	queueWhileActive bool
+	// glovoOrders is the #988 collaborator CreateGlovoApprovalTx binds the
+	// order's approval_ref through. Nil makes every Glovo approval write
+	// answer not_ready.
+	glovoOrders GlovoOrders
 }
 
 // StoreOption configures a Store.
