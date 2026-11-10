@@ -17,13 +17,18 @@ package glovojoin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/mctlhq/mctl-api/internal/glovo"
+	"github.com/mctlhq/mctl-api/internal/glovo/orders"
 )
 
 var errInjected = errors.New("injected statement failure")
@@ -185,4 +190,91 @@ func TestJoinSliceNeverCallsTheBridgeEnqueue(t *testing.T) {
 			t.Errorf("%s mentions Enqueue", f)
 		}
 	}
+}
+
+// replayOnceOrders makes the first order Create report a replay, as it does
+// when a concurrent prepare of the same key committed between the lookup and
+// the insert.
+type replayOnceOrders struct {
+	PrepareOrders
+	creates int
+}
+
+func (r *replayOnceOrders) Create(ctx context.Context, tx pgx.Tx, in orders.CreateInput) (*orders.Order, bool, error) {
+	r.creates++
+	if r.creates == 1 {
+		return &orders.Order{OrderRef: in.OrderRef, Version: 1}, true, nil
+	}
+	return r.PrepareOrders.Create(ctx, tx, in)
+}
+
+// A replayed Create restarts the flow from step 1 and rolls the first attempt
+// back: the claim, execution and ids of attempt one are not left behind, and
+// the second attempt completes once.
+func TestPrepareRestartsWhenCreateReportsAReplay(t *testing.T) {
+	s := newStack(t)
+	s.activate("k-replay-create")
+	ro := &replayOnceOrders{PrepareOrders: s.orders}
+	s.prepare.Order = ro
+	p := s.preview(stackBasket)
+	res, rf := s.prepare.Prepare(context.Background(), s.req(p, "key-rc"))
+	if rf != nil || res.Replayed {
+		t.Fatalf("prepare = %+v, %v", res, rf)
+	}
+	if ro.creates != 2 {
+		t.Fatalf("Create ran %d times, want 2 (one restart)", ro.creates)
+	}
+	if w := s.writes(); w != [6]int{1, 1, 1, 1, 1, 0} {
+		t.Fatalf("writes = %v after a restart, want exactly one of each", w)
+	}
+}
+
+// Two different previews under one key race: the loser's Create waits for the
+// winner's commit, restarts, and is refused as a reused key. One order exists
+// and the loser's preview is not spent.
+func TestPrepareSameKeyTwoPreviewsRace(t *testing.T) {
+	s := newStack(t)
+	s.activate("k-race2")
+	pa, pb := s.preview(stackBasket), s.preview(stackBasket)
+	var wg sync.WaitGroup
+	got := make([]*Refusal, 2)
+	for i, p := range []Preview{pa, pb} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, got[i] = s.prepare.Prepare(context.Background(), s.req(p, "same-key"))
+		}()
+	}
+	wg.Wait()
+	ok := 0
+	for _, rf := range got {
+		switch {
+		case rf == nil:
+			ok++
+		case !errors.Is(rf, glovo.Refuse(glovo.CodeIdempotencyReused)) && !errors.Is(rf, glovo.Refuse(glovo.CodeFingerprintChanged)):
+			t.Fatalf("loser refused with %v", rf)
+		}
+	}
+	if ok != 1 {
+		t.Fatalf("%d of 2 prepares of one key succeeded: %v", ok, got)
+	}
+	if w := s.writes(); w != [6]int{1, 1, 1, 1, 1, 0} {
+		t.Fatalf("writes = %v, want exactly one order", w)
+	}
+}
+
+// 55P03 (lock_timeout) is tenant_busy however it is wrapped; any other error
+// without a Glovo code is unavailable.
+func TestToRefusalLockTimeoutIsTenantBusy(t *testing.T) {
+	pg := &pgconn.PgError{Code: "55P03"}
+	for name, err := range map[string]error{
+		"bare":    pg,
+		"wrapped": fmt.Errorf("lock owner: %w", pg),
+	} {
+		rf := toRefusal(err, "lock")
+		wantCode(t, rf, glovo.CodeTenantBusy, "lock_timeout")
+		_ = name
+	}
+	wantCode(t, toRefusal(&pgconn.PgError{Code: "40001"}, "x"), glovo.CodeUnavailable, "")
+	wantCode(t, toRefusal(errors.New("boom"), "x"), glovo.CodeUnavailable, "")
 }

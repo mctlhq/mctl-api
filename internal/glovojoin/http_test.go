@@ -228,7 +228,7 @@ func TestHTTPRefusalsAndErrorBodies(t *testing.T) {
 		{"limit too big", "POST", "/orders:list", f.auth(nil), `{"limit":21}`, 400, "invalid_arguments"},
 		{"no scope ref", "GET", "/connection", map[string]string{SubjectTokenHeader: f.tok}, "", 403, ""},
 		{"bad order ref", "GET", "/orders/nope", f.auth(nil), "", 404, "not_found"},
-		{"status unwired", "GET", "/orders/ordr_AAAAAAAAAAAAAAAAAAAA", f.auth(nil), "", 503, "not_ready"},
+		{"status unknown order", "GET", "/orders/ordr_AAAAAAAAAAAAAAAAAAAA", f.auth(nil), "", 404, "not_found"},
 		{"unissued preview", "POST", "/orders:prepare", f.auth(map[string]string{"Idempotency-Key": "a"}), pb, 404, "not_found"},
 	}
 	for _, c := range cases {
@@ -240,7 +240,7 @@ func TestHTTPRefusalsAndErrorBodies(t *testing.T) {
 		golden(t, "refusals", strings.ReplaceAll(c.name, " ", "_"), resp.StatusCode, b)
 		if c.wire != "" {
 			var e map[string]string
-			if err := json.Unmarshal([]byte(b), &e); err != nil || (e["error"] != c.wire && c.name != "status unwired") || e["error_description"] == "" {
+			if err := json.Unmarshal([]byte(b), &e); err != nil || e["error"] != c.wire || e["error_description"] == "" {
 				t.Errorf("%s: body %s", c.name, b)
 			}
 		}
@@ -266,6 +266,96 @@ func TestHTTPRateLimitsCarryRetryAfter(t *testing.T) {
 	if codes[3] != 429 && codes[4] != 429 {
 		t.Fatalf("codes = %v", codes)
 	}
+}
+
+// limit sets the three limits and rebuilds the limiters (fresh buckets).
+func (f *httpFx) limit(perSubject, writes, aggregate int) {
+	f.rt.PerSubject, f.rt.Writes, f.rt.Aggregate = perSubject, writes, aggregate
+	f.rt.once = sync.Once{}
+	_ = f.rt.Handler()
+}
+
+// as switches the verified principal of the fake resolver.
+func (f *httpFx) as(principal string) {
+	f.rt.Verifier.Resolver.(*fakeResolver).sc.PrincipalID = principal
+}
+
+func (f *httpFx) code(method, path, body string) int {
+	f.t.Helper()
+	resp, _ := f.do(method, path, f.auth(nil), body)
+	return resp.StatusCode
+}
+
+// H3/N1: the three buckets are keyed as designed. The per-subject bucket is
+// one per principal (another principal is not limited by the first one), the
+// write bucket is one per principal and separate from reads, and the facade
+// aggregate is ONE bucket for every principal together.
+func TestHTTPLimiterKeys(t *testing.T) {
+	const other = "prn_OWNER00000000000000000002"
+	t.Run("per-subject bucket is per principal", func(t *testing.T) {
+		f := newHTTPFx(t)
+		f.limit(2, 1000, 1000)
+		for i := 1; i <= 2; i++ {
+			if c := f.code("POST", jb+"/resolve", "{}"); c != 200 {
+				t.Fatalf("request %d = %d", i, c)
+			}
+		}
+		if c := f.code("POST", jb+"/resolve", "{}"); c != 429 {
+			t.Fatalf("third request of one principal = %d, want 429", c)
+		}
+		f.as(other)
+		if c := f.code("POST", jb+"/resolve", "{}"); c != 200 {
+			t.Fatalf("first request of another principal = %d, want 200 (a shared subject bucket)", c)
+		}
+	})
+	t.Run("aggregate bucket is shared by every principal", func(t *testing.T) {
+		f := newHTTPFx(t)
+		f.limit(1000, 1000, 3)
+		for i, who := range []string{stackOwner, other, stackOwner} {
+			f.as(who)
+			if c := f.code("POST", jb+"/resolve", "{}"); c != 200 {
+				t.Fatalf("request %d = %d", i+1, c)
+			}
+		}
+		f.as(other)
+		if c := f.code("POST", jb+"/resolve", "{}"); c != 429 {
+			t.Fatalf("fourth request across two principals = %d, want 429 (a per-principal aggregate)", c)
+		}
+	})
+	t.Run("write bucket is per principal and not spent by reads", func(t *testing.T) {
+		f := newHTTPFx(t)
+		f.limit(1000, 1, 1000)
+		for i := 0; i < 3; i++ {
+			if c := f.code("POST", jb+"/resolve", "{}"); c != 200 {
+				t.Fatalf("read %d = %d", i+1, c)
+			}
+		}
+		if c := f.code("POST", jb+"/connections", "{}"); c == 429 {
+			t.Fatal("the first write was limited after reads (reads spend the write bucket)")
+		}
+		if c := f.code("POST", jb+"/connections", "{}"); c != 429 {
+			t.Fatalf("second write of one principal = %d, want 429", c)
+		}
+		f.as(other)
+		if c := f.code("POST", jb+"/connections", "{}"); c == 429 {
+			t.Fatal("another principal's first write was limited (a shared write bucket)")
+		}
+	})
+}
+
+// Without a status reader the order route is not_ready, never a guess.
+func TestHTTPOrderStatusUnwiredIsNotReady(t *testing.T) {
+	f := newHTTPFx(t)
+	_, body := f.do("POST", jb+"/resolve", f.auth(nil), "{}")
+	var raw map[string]string
+	_ = json.Unmarshal([]byte(body), &raw)
+	f.ref = raw["scope_ref"]
+	f.rt.Status = nil
+	resp, b := f.do("GET", jb+"/orders/ordr_AAAAAAAAAAAAAAAAAAAA", f.auth(nil), "")
+	if resp.StatusCode != 503 || !strings.Contains(b, `"not_ready"`) {
+		t.Fatalf("status unwired = %d %s", resp.StatusCode, b)
+	}
+	golden(t, "refusals", "status_unwired", resp.StatusCode, b)
 }
 
 func TestHTTPCompatibilityIsNeverDeployReady(t *testing.T) {

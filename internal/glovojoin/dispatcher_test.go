@@ -210,3 +210,27 @@ func TestDispatcherConcurrentClaimStartsOnce(t *testing.T) {
 		t.Fatalf("state = %s", state)
 	}
 }
+
+// D6: a starter that answers without an error but without a run id has not
+// started anything: the row is not marked started, and the attempt is counted
+// and retried. The same holds for an already-started answer that carries no
+// run id to record.
+func TestDispatcherRefusesAnEmptyRunID(t *testing.T) {
+	for name, st := range map[string]*fakeStarter{
+		"nil error":       {run: ""},
+		"already started": {run: "", err: fmt.Errorf("%w: no run id", ErrAlreadyStarted)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newStack(t)
+			s.activate("k-norun")
+			ref, _ := s.prepared("key-norun")
+			n, err := s.dispatcher(st, true).RunOnce(context.Background())
+			if n != 0 || err != nil {
+				t.Fatalf("RunOnce = %d %v", n, err)
+			}
+			if state, run, attempts := s.startRow(ref); state != "pending" || run != "" || attempts != 1 {
+				t.Fatalf("row = %s %q %d, want pending, no run, one attempt", state, run, attempts)
+			}
+		})
+	}
+}

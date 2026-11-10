@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mctlhq/mctl-api/internal/bridge"
 	"github.com/mctlhq/mctl-api/internal/glovojoin/contract"
 )
 
@@ -47,6 +48,9 @@ func TestHeartbeatProbeOnlyAFreshReadIsReady(t *testing.T) {
 		}, false},
 		{"never recorded (empty read)", func(context.Context) (Heartbeat, error) { return Heartbeat{}, nil }, false},
 		{"recorded with a zero time", func(context.Context) (Heartbeat, error) { return Heartbeat{Recorded: true}, nil }, false},
+		{"not recorded, with a fresh timestamp", func(context.Context) (Heartbeat, error) {
+			return Heartbeat{Recorded: false, At: now.Add(-time.Second)}, nil
+		}, false},
 		{"future-dated", func(context.Context) (Heartbeat, error) {
 			return Heartbeat{Recorded: true, At: now.Add(time.Minute)}, nil
 		}, false},
@@ -117,4 +121,32 @@ func TestCompatibilityCarriesTheContractIdentity(t *testing.T) {
 	if got := BridgeProbe(nil)(context.Background()); got == nil {
 		t.Fatal("nil bridge probed ready")
 	}
+	// A typed nil is an interface that is not nil: it is still no transport.
+	var typed *bridge.ReadClient
+	if got := BridgeProbe(typed)(context.Background()); got == nil {
+		t.Fatal("a typed-nil ReadClient probed ready")
+	}
+	var typedRec *recBridge
+	if got := BridgeProbe(typedRec)(context.Background()); got == nil {
+		t.Fatal("a typed-nil bridge probed ready")
+	}
+	// A bridge that reports its own readiness is ready only when it says so.
+	if got := BridgeProbe(readyBridge{err: errors.New("session down")})(context.Background()); got == nil {
+		t.Fatal("a bridge whose readiness check failed probed ready")
+	}
+	if got := BridgeProbe(readyBridge{})(context.Background()); got != nil {
+		t.Fatalf("a bridge whose readiness check passed is not ready: %v", got)
+	}
+	if got := BridgeProbe(&recBridge{})(context.Background()); got != nil {
+		t.Fatalf("a real transport is not ready: %v", got)
+	}
 }
+
+// readyBridge is a ReadBridge that reports its own readiness.
+type readyBridge struct{ err error }
+
+func (readyBridge) Read(context.Context, bridge.ReadRequest) (*bridge.ReadResult, error) {
+	return nil, nil
+}
+
+func (r readyBridge) Ready(context.Context) error { return r.err }

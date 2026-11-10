@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"time"
 
 	"github.com/mctlhq/mctl-api/internal/glovo"
@@ -63,17 +64,26 @@ func HeartbeatProbe(read func(context.Context) (Heartbeat, error), now func() ti
 }
 
 // BridgeProbe is ready only for a ReadBridge that is a real transport:
-// NotReadyBridge, a nil bridge and a failed readiness check are not ready.
+// NotReadyBridge, a nil bridge (an untyped nil and a typed nil pointer inside
+// the interface alike) and a failed readiness check are not ready. A bridge
+// that can report its own readiness (a Ready(ctx) error method) is ready only
+// when that call returns nil.
 func BridgeProbe(b ReadBridge) func(context.Context) error {
-	return func(context.Context) error {
+	return func(ctx context.Context) error {
 		if b == nil {
 			return errors.New("read bridge: absent")
+		}
+		if v := reflect.ValueOf(b); v.Kind() == reflect.Pointer && v.IsNil() {
+			return errors.New("read bridge: nil transport")
 		}
 		if _, ok := b.(NotReadyBridge); ok {
 			return glovo.Refuse(glovo.CodeNotReady)
 		}
 		if _, ok := b.(*NotReadyBridge); ok {
 			return glovo.Refuse(glovo.CodeNotReady)
+		}
+		if rb, ok := b.(interface{ Ready(context.Context) error }); ok {
+			return rb.Ready(ctx)
 		}
 		return nil
 	}
