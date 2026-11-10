@@ -117,9 +117,18 @@ func (h *Handlers) guardDecision(w http.ResponseWriter, r *http.Request, user *a
 
 // decisionCapture is what a successful approve records beside the decision.
 func (h *Handlers) decisionCapture(in workitems.ActionDecisionInput, digest string) workitems.ActionDecisionInput {
+	return h.decisionCaptureFor("", in, digest)
+}
+
+// decisionCaptureFor is decisionCapture for a row of the given action kind: a
+// Glovo order approval is decided by the order's owner, not a platform admin.
+func (h *Handlers) decisionCaptureFor(actionKind string, in workitems.ActionDecisionInput, digest string) workitems.ActionDecisionInput {
 	if in.Decision == workitems.DecisionApprove {
 		in.ContextDigest = digest
 		in.AuthorityBasis = governance.AuthorityBasisPlatformAdmin
+		if workitems.IsGlovoKind(actionKind) {
+			in.AuthorityBasis = governance.AuthorityBasisResourceOwner
+		}
 		in.AuthzMode = string(h.opts.TenantAuthzMode)
 		in.FreshFor = h.maxDecisionAge()
 	}
