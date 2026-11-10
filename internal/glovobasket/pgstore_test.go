@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/mctlhq/mctl-api/internal/glovo"
@@ -216,6 +217,17 @@ func TestPGBasketLifecycle(t *testing.T) {
 	if err != nil || ap3.ApprovalRef == ap.ApprovalRef || ap3.State != "pending" {
 		t.Fatalf("new revision approval: %+v %v", ap3, err)
 	}
+	// Back to the approved lines: the fingerprint is the approved one again
+	// (the canonical form has no revision), but the approval covers revision
+	// 2 only, so it still does not authorize the head.
+	b4, err := e.store.Update(ctx, ownerA, b.ID, 3, []Op{{Op: "set", ItemCode: "FAKE-PASTA", Quantity: 3}})
+	if err != nil || b4.Current.Revision != 4 || b4.Current.Fingerprint != b2.Current.Fingerprint {
+		t.Fatalf("update back to the approved lines: %+v %v", b4, err)
+	}
+	st, err = e.store.ApprovalStatus(ctx, ownerA, ap.ApprovalRef)
+	if err != nil || st.State != "approved" || st.AuthorizesCurrent || st.CurrentRevision != 4 {
+		t.Fatalf("old approval vs same-content revision: %+v %v", st, err)
+	}
 	// The decision payload is the approved revision, not the current one.
 	p, err := e.store.DecisionPayload(ctx, ap.ApprovalRef)
 	if err != nil || p.Revision != 2 || p.Fingerprint != b2.Current.Fingerprint || len(p.Lines) != 1 || p.Lines[0].Quantity != 3 || p.Owner != prnOwner {
@@ -271,6 +283,37 @@ func TestPGDatabaseGuards(t *testing.T) {
 	e := newPGEnv(t)
 	ctx := context.Background()
 	b := e.filled(ownerA)
+	// The runtime role lacks most of these grants, so its refusals prove the
+	// grants; the table owner has every privilege, so its refusals prove the
+	// triggers themselves.
+	mig, err := pgx.Connect(ctx, e.migURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = mig.Close(ctx) }()
+	// An ordered list: an accepted TRUNCATE would empty the table and make
+	// the later statements vacuous, so it runs last.
+	for _, c := range []struct{ name, sql string }{
+		{"revision update", `UPDATE glovo.basket_revisions SET total_minor = 1, subtotal_minor = 1 - delivery_fee_minor - service_fee_minor WHERE basket_id=$1`},
+		{"revision lines", `UPDATE glovo.basket_revisions SET lines = '[]' WHERE basket_id=$1 AND revision = 2`},
+		{"revision delete", `DELETE FROM glovo.basket_revisions WHERE basket_id=$1`},
+		{"basket delete", `DELETE FROM glovo.baskets WHERE basket_id=$1`},
+		{"basket identity", `UPDATE glovo.baskets SET client_key = 'other' WHERE basket_id=$1`},
+		{"basket jump", `UPDATE glovo.baskets SET current_revision = 9 WHERE basket_id=$1`},
+		{"basket rewind", `UPDATE glovo.baskets SET current_revision = 1 WHERE basket_id=$1`},
+		{"revision truncate", `TRUNCATE glovo.basket_revisions CASCADE`},
+	} {
+		args := []any{b.ID}
+		if strings.HasPrefix(c.sql, "TRUNCATE") {
+			args = nil
+		}
+		var pe *pgconn.PgError
+		if _, err := mig.Exec(ctx, c.sql, args...); err == nil {
+			t.Errorf("owner %s: accepted", c.name)
+		} else if !errors.As(err, &pe) || pe.Code != "23000" {
+			t.Errorf("owner %s: refused by something other than a guard: %v", c.name, err)
+		}
+	}
 	for name, sql := range map[string]string{
 		"revision update":   `UPDATE glovo.basket_revisions SET total_minor = 1, subtotal_minor = 1 - delivery_fee_minor - service_fee_minor WHERE basket_id=$1`,
 		"revision lines":    `UPDATE glovo.basket_revisions SET lines = '[]' WHERE basket_id=$1 AND revision = 2`,
