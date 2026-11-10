@@ -46,7 +46,10 @@ const (
 
 // Defaults of Config.
 const (
-	DefaultMaxBaskets     = 20
+	DefaultMaxBaskets = 20
+	// DefaultCallsPerMinute is per principal and per process: the limiter is
+	// in memory, so with N replicas the ceiling is about N times this. The
+	// basket and revision quotas are enforced in the database.
 	DefaultCallsPerMinute = 60
 	DefaultApprovalTTL    = 15 * time.Minute
 	// MaxRequestBytes bounds one MCP request body.
@@ -338,6 +341,7 @@ func (s *service) register(m *server.MCPServer) {
 	m.AddTool(mcp.NewTool(ToolRequestApproval, opts(write, mcp.WithIdempotentHintAnnotation(true),
 		mcp.WithDescription("Ask the basket's owner to approve its current revision. Returns an approval_ref and, when the "+
 			"approval page is enabled, an approval_url to show the owner; the owner decides outside this tool set. "+
+			"An expired or rejected approval is final for that revision: update the basket to request again. "+
 			"Nothing is ordered."), basketID, expected)...),
 		s.wrap(ToolRequestApproval, func(ctx context.Context, o Owner, req mcp.CallToolRequest, a *auditLine) (any, error) {
 			var in struct {

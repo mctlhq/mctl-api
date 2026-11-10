@@ -248,6 +248,24 @@ func (h *Handlers) GetGlovoBasketApproval(w http.ResponseWriter, r *http.Request
 		notFound()
 		return
 	}
+	// The same live membership the decision requires (glovoOwnerCheck): an
+	// owner removed from the team reads nothing here either.
+	var read func() ([][]string, error)
+	if h.opts.TenantAuthzMode == TenantAuthzPrincipal && h.opts.PrincipalMembership != nil {
+		prn := user.PrincipalID()
+		read = func() ([][]string, error) {
+			return h.opts.PrincipalMembership.MemberRolesForPrincipal(p.Tenant, prn)
+		}
+	}
+	if ref := decideWrittenRole(user.PrincipalID(), "principal membership reader", p.Tenant, glovoMinDeciderRole,
+		"reading a Glovo basket approval", read); ref.refused() {
+		if ref.status == http.StatusForbidden {
+			notFound()
+			return
+		}
+		writeErrorCode(w, http.StatusServiceUnavailable, "unavailable", "cannot read this approval right now; try again later", nil)
+		return
+	}
 	a, err := h.opts.WorkItems.ActionApproval(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, workitems.ErrApprovalNotFound) {

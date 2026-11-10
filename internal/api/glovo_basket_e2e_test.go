@@ -332,6 +332,12 @@ func TestGlovoBasketMCPOAuthHarness(t *testing.T) {
 	if code, _ := b.callJSON(http.MethodGet, "/api/v1/action-approvals/"+ref+"/glovo-basket", "tu:a2", nil); code != http.StatusNotFound {
 		t.Fatalf("payload read by another member: %d", code)
 	}
+	// The bound owner reads it only while a member, like the decision.
+	b.members.set("alpha", prnA1, "")
+	if code, _ := b.callJSON(http.MethodGet, "/api/v1/action-approvals/"+ref+"/glovo-basket", "tu:a1", nil); code != http.StatusNotFound {
+		t.Fatalf("payload read by the owner after leaving the team: %d", code)
+	}
+	b.members.set("alpha", prnA1, "developer")
 	for _, other := range []string{"tu:a2", "tu:owner", "tu:root"} {
 		if code, m := b.callJSON(http.MethodPost, "/api/v1/action-approvals/"+ref+"/decision", other,
 			map[string]any{"decision": "deny"}); code != http.StatusForbidden {

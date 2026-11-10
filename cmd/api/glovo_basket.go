@@ -91,9 +91,16 @@ func configureGlovoBasket(ctx context.Context, d glovoBasketDeps, lookup func(st
 	return &api.GlovoBasketRoutes{
 		Host: res.Hostname(), Resource: d.OAuth.GlovoResource, MCP: h, Payloads: store,
 		Decisions: &workitems.GlovoBasketDecisions{
-			Reader:  pool,
-			Begin:   func(ctx context.Context) (pgx.Tx, error) { return pool.Begin(ctx) },
-			ReadyFn: func(ctx context.Context) error { return glovobasket.VerifySchema(ctx, pool) },
+			Reader: pool,
+			Begin:  func(ctx context.Context) (pgx.Tx, error) { return pool.Begin(ctx) },
+			// Every decision re-proves both schemas, like the order kind's
+			// receipt.Ready: the aar_ and binding guards, then the basket's.
+			ReadyFn: func(ctx context.Context) error {
+				if err := workitems.VerifyGlovoApprovalSchema(ctx, pool); err != nil {
+					return err
+				}
+				return glovobasket.VerifySchema(ctx, pool)
+			},
 		},
 	}, nil
 }
