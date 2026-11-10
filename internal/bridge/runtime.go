@@ -496,7 +496,8 @@ func cancelRow(ctx context.Context, tx pgx.Tx, commandID, fromStatus string, lea
 // the given connections on the caller's transaction: it is the revocation hook
 // every #959 connection-ending path calls after L1 and L2, so a command
 // without a permit can never get one and a permitted one becomes unknown. It
-// locks the commands ORDER BY command_id (L5 of the #957 lock order) and
+// locks the commands ORDER BY command_id COLLATE "C" (byte order, never the
+// database collation: every taker of these row locks must agree on one order) (L5 of the #957 lock order) and
 // applies the semantics of Store.Cancel to each. It is a plain Go function on
 // the revoker's transaction, with the runtime role's own bridge_commands
 // rights; there is no SECURITY DEFINER function.
@@ -505,7 +506,7 @@ func CancelOpenForConnections(ctx context.Context, tx pgx.Tx, gcnIDs []string, a
 		return nil
 	}
 	rows, err := tx.Query(ctx, `SELECT command_id, status, lease_epoch FROM bridge_commands
-		WHERE connection_ref = ANY($1) AND status IN ('pending','leased') ORDER BY command_id FOR UPDATE`, gcnIDs)
+		WHERE connection_ref = ANY($1) AND status IN ('pending','leased') ORDER BY command_id COLLATE "C" FOR UPDATE`, gcnIDs)
 	if err != nil {
 		return fmt.Errorf("bridge: lock open commands: %w", err)
 	}

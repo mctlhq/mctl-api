@@ -85,7 +85,16 @@ func newRTEnv(t *testing.T) *rtEnv {
 	for _, r := range []string{e.mig, e.rt, e.wi, e.mnt} {
 		stmts = append(stmts, fmt.Sprintf(`CREATE ROLE %s LOGIN PASSWORD '%s' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS`, r, rtPassword))
 	}
-	stmts = append(stmts, fmt.Sprintf(`CREATE DATABASE %s OWNER %s`, e.db, e.mig),
+	// A non-C collation, where the database default would hide a lock order that
+	// follows the collation instead of the bytes; a server without the locale
+	// falls back to its default (the collation pin test then fails loudly).
+	const collation = ` TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'en_US.UTF-8' LC_CTYPE 'en_US.UTF-8'`
+	createDB := fmt.Sprintf(`CREATE DATABASE %s OWNER %s`, e.db, e.mig)
+	if _, err := root.Exec(ctx, `CREATE DATABASE `+e.db+`_probe`+collation); err == nil {
+		_, _ = root.Exec(ctx, `DROP DATABASE `+e.db+`_probe`)
+		createDB += collation
+	}
+	stmts = append(stmts, createDB,
 		fmt.Sprintf(`REVOKE ALL ON DATABASE %s FROM PUBLIC`, e.db),
 		fmt.Sprintf(`GRANT CONNECT ON DATABASE %s TO %s, %s, %s`, e.db, e.rt, e.wi, e.mnt))
 	for _, s := range stmts {
@@ -490,6 +499,58 @@ func TestCancelOpenForConnections(t *testing.T) {
 // TestCancelOpenForConnectionsLocksInCommandOrder proves L5: the commands are
 // locked, and so cancelled, in command_id order whatever order they were
 // created in. The transition ids record the order the rows were handled in.
+// The lock order is the byte order of command_id, whatever the database
+// collation says. Ids that differ only by case sort one way in en_US and the
+// other in bytes; with ORDER BY command_id alone the locks (and so the cancel
+// transitions) follow the collation and this fails.
+func TestCancelOpenForConnectionsOrdersBytewise(t *testing.T) {
+	e := newRTEnv(t)
+	e.apply()
+	s := e.runtimeStore()
+	ctx := context.Background()
+	var coll string
+	if err := e.migPool.QueryRow(ctx, `SELECT datcollate FROM pg_database WHERE datname = current_database()`).Scan(&coll); err != nil {
+		t.Fatal(err)
+	}
+	if coll == "C" || coll == "POSIX" {
+		t.Fatalf("this test needs a database with a non-C collation, got %q (the server lacks en_US.UTF-8)", coll)
+	}
+	const conn = "gcn_COLLATE00000000000000"
+	ids := []string{"cmd_aaaaaaaaaaaaaaaaaaaaaaaaaa", "cmd_Aaaaaaaaaaaaaaaaaaaaaaaaaa", "cmd_bbbbbbbbbbbbbbbbbbbbbbbbbb", "cmd_Bbbbbbbbbbbbbbbbbbbbbbbbbb"}
+	for i, id := range ids {
+		cmd := enqueueRT(t, s, "acme", KindPlaceOrderFake, fmt.Sprintf("aar_COLLATE%014d", i), conn)
+		e.mustMig(`UPDATE bridge_commands SET command_id = $2 WHERE command_id = $1`, cmd, id)
+	}
+	tx, err := e.rtPool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := CancelOpenForConnections(ctx, tx, []string{conn}, "svc:revoker"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := e.migPool.Query(ctx, `SELECT command_id FROM bridge_command_transitions WHERE to_status='cancelled' ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, id)
+	}
+	want := []string{ids[1], ids[3], ids[0], ids[2]} // bytes: A..., B..., a..., b...
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("cancel order %v, want the byte order %v (collation %s)", got, want, coll)
+	}
+}
+
 func TestCancelOpenForConnectionsLocksInCommandOrder(t *testing.T) {
 	e := newRTEnv(t)
 	e.apply()
