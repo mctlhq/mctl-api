@@ -152,6 +152,10 @@ func newCtlRig(t *testing.T, mod func(*GlovoControlRoutes)) *ctlRig {
 				u = auth.NewGlovoWorkerUser()
 			case "bridge":
 				u = auth.NewBridgeProviderUser("fake")
+			case "agent_with_dispatch":
+				// An agent run token minted with the dispatch permission is
+				// not the control worker: the principal check is separate.
+				u = auth.NewAgentUser("impostor", auth.AgentRun{Agent: "impostor", Permissions: []string{auth.PermissionGlovoControlDispatch}})
 			}
 			if u != nil {
 				r = r.WithContext(auth.WithUser(r.Context(), u))
@@ -274,7 +278,7 @@ func TestControlPrincipalAndGate(t *testing.T) {
 		{http.MethodPost, dispatchPath, dispatchBody}, {http.MethodPost, cancelPath, "{}"},
 		{http.MethodGet, commandPath, ""}, {http.MethodGet, approvalPath, ""},
 	}
-	for _, caller := range []string{"", "user", "admin", "service", "glovo_worker", "bridge"} {
+	for _, caller := range []string{"", "user", "admin", "service", "glovo_worker", "bridge", "agent_with_dispatch"} {
 		for _, c := range routes {
 			got := g.do(caller, c.method, c.path, c.body)
 			if got.code == http.StatusOK || got.code == http.StatusNotFound && caller == "" {
