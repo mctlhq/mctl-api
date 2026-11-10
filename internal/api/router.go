@@ -266,6 +266,10 @@ type Options struct {
 	// WorkItems is the workitem/v1 store (mctl-api#349). Optional — nil makes
 	// every /api/v1/work-items route answer 503.
 	WorkItems *workitems.Store
+	// GlovoApprovals is the Glovo order-approval ledger the owner decision
+	// route uses (mctl-api#989). Nil means no owner can decide: the route
+	// answers the uniform 403 it always gave a non-admin.
+	GlovoApprovals GlovoApprovalDecisions
 	// IssueWorkItemTenant is the tenant whose work item a submitted
 	// issue-investigator run is recorded on when the caller names none. ""
 	// means DefaultIssueWorkItemTenant.
