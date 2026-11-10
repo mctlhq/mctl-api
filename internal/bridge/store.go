@@ -615,6 +615,12 @@ func (s *Store) Enqueue(ctx context.Context, tx pgx.Tx, in EnqueueInput) (comman
 	if v2Write && !s.WireVersionsEnabled() {
 		return "", false, fmt.Errorf("%w: wire versions are not enabled", ErrReadUnavailable)
 	}
+	if v2Write {
+		// The v1alpha2 place_order_fake payload is the approval basket itself.
+		if _, err := checkBasketRules(in.Payload); err != nil {
+			return "", false, err
+		}
+	}
 	var existing string
 	switch err := tx.QueryRow(ctx, `SELECT command_id FROM bridge_commands WHERE tenant=$1 AND execution_id=$2 AND operation_key=$3`,
 		in.Tenant, in.ExecutionID, in.OperationKey).Scan(&existing); {
@@ -736,10 +742,17 @@ func (s *Store) claimTx(ctx context.Context, tx pgx.Tx, c Caller, max int, lease
 		return nil, err
 	}
 
-	// While wire versions are enabled the version gate is a predicate of the
-	// selection, never a filter on its result, so gated rows cannot fill the
-	// batch and starve a claimable v1alpha1 command. While they are not, the
-	// statement mentions no v1alpha2 column and never selects a read kind.
+	// Three cases, all a predicate of the selection (never a filter on its
+	// result, so gated rows cannot fill the batch and starve a claimable
+	// v1alpha1 command):
+	//  1. wire versions enabled: wire_version = ANY($4), the versions the
+	//     caller supports;
+	//  2. disabled, but the read schema level is present (rolling deploy or a
+	//     failed enable): pinned to wire_version = 'v1alpha1', so a stored
+	//     v1alpha2 row is never leased as a plain command and read kinds are
+	//     never selected;
+	//  3. disabled and no read level: the statement mentions no v1alpha2
+	//     column and excludes the read kinds.
 	gate, args := ` AND c.operation_kind NOT IN ('read_history','read_preview','read_basket')`, []any{c.ProviderRef, c.Tenants, max}
 	if s.WireVersionsEnabled() {
 		gate, args = ` AND c.wire_version = ANY($4)`, append(args, c.wireVersions())

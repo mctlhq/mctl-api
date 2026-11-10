@@ -37,7 +37,11 @@ const (
 
 // EnableWireVersions checks the read level and, on success, lets this store
 // enqueue and lease v1alpha2 commands. NewStore never calls it: until it is
-// called the store keeps the plain v1alpha1 statements.
+// called the store enqueues no v1alpha2 command and leases only v1alpha1 rows
+// (pinned to wire_version v1alpha1 when the read level is present, a plain
+// statement without the v1alpha2 column when it is not).
+//
+// Calling this is owned by mctl-api#985 (NewRuntimeStore), not by cmd/api.
 func (s *Store) EnableWireVersions(ctx context.Context) error {
 	if err := CheckReadLevel(ctx, s.pool); err != nil {
 		return err
@@ -85,7 +89,8 @@ type ReadEnqueue struct {
 // EnqueueRead inserts one read-kind command in the caller's transaction. It
 // carries the #1059 read binding set and a server-minted request_id (rdq_),
 // no workflow, order, execution or work item, and writes no signal-outbox row.
-// It refuses with ErrReadUnavailable below the read schema level.
+// It refuses with ErrReadNotAuthorized when the caller lacks glovo:read and
+// with ErrReadUnavailable below the read schema level.
 func (s *Store) EnqueueRead(ctx context.Context, tx pgx.Tx, in ReadEnqueue) (commandID, requestID string, err error) {
 	r := in.Request
 	if !IsReadKind(string(r.Kind)) {
@@ -97,6 +102,9 @@ func (s *Store) EnqueueRead(ctx context.Context, tx pgx.Tx, in ReadEnqueue) (com
 	}
 	if in.TTL < time.Second || in.TTL > MaxReadTTLSeconds*time.Second {
 		return "", "", fmt.Errorf("%w: read ttl out of range", ErrInvalidInput)
+	}
+	if !slices.Contains(r.Scopes, ReadScope) {
+		return "", "", ErrReadNotAuthorized
 	}
 	if !s.WireVersionsEnabled() {
 		return "", "", fmt.Errorf("%w: wire versions are not enabled", ErrReadUnavailable)
@@ -212,6 +220,11 @@ func (s *Store) submitReadTx(ctx context.Context, tx pgx.Tx, c Caller, res *Read
 	}
 	if err := s.leaseLive(row, res.LeaseToken); err != nil {
 		return nil, err
+	}
+	if canon != nil {
+		if err := checkReadPayloadRules(row.Kind, canon); err != nil {
+			return nil, err
+		}
 	}
 	var resultRef string
 	if canon != nil {
