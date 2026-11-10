@@ -47,12 +47,24 @@ type FenceBinding struct {
 // basket fingerprint, unexpired/unrevoked state and equal IntentHash. It
 // returns an opaque fence reference, or an error wrapping ErrWriteFenceRefused.
 // The bridge keeps no second grant or receipt state machine.
+//
+// PreLock runs first, before the command row is locked (mctl-api#989 design
+// section 6): a fence that must take locks on other rows (the glovo order,
+// connection and approval levels L1-L4 of the #957 lock order) takes them
+// here, so the permit transaction never locks them after the command (L5).
+// It reads the command without a lock, applies the same provider and tenant
+// scope as lockOwned (an absent or foreign command is ErrCommandNotFound, with
+// no lock taken) and returns nil without a lock for a command it does not
+// fence. The default fence has nothing to lock.
 type WriteFence interface {
+	PreLock(ctx context.Context, tx pgx.Tx, c Caller, commandID string) error
 	Check(ctx context.Context, tx pgx.Tx, b FenceBinding) (fenceRef string, err error)
 }
 
 // refusingFence is the default: #954 is absent, so no permit is ever issued.
 type refusingFence struct{}
+
+func (refusingFence) PreLock(context.Context, pgx.Tx, Caller, string) error { return nil }
 
 func (refusingFence) Check(context.Context, pgx.Tx, FenceBinding) (string, error) {
 	return "", ErrWriteFenceUnavailable
@@ -84,6 +96,12 @@ func (s *Store) IssueWritePermit(ctx context.Context, c Caller, commandID, lease
 }
 
 func (s *Store) permitTx(ctx context.Context, tx pgx.Tx, c Caller, commandID, leaseToken string) (*Permit, error) {
+	if err := s.currentFence().PreLock(ctx, tx, c, commandID); err != nil {
+		if errors.Is(err, ErrWriteFenceUnavailable) || errors.Is(err, ErrWriteFenceRefused) || errors.Is(err, ErrCommandNotFound) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %v", ErrWriteFenceRefused, err)
+	}
 	row, err := s.lockOwned(ctx, tx, c, commandID)
 	if err != nil {
 		return nil, err

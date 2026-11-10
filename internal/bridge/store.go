@@ -221,6 +221,10 @@ func (c Caller) ClaimEnvelopeVersion() string {
 	return SchemaVersion
 }
 
+// AllowsTenant reports whether tenant is inside the caller's configured upper
+// bound (a fence applies the same scope predicate as lockOwned).
+func (c Caller) AllowsTenant(tenant string) bool { return c.allowsTenant(tenant) }
+
 func (c Caller) allowsTenant(tenant string) bool {
 	if len(c.Tenants) == 0 {
 		return false

@@ -30,6 +30,8 @@ import (
 
 type allowFence struct{}
 
+func (allowFence) PreLock(context.Context, pgx.Tx, Caller, string) error { return nil }
+
 func (allowFence) Check(context.Context, pgx.Tx, FenceBinding) (string, error) {
 	return "fence_test", nil
 }
