@@ -16,8 +16,10 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -34,6 +36,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/bridge"
 	"github.com/mctlhq/mctl-api/internal/glovo"
 	"github.com/mctlhq/mctl-api/internal/glovo/control"
+	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
 // The Glovo control routes (mctl-api#985) are the four internal calls of the
@@ -71,6 +74,19 @@ const glovoControlPerMinute = 120
 // glovoControlBodyMax bounds a control request body; the largest is two refs.
 const glovoControlBodyMax = 1024
 
+// GlovoControlService is what the control routes call: *control.Dispatcher in
+// production, a fake in the HTTP-layer tests.
+type GlovoControlService interface {
+	Ready(ctx context.Context) error
+	TenantFor(ctx context.Context, tenants []string, ref string) string
+	Dispatch(ctx context.Context, tenants []string, orderRef, approvalRef, fingerprint string) (*control.Result, error)
+	Cancel(ctx context.Context, tenants []string, orderRef string) (*control.Result, error)
+	ReadCommand(ctx context.Context, tenants []string, commandID string) (*control.CommandView, error)
+	ReadApproval(ctx context.Context, tenants []string, approvalRef string) (*workitems.GlovoApprovalStatus, error)
+}
+
+var _ GlovoControlService = (*control.Dispatcher)(nil)
+
 // GlovoControlRoutes configures the control routes. A nil value, a closed Open
 // or a false Enabled leaves every route unmounted (404).
 type GlovoControlRoutes struct {
@@ -81,7 +97,7 @@ type GlovoControlRoutes struct {
 	// Tenants is the control worker's server-side tenant upper bound.
 	Tenants []string
 	// Dispatcher serves the routes; nil, or not ready, answers 503 not_ready.
-	Dispatcher *control.Dispatcher
+	Dispatcher GlovoControlService
 	// PerMinute is the per-(principal, tenant) budget; zero is the default.
 	PerMinute int
 
@@ -145,14 +161,20 @@ func (h *Handlers) glovoControl() *GlovoControlRoutes { return h.opts.GlovoContr
 // glovoControlCall is the common prefix of the four handlers: not_ready before
 // the body is read, the ref check, and the per-(principal, tenant) bucket.
 // ok false means the response was written.
-func (h *Handlers) glovoControlCall(w http.ResponseWriter, r *http.Request, route, ref string, refOK func(string) bool) (*control.Dispatcher, []string, bool) {
+func (h *Handlers) glovoControlCall(w http.ResponseWriter, r *http.Request, route, ref string, refOK func(string) bool) (GlovoControlService, []string, bool) {
 	g := h.glovoControl()
 	if !g.mounted() {
 		h.glovoControlFail(w, r, route, ref, glovo.Refuse(glovo.CodeNotReady), nil)
 		return nil, nil, false
 	}
+	if glovo.IsNil(g.Dispatcher) {
+		h.glovoControlFail(w, r, route, ref, glovo.Refuse(glovo.CodeNotReady), nil)
+		return nil, nil, false
+	}
 	if err := g.Dispatcher.Ready(r.Context()); err != nil {
-		h.glovoControlFail(w, r, route, ref, err, nil)
+		// Any failed readiness answer, including one that could not be
+		// observed, is not_ready; the cause stays in the audit reason.
+		h.glovoControlFail(w, r, route, ref, fmt.Errorf("%w: %v", glovo.Refuse(glovo.CodeNotReady), err), nil)
 		return nil, nil, false
 	}
 	if !refOK(ref) {
