@@ -209,6 +209,22 @@ func VerifyGrants(ctx context.Context, q dbq.Querier, table string) error {
 	return checkGrantsOn(ctx, q, *oid, row)
 }
 
+// VerifyRelationGrants is VerifyGrants for a relation outside schema glovo,
+// named schema-qualified or search-path-relative (for example
+// "bridge_commands"): the current user's table-level and column-level rights
+// must equal row in both directions. A missing relation, a mismatch or a check
+// that could not run is a not_ready answer.
+func VerifyRelationGrants(ctx context.Context, q dbq.Querier, relation string, row GrantRow) error {
+	var oid *uint32
+	if err := q.QueryRow(ctx, `SELECT to_regclass($1)::oid`, relation).Scan(&oid); err != nil {
+		return checkFailed(err)
+	}
+	if oid == nil {
+		return notReady(NotReadyTableMissing)
+	}
+	return checkGrantsOn(ctx, q, *oid, row)
+}
+
 func checkGrantsOn(ctx context.Context, q dbq.Querier, oid uint32, row GrantRow) error {
 	expectTable := map[string]bool{}
 	for _, p := range row.Privileges {
