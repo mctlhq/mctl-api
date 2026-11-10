@@ -282,7 +282,7 @@ func TestInterleavingsKeepTheInvariants(t *testing.T) {
 	for round := 0; round < rounds; round++ {
 		round := round
 		t.Run(fmt.Sprintf("round %d", round), func(t *testing.T) {
-			rng := rand.New(rand.NewSource(int64(985000 + round)))
+			rng := rand.New(rand.NewSource(int64(985000 + round))) //nolint:gosec // a seeded generator: the interleavings must replay
 			e := newRealEnv(t)
 			f, rc := e.realFixture()
 			ctx := context.Background()
