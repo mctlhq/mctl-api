@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
 	"github.com/mctlhq/mctl-api/internal/api"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/bridge"
 	"github.com/mctlhq/mctl-api/internal/glovo"
 )
 
@@ -42,6 +44,18 @@ func configureGlovoControl(lookup func(string) (string, bool), worker *auth.Glov
 		Tenants: append([]string(nil), worker.Tenants...),
 	}, nil
 }
+
+// fenceHookReady is write-fence condition 4: the store is ready and its
+// revocation hook is bridge.CancelOpenForConnections itself. The synthetic
+// no-op hook makes Ready pass, so it cannot satisfy this.
+func fenceHookReady(ctx context.Context, s *glovo.Store) bool {
+	return s != nil && s.Ready(ctx) == nil && s.RevocationHookIs(bridge.CancelOpenForConnections)
+}
+
+// fenceMembershipObserved is write-fence condition 5: a positive signal from
+// the membership detector. Until one exists it is false and the fence stays
+// refusing (OPEN-985-2).
+func fenceMembershipObserved(s *glovo.Store) bool { return s != nil && s.MembershipRevocationWired() }
 
 // glovoFencePreconditions are the six items of the #985 design 7.3. The write
 // fence is installed only when every one is true; an item that could not be

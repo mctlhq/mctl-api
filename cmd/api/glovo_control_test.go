@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"testing"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/bridge"
 	"github.com/mctlhq/mctl-api/internal/glovo"
 )
 
@@ -64,5 +66,63 @@ func TestGlovoFencePreconditionsNeedAllSix(t *testing.T) {
 	}
 	if (glovoFencePreconditions{}).All() {
 		t.Error("the zero value passed")
+	}
+}
+
+func storeWith(opts []glovo.Option) *glovo.Store {
+	s := &glovo.Store{}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
+}
+
+// The synthetic no-op hook makes "a hook is installed" true, so the fence
+// condition and the startup assertion compare the function, not non-nil.
+func TestControlNeedsTheRealRevocationHook(t *testing.T) {
+	synthetic := storeWith(glovoStoreOptions(false))
+	real := storeWith(glovoStoreOptions(true))
+	if !real.RevocationHookIs(bridge.CancelOpenForConnections) {
+		t.Fatal("control enabled must install bridge.CancelOpenForConnections")
+	}
+	if synthetic.RevocationHookIs(bridge.CancelOpenForConnections) {
+		t.Fatal("the synthetic hook was taken for the real one")
+	}
+	if err := assertControlHook(true, synthetic); err == nil {
+		t.Error("the startup assertion accepted the synthetic hook with control enabled")
+	}
+	if err := assertControlHook(true, &glovo.Store{}); err == nil {
+		t.Error("the startup assertion accepted no hook")
+	}
+	if err := assertControlHook(true, real); err != nil {
+		t.Errorf("real hook refused: %v", err)
+	}
+	if err := assertControlHook(false, synthetic); err != nil {
+		t.Errorf("control off must not assert: %v", err)
+	}
+	if fenceHookReady(context.Background(), nil) {
+		t.Error("a nil store satisfied the hook condition")
+	}
+}
+
+// Condition 5 is an observation, never a label.
+func TestFenceMembershipConditionIsAnObservation(t *testing.T) {
+	if fenceMembershipObserved(nil) || fenceMembershipObserved(&glovo.Store{}) {
+		t.Error("no probe must be false")
+	}
+	labelled := storeWith([]glovo.Option{glovo.WithMembershipRevoker("gitops-membership-detector")})
+	if fenceMembershipObserved(labelled) {
+		t.Error("a name alone satisfied condition 5")
+	}
+	for name, probe := range map[string]func() bool{
+		"false":    func() bool { return false },
+		"panicked": func() bool { panic("boom") },
+	} {
+		if fenceMembershipObserved(storeWith([]glovo.Option{glovo.WithMembershipRevocationProbe(probe)})) {
+			t.Errorf("a %s probe satisfied condition 5", name)
+		}
+	}
+	if !fenceMembershipObserved(storeWith([]glovo.Option{glovo.WithMembershipRevocationProbe(func() bool { return true })})) {
+		t.Error("a positive probe was refused")
 	}
 }

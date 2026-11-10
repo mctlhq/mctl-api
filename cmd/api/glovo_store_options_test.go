@@ -88,7 +88,7 @@ func TestGlovoStoreOptionsInstallAndRequireEndPurger(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	store, err := glovo.NewStore(ctx, pool, rt, mig, glovoStoreOptions()...)
+	store, err := glovo.NewStore(ctx, pool, rt, mig, glovoStoreOptions(false)...)
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}

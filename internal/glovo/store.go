@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -187,9 +188,18 @@ func WithEndPurgerRequired(required bool) Option {
 	return func(s *Store) { s.purgerRequired = required }
 }
 
-// WithMembershipRevoker registers the slice that detects membership removal
-// and calls RevokeForMembership.
+// WithMembershipRevoker names the slice that detects membership removal and
+// calls RevokeForMembership. The name is a label for logs only: it never makes
+// MembershipRevocationWired true, because a string is not an observation.
 func WithMembershipRevoker(name string) Option { return func(s *Store) { s.membershipRevoker = name } }
+
+// WithMembershipRevocationProbe installs the positive signal that a membership
+// removal is turned into a connection revocation: a live detector heartbeat or
+// an end-to-end proof. probe must return true only when it observed that
+// signal just now; a probe that cannot observe returns false.
+func WithMembershipRevocationProbe(probe func() bool) Option {
+	return func(s *Store) { s.membershipProbe = probe }
+}
 
 // Store is the tenant/principal connection store. Every connection read and
 // write takes an Owner.
@@ -203,6 +213,7 @@ type Store struct {
 	purgerRequired             bool
 	lockTimeout                time.Duration
 	membershipRevoker          string
+	membershipProbe            func() bool
 
 	// test hooks
 	beforeL2       func()
@@ -263,8 +274,40 @@ func (s *Store) Pool() *pgxpool.Pool { return s.pool }
 // wiring slice.
 func (s *Store) Close() {}
 
-// MembershipRevocationWired reports whether a membership revoker was named.
-func (s *Store) MembershipRevocationWired() bool { return s.membershipRevoker != "" }
+// MembershipRevocationWired reports whether a membership detector has been
+// observed to be alive. It is false, fail closed, until a probe installed with
+// WithMembershipRevocationProbe answers true: until then the state is
+// "refusing", and a named revoker alone changes nothing. A nil store or a
+// panicking probe is false.
+func (s *Store) MembershipRevocationWired() (wired bool) {
+	if s == nil || s.membershipProbe == nil {
+		return false
+	}
+	defer func() {
+		if recover() != nil {
+			wired = false
+		}
+	}()
+	return s.membershipProbe()
+}
+
+// MembershipRevokerName is the label given to WithMembershipRevoker.
+func (s *Store) MembershipRevokerName() string {
+	if s == nil {
+		return ""
+	}
+	return s.membershipRevoker
+}
+
+// RevocationHookIs reports whether the installed hook is exactly fn, by code
+// identity rather than non-nil: a no-op hook satisfies "a hook is installed"
+// but is not the hook that cancels open commands.
+func (s *Store) RevocationHookIs(fn RevocationHook) bool {
+	if s == nil || s.hook == nil || fn == nil {
+		return false
+	}
+	return reflect.ValueOf(s.hook).Pointer() == reflect.ValueOf(fn).Pointer()
+}
 
 // EndPurgerInstalled reports whether an EndPurger is installed.
 func (s *Store) EndPurgerInstalled() bool { return s.purger != nil }

@@ -27,6 +27,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
 	"github.com/mctlhq/mctl-api/internal/auth/teamgrant"
+	"github.com/mctlhq/mctl-api/internal/bridge"
 	"github.com/mctlhq/mctl-api/internal/glovo"
 	"github.com/mctlhq/mctl-api/internal/glovo/connect"
 	"github.com/mctlhq/mctl-api/internal/glovo/scope"
@@ -98,8 +99,12 @@ func configureGlovoTeamGrants(ctx context.Context, d glovoTeamGrantDeps, lookup 
 	if err != nil {
 		return nil, nil, fmt.Errorf("glovo store: connect: %w", err)
 	}
-	store, err := glovo.NewStore(ctx, pool, runtimeRole, migrationRole, glovoStoreOptions()...)
+	store, err := glovo.NewStore(ctx, pool, runtimeRole, migrationRole, glovoStoreOptions(glovoControlEnabled(lookup))...)
 	if err != nil {
+		pgshared.Release(pool)
+		return nil, nil, err
+	}
+	if err := assertControlHook(glovoControlEnabled(lookup), store); err != nil {
 		pgshared.Release(pool)
 		return nil, nil, err
 	}
@@ -131,9 +136,17 @@ func configureGlovoTeamGrants(ctx context.Context, d glovoTeamGrantDeps, lookup 
 // end purger (mctl-api#961) removes a connection's unconsumed handoff
 // references when it ends, and is required so the readiness probe reports
 // not_ready instead of serving without it.
-func glovoStoreOptions() []glovo.Option {
+//
+// With the control routes enabled the hook is bridge.CancelOpenForConnections,
+// which cancels the open bridge commands of an ended connection; otherwise it
+// is the synthetic no-op, which must never satisfy the write-fence conditions.
+func glovoStoreOptions(controlEnabled bool) []glovo.Option {
+	hook := glovo.RevocationHook(syntheticRevocationHook)
+	if controlEnabled {
+		hook = bridge.CancelOpenForConnections
+	}
 	return []glovo.Option{
-		glovo.WithExplicitURL(true), glovo.WithRevocationHook(syntheticRevocationHook),
+		glovo.WithExplicitURL(true), glovo.WithRevocationHook(hook),
 		glovo.WithEndPurger(glovo.PurgeHandoffRefs), glovo.WithEndPurgerRequired(true),
 		glovo.WithLockTimeout(5 * time.Second),
 	}
@@ -143,6 +156,23 @@ func glovoStoreOptions() []glovo.Option {
 // holds no secret, cookie or consumer credential, so there is nothing to
 // release when a connection ends. A real provider replaces it.
 func syntheticRevocationHook(context.Context, pgx.Tx, []string, string) error { return nil }
+
+// assertControlHook is the startup assertion of mctl-api#985: with the control
+// routes on, the installed hook must be the one that cancels open bridge
+// commands, not merely a non-nil one.
+func assertControlHook(controlEnabled bool, s *glovo.Store) error {
+	if controlEnabled && !s.RevocationHookIs(bridge.CancelOpenForConnections) {
+		return errors.New("MCTL_GLOVO_CONTROL_ENABLED=true needs bridge.CancelOpenForConnections as the revocation hook")
+	}
+	return nil
+}
+
+// glovoControlEnabled reads MCTL_GLOVO_CONTROL_ENABLED leniently: only "true"
+// is on, and a malformed value is rejected by configureGlovoControl.
+func glovoControlEnabled(lookup func(string) (string, bool)) bool {
+	v, _ := lookup("MCTL_GLOVO_CONTROL_ENABLED")
+	return strings.EqualFold(strings.TrimSpace(v), "true")
+}
 
 // glovoAllowlist avoids a typed-nil interface: with the Glovo store absent
 // the allowlist routes answer 503.
