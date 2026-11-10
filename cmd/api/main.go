@@ -1141,6 +1141,13 @@ func main() {
 			}
 		}
 	}
+	// Glovo control routes (mctl-api#985): dark, see configureGlovoControl.
+	glovoControlRoutes, gcErr := configureGlovoControl(os.LookupEnv, auth.LoadGlovoControlWorker())
+	if gcErr != nil {
+		slog.Error("invalid configuration", "error", gcErr)
+		stopSignals()
+		os.Exit(1)
+	}
 	var bridgeService mctlapi.BridgeService
 	if bridgeStore != nil {
 		bridgeService = bridgeStore
@@ -1442,6 +1449,7 @@ func main() {
 		PrincipalMembership:            gitReader,
 		GlovoAllowlist:                 glovoAllowlist(glovoStore),
 		Glovo:                          glovoRoutes,
+		GlovoControl:                   glovoControlRoutes,
 		AdminPrincipals:                cfg.adminPrincipals(),
 		RequireRegisteredPolicy:        cfg.requireRegisteredPolicy(),
 		Clock:                          approvalClock,
