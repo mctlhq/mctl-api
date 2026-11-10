@@ -10,6 +10,17 @@ answers 404 and the dispatcher does not start. No provider credential is issued
 by this change, and the default write fence refuses every permit. The provider
 is fake-only: no real Glovo API, order, checkout or payment is in scope.
 
+## Storage
+
+The bridge store opens `COMMERCE_DB_URL` and nothing else. There is **no**
+`AUDIT_DB_URL` fallback (mctl-api#987): the order transaction and the bridge
+`Enqueue` must share one `pgx.Tx`, and an implicit fallback could put them on
+different databases. With `MCTL_BRIDGE_ENABLED=true` and `COMMERCE_DB_URL`
+unset, no store is opened, the bridge stays `not_ready` and its routes answer
+503. Any deployment that enables the bridge must set `COMMERCE_DB_URL`
+explicitly in the same change. Other stores keep their own fallbacks; this
+applies to the bridge only.
+
 ## Wire contract
 
 Command and result documents are the **unchanged** v1alpha1 schemas from
