@@ -137,6 +137,32 @@ func TestSweeper(t *testing.T) {
 	}
 }
 
+// A backlog of live reserved approvals larger than one tick must not starve a
+// due one that sorts after them (the filter is in the query, not after LIMIT).
+func TestSweeperIsNotStarvedByLiveBacklog(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	// The sweeper orders by approval id, so end the command of the last one.
+	var last fixture
+	for i := 0; i < sweepLimit+5; i++ {
+		if f := e.reserved(""); f.aar > last.aar {
+			last = f
+		}
+	}
+	ended := last
+	if _, err := e.mp.Exec(ctx, `UPDATE bridge_commands SET status='cancelled' WHERE command_id=$1`, ended.cmd); err != nil {
+		t.Fatal(err)
+	}
+	sw := &Sweeper{Begin: func(ctx context.Context) (pgx.Tx, error) { return e.rtp.Begin(ctx) }, Approvals: e.store}
+	n, err := sw.Sweep(ctx)
+	if err != nil || n != 1 {
+		t.Fatalf("swept %d %v, want the one ended approval behind %d live ones", n, err, sweepLimit+5)
+	}
+	if got := e.state(ended.aar); got != workitems.ApprovalUnknown {
+		t.Fatalf("ended approval state %s, want unknown", got)
+	}
+}
+
 func isNotReady(err error) bool {
 	var ge *glovo.Error
 	return errors.As(err, &ge) && ge.Code == glovo.CodeNotReady

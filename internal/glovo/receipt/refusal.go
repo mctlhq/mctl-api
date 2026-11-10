@@ -18,11 +18,16 @@ func (r *Refusal) Error() string { return "write_fence_refused: " + string(r.Cod
 
 func (r *Refusal) Unwrap() error { return bridge.ErrWriteFenceRefused }
 
-// Is matches a *glovo.Error of the same code, so errors.Is(err,
+// Is matches a *glovo.Error or another *Refusal of the same code, so errors.Is(err,
 // glovo.Refuse(code)) works on a fence refusal.
 func (r *Refusal) Is(target error) bool {
-	t, ok := target.(*glovo.Error)
-	return ok && t != nil && t.Code == r.Code
+	switch t := target.(type) {
+	case *glovo.Error:
+		return t != nil && t.Code == r.Code
+	case *Refusal:
+		return t != nil && t.Code == r.Code
+	}
+	return false
 }
 
 // CodeOf is the section 10 code of a fence refusal.

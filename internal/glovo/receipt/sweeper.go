@@ -2,7 +2,6 @@ package receipt
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -21,9 +20,10 @@ type Unknowner interface {
 }
 
 // Sweeper moves a reserved approval whose bound command ended without a
-// permit to unknown. It takes L4 only (the aar_ row, SKIP LOCKED), then reads
+// permit to unknown. It takes L4 only (the aar_ row, SKIP LOCKED) and reads
 // the command without a lock: a terminal command never changes again, so the
-// plain read is safe. It starts nothing by itself: #985 task 9 owns the
+// plain read is safe. The terminal and no-permit filters are in the query, so
+// a backlog of live reserved rows cannot fill the limit ahead of a due one. It starts nothing by itself: #985 task 9 owns the
 // goroutine (OPEN-989-8 in the pull request).
 type Sweeper struct {
 	Begin     func(ctx context.Context) (pgx.Tx, error) // a transaction that reads the bridge tables and writes the ledger
@@ -44,7 +44,10 @@ func (s *Sweeper) Sweep(ctx context.Context) (int, error) {
 	type pair struct{ id, command string }
 	rows, err := tx.Query(ctx, `SELECT a.id, b.command_id
 		FROM public.action_approval_requests a JOIN glovo.approval_bindings b ON b.approval_id = a.id
+		JOIN bridge_commands c ON c.command_id = b.command_id
 		WHERE a.state = 'reserved' AND `+workitems.GlovoKindPredicate+` AND b.command_id <> ''
+		  AND c.status IN ('completed','expired','cancelled')
+		  AND NOT EXISTS (SELECT 1 FROM bridge_write_permits w WHERE w.command_id = c.command_id)
 		ORDER BY a.id FOR UPDATE OF a SKIP LOCKED LIMIT `+fmt.Sprint(sweepLimit))
 	if err != nil {
 		return 0, fmt.Errorf("receipt: sweeper read: %w", err)
@@ -64,19 +67,6 @@ func (s *Sweeper) Sweep(ctx context.Context) (int, error) {
 	}
 	moved := 0
 	for _, p := range due {
-		var status string
-		var permit bool
-		err := tx.QueryRow(ctx, `SELECT c.status, EXISTS (SELECT 1 FROM bridge_write_permits w WHERE w.command_id = c.command_id)
-			FROM bridge_commands c WHERE c.command_id = $1`, p.command).Scan(&status, &permit)
-		if errors.Is(err, pgx.ErrNoRows) {
-			continue // an absent command is a violation Audit reports, not something to paper over
-		}
-		if err != nil {
-			return 0, fmt.Errorf("receipt: sweeper read command: %w", err)
-		}
-		if !terminalStatus(status) || permit {
-			continue
-		}
 		if err := s.Approvals.MarkGlovoApprovalUnknownTx(ctx, tx, p.id, p.command); err != nil {
 			return 0, fmt.Errorf("receipt: sweeper mark unknown: %w", err)
 		}

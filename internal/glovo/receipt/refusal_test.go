@@ -54,3 +54,13 @@ func TestRefusalIsSecretFree(t *testing.T) {
 		t.Fatalf("message = %q", msg)
 	}
 }
+
+func TestRefusalIsMatchesAnotherRefusalOfTheSameCode(t *testing.T) {
+	a := refuse(glovo.CodeApprovalInvalid)
+	if !errors.Is(a, refuse(glovo.CodeApprovalInvalid)) {
+		t.Fatal("same-code refusals must match")
+	}
+	if errors.Is(a, refuse(glovo.CodeUnavailable)) {
+		t.Fatal("different-code refusals must not match")
+	}
+}
