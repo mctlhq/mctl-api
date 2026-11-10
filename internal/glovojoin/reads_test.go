@@ -17,12 +17,14 @@ package glovojoin
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/mctlhq/mctl-api/internal/bridge"
 	"github.com/mctlhq/mctl-api/internal/glovo"
+	"github.com/mctlhq/mctl-api/internal/glovo/orders"
 )
 
 // recBridge is a ReadBridge double that records every request and serves a
@@ -225,4 +227,40 @@ func TestEmptyPreviewCannotBePrepared(t *testing.T) {
 	}
 	_, rf = s.prepare.Prepare(ctx, PrepareRequest{Tenant: stackTenant, PrincipalID: stackOwner, PreviewID: pv.PreviewID, Key: "empty-key"})
 	wantCode(t, rf, glovo.CodeInvalidRequest, "basket_empty")
+}
+
+// A7: the refs sent to the provider side carry no tenant name, principal id or
+// order id, and the same principal in two tenants gets two different prr_.
+func TestJoinRefsAreOpaqueAndPerTenant(t *testing.T) {
+	s := newStack(t)
+	ctx := context.Background()
+	mint := func(tenant string) string {
+		tx, err := s.rp.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		ref, err := s.orders.MintJoinRefTx(ctx, tx, orders.JoinPrincipal, tenant, stackOwner, stackOwner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		return ref
+	}
+	a, b := mint("acme-tenant"), mint("other-tenant")
+	if a == b || !strings.HasPrefix(a, "prr_") || !strings.HasPrefix(b, "prr_") {
+		t.Fatalf("refs %q %q", a, b)
+	}
+	for _, ref := range []string{a, b} {
+		for _, leak := range []string{"acme", "other", "tenant", "prn_", "pord_", stackOwner} {
+			if strings.Contains(ref, leak) {
+				t.Fatalf("ref %q leaks %q", ref, leak)
+			}
+		}
+	}
+	if mint("acme-tenant") != a {
+		t.Fatal("a second mint of the same (tenant, principal) gave another ref")
+	}
 }

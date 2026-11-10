@@ -57,6 +57,14 @@ components:
       properties:
         error: {type: string, description: One member of the closed refusal enum (not_ready, unavailable, not_authorized, invalid_request, not_found, no_install, ambiguous_tenant, no_tenant, scope_unsupported, not_in_pilot, stale_install, stale_version, no_connection, connection_exists, connection_revoked, connection_expired, invalid_transition, idempotency_key_reused, rate_limited, tenant_busy)}
         error_description: {type: string}
+    GlovoJoinError:
+      type: object
+      description: The join facade error body, mapped through the contract code table. Wire codes are not_authorized, no_tenant, ambiguous_tenant, not_in_pilot, scope_unsupported, no_install, stale_install, not_found, no_connection, connection_revoked, connection_expired, fingerprint_changed, idempotency_key_reused, invalid_arguments, rate_limited, not_ready and dependency_unavailable.
+      required: [error, error_description]
+      additionalProperties: false
+      properties:
+        error: {type: string}
+        error_description: {type: string}
     GlovoConnection:
       type: object
       required: [schema, connection_id, state, install_revision, created_at, updated_at]
@@ -7293,7 +7301,152 @@ paths:
         '404': {description: 'not_found', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoError'}}}}
         '409': {description: 'invalid_transition or stale_version', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoError'}}}}
 
+  /api/v1/assistants/glovo/v1alpha1/resolve:
+    post:
+      summary: Resolve the subject's scope reference
+      tags: [GlovoJoin]
+      parameters:
+        - {name: X-Mctl-Subject-Token, in: header, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: false}
+      responses:
+        '200': {description: scope_ref, tenant and expires_at, content: {application/json: {schema: {type: object}}}}
+        '401': {description: 'not_authorized (not the facade identity, or the subject token is invalid)', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '429': {description: 'rate_limited, with Retry-After', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '503': {description: 'dependency_unavailable or not_ready', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+  /api/v1/assistants/glovo/v1alpha1/connection:
+    get:
+      summary: The subject's connection state
+      tags: [GlovoJoin]
+      parameters:
+        - {name: X-Mctl-Subject-Token, in: header, required: true, schema: {type: string}}
+        - {name: X-Mctl-Scope-Ref, in: header, required: true, schema: {type: string, pattern: '^gsc_[A-Za-z0-9_-]{32}$'}}
+      responses:
+        '200': {description: connection_state (provider_account_label is never returned), content: {application/json: {schema: {type: object}}}}
+        '403': {description: 'not_in_pilot, no_install, stale_install, scope_ref_*', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '404': {description: 'no_connection', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '401': {description: 'not_authorized (not the facade identity, or the subject token is invalid)', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '429': {description: 'rate_limited, with Retry-After', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '503': {description: 'dependency_unavailable or not_ready', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+  /api/v1/assistants/glovo/v1alpha1/connections:
+    post:
+      summary: Start a connection (pending_handoff)
+      tags: [GlovoJoin]
+      parameters:
+        - {name: X-Mctl-Subject-Token, in: header, required: true, schema: {type: string}}
+        - {name: X-Mctl-Scope-Ref, in: header, required: true, schema: {type: string, pattern: '^gsc_[A-Za-z0-9_-]{32}$'}}
+        - {name: Idempotency-Key, in: header, required: true, schema: {type: string, pattern: '^[\x21-\x7e]{1,128}$'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [idempotency_key], additionalProperties: false, properties: {idempotency_key: {type: string, maxLength: 128}}}
+      responses:
+        '200': {description: connection_id, state, handoff_url and expires_at; a replay has the same connection_id and a fresh handoff_url, content: {application/json: {schema: {type: object}}}}
+        '403': {description: 'not_authorized, no_install, stale_install', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '409': {description: 'connection_revoked, connection_expired, idempotency_key_reused', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '401': {description: 'not_authorized (not the facade identity, or the subject token is invalid)', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '429': {description: 'rate_limited, with Retry-After', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '503': {description: 'dependency_unavailable or not_ready', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+  /api/v1/assistants/glovo/v1alpha1/orders:list:
+    post:
+      summary: Order history
+      tags: [GlovoJoin]
+      parameters:
+        - {name: X-Mctl-Subject-Token, in: header, required: true, schema: {type: string}}
+        - {name: X-Mctl-Scope-Ref, in: header, required: true, schema: {type: string, pattern: '^gsc_[A-Za-z0-9_-]{32}$'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: false, properties: {limit: {type: integer, minimum: 1, maximum: 20}, cursor: {type: string}}}
+      responses:
+        '200': {description: orders and next_cursor, content: {application/json: {schema: {type: object}}}}
+        '404': {description: 'not_found (a cursor nobody issued)', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '409': {description: 'connection_expired, connection_revoked', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '401': {description: 'not_authorized (not the facade identity, or the subject token is invalid)', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '429': {description: 'rate_limited, with Retry-After', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '503': {description: 'dependency_unavailable or not_ready', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+  /api/v1/assistants/glovo/v1alpha1/previews:
+    post:
+      summary: Preview a reorder
+      tags: [GlovoJoin]
+      parameters:
+        - {name: X-Mctl-Subject-Token, in: header, required: true, schema: {type: string}}
+        - {name: X-Mctl-Scope-Ref, in: header, required: true, schema: {type: string, pattern: '^gsc_[A-Za-z0-9_-]{32}$'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [order_ref], additionalProperties: false, properties: {order_ref: {type: string}}}
+      responses:
+        '200': {description: preview_id, items, unavailable_items, fingerprint and expires_at, content: {application/json: {schema: {type: object}}}}
+        '404': {description: 'not_found (an order_ref nobody issued)', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '401': {description: 'not_authorized (not the facade identity, or the subject token is invalid)', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '429': {description: 'rate_limited, with Retry-After', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '503': {description: 'dependency_unavailable or not_ready', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+  /api/v1/assistants/glovo/v1alpha1/basket:
+    get:
+      summary: The provider basket
+      tags: [GlovoJoin]
+      parameters:
+        - {name: X-Mctl-Subject-Token, in: header, required: true, schema: {type: string}}
+        - {name: X-Mctl-Scope-Ref, in: header, required: true, schema: {type: string, pattern: '^gsc_[A-Za-z0-9_-]{32}$'}}
+      responses:
+        '200': {description: store_name, items, totals_label and fingerprint, content: {application/json: {schema: {type: object}}}}
+        '401': {description: 'not_authorized (not the facade identity, or the subject token is invalid)', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '429': {description: 'rate_limited, with Retry-After', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '503': {description: 'dependency_unavailable or not_ready', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+  /api/v1/assistants/glovo/v1alpha1/orders:prepare:
+    post:
+      summary: Prepare an order for consent
+      tags: [GlovoJoin]
+      parameters:
+        - {name: X-Mctl-Subject-Token, in: header, required: true, schema: {type: string}}
+        - {name: X-Mctl-Scope-Ref, in: header, required: true, schema: {type: string, pattern: '^gsc_[A-Za-z0-9_-]{32}$'}}
+        - {name: Idempotency-Key, in: header, required: true, schema: {type: string, pattern: '^[\x21-\x7e]{1,128}$'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [preview_id, idempotency_key], additionalProperties: false, properties: {preview_id: {type: string}, idempotency_key: {type: string, maxLength: 128}}}
+      responses:
+        '200': {description: order_id, fingerprint, consent_request_id and expires_at; a replay is byte-identical with Idempotent-Replayed true, content: {application/json: {schema: {type: object}}}}
+        '400': {description: 'invalid_arguments (including basket_empty)', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '404': {description: 'not_found', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '409': {description: 'fingerprint_changed, idempotency_key_reused', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '401': {description: 'not_authorized (not the facade identity, or the subject token is invalid)', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '429': {description: 'rate_limited, with Retry-After', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '503': {description: 'dependency_unavailable or not_ready', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+  /api/v1/assistants/glovo/v1alpha1/orders/{order_id}:
+    get:
+      summary: Order status
+      tags: [GlovoJoin]
+      parameters:
+        - {name: order_id, in: path, required: true, schema: {type: string}}
+        - {name: X-Mctl-Subject-Token, in: header, required: true, schema: {type: string}}
+        - {name: X-Mctl-Scope-Ref, in: header, required: true, schema: {type: string, pattern: '^gsc_[A-Za-z0-9_-]{32}$'}}
+      responses:
+        '200': {description: state and outcome (observed_placed only for a completed, succeeded order), content: {application/json: {schema: {type: object}}}}
+        '404': {description: 'not_found', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '401': {description: 'not_authorized (not the facade identity, or the subject token is invalid)', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '429': {description: 'rate_limited, with Retry-After', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+        '503': {description: 'dependency_unavailable or not_ready', content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+  /api/v1/assistants/glovo/v1alpha1/compatibility:
+    get:
+      summary: Contract and readiness handshake of the facade
+      description: Facade identity only, no subject. deploy_ready is false until every dependency is proven ready.
+      tags: [GlovoJoin]
+      responses:
+        '200': {description: contract_version, contract_digest, api_version, dependencies and deploy_ready, content: {application/json: {schema: {type: object}}}}
+        '401': {description: not_authorized, content: {application/json: {schema: {$ref: '#/components/schemas/GlovoJoinError'}}}}
+
 tags:
+  - name: GlovoJoin
+    description: The Glovo join facade routes (contract glovo-facade-mctl-api/v1alpha1; default OFF, GLOVO_JOIN_ENABLED)
   - name: Glovo
     description: Glovo pilot administration and the synthetic connection routes (default OFF)
   - name: Health

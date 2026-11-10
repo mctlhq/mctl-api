@@ -17,8 +17,13 @@ package glovojoin
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -87,6 +92,36 @@ func newHTTPFx(t *testing.T) *httpFx {
 	return f
 }
 
+var (
+	goldenID   = regexp.MustCompile(`(gsc|pvw|ordr|tnr|prr|irv|pho|con|gin|apr|ccr|cns|aar|gpv)_[A-Za-z0-9_-]+`)
+	goldenTime = regexp.MustCompile(`\d{4}-\d\d-\d\dT[0-9:.]+Z`)
+	goldenSHA  = regexp.MustCompile(`sha256:[0-9a-f]{64}`)
+	goldenKey  = regexp.MustCompile(`"(connection_id|handoff_url)":"[^"]+"`)
+)
+
+// golden compares one wire answer, with its volatile values replaced by
+// placeholders, to testdata/v1alpha1/<route>/<name>.json.
+func golden(t *testing.T, route, name string, status int, body string) {
+	t.Helper()
+	norm := goldenSHA.ReplaceAllString(goldenTime.ReplaceAllString(goldenID.ReplaceAllString(body, "<id>"), "<time>"), "<digest>")
+	norm = goldenKey.ReplaceAllString(norm, `"$1":"<value>"`)
+	got := fmt.Sprintf("%d\n%s\n", status, norm)
+	path := filepath.Join("testdata", "v1alpha1", route, name+".json")
+	if os.Getenv("UPDATE_GOLDEN") != "" {
+		_ = os.MkdirAll(filepath.Dir(path), 0o755)
+		if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("%s: %v (UPDATE_GOLDEN=1 writes it)", path, err)
+	}
+	if string(want) != got {
+		t.Errorf("%s changed:\nwant %q\n got %q", path, want, got)
+	}
+}
+
 const jb = "/api/v1/assistants/glovo/v1alpha1"
 
 func TestHTTPHappyPathResolveToPrepareAndReplay(t *testing.T) {
@@ -103,15 +138,18 @@ func TestHTTPHappyPathResolveToPrepareAndReplay(t *testing.T) {
 		t.Fatalf("resolve body %s", body)
 	}
 	f.ref = rv.ScopeRef
+	golden(t, "resolve", "ok", resp.StatusCode, body)
 
 	resp, body = f.do("GET", jb+"/connection", f.auth(nil), "")
 	if resp.StatusCode != 200 || !strings.Contains(body, `"connection_state":"active"`) || strings.Contains(body, "provider_account_label") {
 		t.Fatalf("connection %d %s", resp.StatusCode, body)
 	}
+	golden(t, "connection", "ok", resp.StatusCode, body)
 	resp, body = f.do("POST", jb+"/orders:list", f.auth(nil), "{}")
 	if resp.StatusCode != 200 {
 		t.Fatalf("orders %d %s", resp.StatusCode, body)
 	}
+	golden(t, "orders", "ok", resp.StatusCode, body)
 	var h struct {
 		Orders []struct {
 			OrderRef string `json:"order_ref"`
@@ -122,6 +160,7 @@ func TestHTTPHappyPathResolveToPrepareAndReplay(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("preview %d %s", resp.StatusCode, body)
 	}
+	golden(t, "preview", "ok", resp.StatusCode, body)
 	var pv struct {
 		PreviewID string `json:"preview_id"`
 	}
@@ -131,6 +170,7 @@ func TestHTTPHappyPathResolveToPrepareAndReplay(t *testing.T) {
 	if resp1.StatusCode != 200 || resp1.Header.Get("Idempotent-Replayed") != "" {
 		t.Fatalf("prepare %d %s", resp1.StatusCode, first)
 	}
+	golden(t, "prepare", "ok", resp1.StatusCode, first)
 	resp2, second := f.do("POST", jb+"/orders:prepare", f.auth(map[string]string{"Idempotency-Key": "k1"}), pbody)
 	if resp2.StatusCode != 200 || resp2.Header.Get("Idempotent-Replayed") != "true" || second != first {
 		t.Fatalf("replay %d %q vs %q", resp2.StatusCode, second, first)
@@ -173,6 +213,7 @@ func TestHTTPRefusalsAndErrorBodies(t *testing.T) {
 			t.Errorf("%s: status %d (%s), want %d", c.name, resp.StatusCode, b, c.status)
 			continue
 		}
+		golden(t, "refusals", strings.ReplaceAll(c.name, " ", "_"), resp.StatusCode, b)
 		if c.wire != "" {
 			var e map[string]string
 			if err := json.Unmarshal([]byte(b), &e); err != nil || e["error"] != c.wire && !(c.name == "status unwired") || e["error_description"] == "" {
@@ -208,5 +249,83 @@ func TestHTTPCompatibilityIsNeverDeployReady(t *testing.T) {
 	resp, body := f.do("GET", jb+"/compatibility", nil, "")
 	if resp.StatusCode != 200 || !strings.Contains(body, `"deploy_ready":false`) {
 		t.Fatalf("compat %d %s", resp.StatusCode, body)
+	}
+	golden(t, "compatibility", "not_ready", resp.StatusCode, body)
+}
+
+// A6: every row of the contract's code table and condition table reaches the
+// wire with the status and body the contract says, through the same writer the
+// routes use, and no refusal carries more than a fixed description.
+func TestHTTPErrorWriterFollowsTheContractTables(t *testing.T) {
+	rt := &Routes{}
+	rt.init()
+	var notes []Refused
+	rt.OnRefused = func(e Refused) { notes = append(notes, e) }
+	descByWire := map[string]string{}
+	for _, c := range rt.doc.Errors.Codes {
+		rec := httptest.NewRecorder()
+		rt.refuse(rec, "x", &Refusal{Err: glovo.Refuse(glovo.Code(c.Code)), Reason: "leaky:detail"})
+		var e map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
+			t.Fatalf("%s: %v", c.Code, err)
+		}
+		if rec.Code != c.Status || e["error"] != c.Wire || len(e) != 2 || e["error_description"] == "" {
+			t.Errorf("%s: %d %s, want %d %s", c.Code, rec.Code, rec.Body.String(), c.Status, c.Wire)
+		}
+		if strings.Contains(rec.Body.String(), "leaky") {
+			t.Errorf("%s: the internal reason reached the wire", c.Code)
+		}
+		if rec.Code == 429 && rec.Header().Get("Retry-After") == "" {
+			t.Errorf("%s: 429 without Retry-After", c.Code)
+		}
+		if c.Wire == "dependency_unavailable" {
+			if d, ok := descByWire[c.Wire]; ok && d != e["error_description"] {
+				t.Errorf("%s: dependency_unavailable descriptions differ, one internal code is distinguishable", c.Code)
+			}
+			descByWire[c.Wire] = e["error_description"]
+		}
+	}
+	if len(notes) != len(rt.doc.Errors.Codes) {
+		t.Fatalf("OnRefused called %d times for %d refusals", len(notes), len(rt.doc.Errors.Codes))
+	}
+	for _, c := range rt.doc.Errors.Conditions {
+		if c.Status == 401 {
+			continue
+		}
+		for _, code := range strings.Split(c.Code, "|") {
+			if st, _ := rt.doc.WireFor(code); st != c.Status {
+				t.Errorf("condition %s: code %s maps to %d, table says %d", c.Reason, code, st, c.Status)
+			}
+		}
+	}
+	rec := httptest.NewRecorder()
+	rt.refuse(rec, "x", &Refusal{Err: glovo.Refuse(glovo.Code("brand_new_code"))})
+	if rec.Code != 503 || !strings.Contains(rec.Body.String(), "dependency_unavailable") {
+		t.Fatalf("unmapped code = %d %s, want a closed 503", rec.Code, rec.Body.String())
+	}
+}
+
+// T3: every subject-token failure is the same 401, the response never echoes
+// the token, and nothing logged contains it.
+func TestHTTPSubjectTokenFailuresAre401AndLeakNothing(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	f := newHTTPFx(t)
+	bad := map[string]string{
+		"garbage":        "not.a.jwt-SECRETGARBAGE",
+		"expired":        forgeSubject(t, subjResource, time.Now().Add(-time.Hour), map[string]any{"tgr": "tgr_1"}),
+		"wrong audience": forgeSubject(t, "https://elsewhere.example", time.Now().Add(time.Hour), map[string]any{"tgr": "tgr_1"}),
+		"bad signature":  glovoToken(t, time.Now().Add(time.Hour)) + "x",
+	}
+	for name, tok := range bad {
+		resp, body := f.do("POST", jb+"/resolve", map[string]string{SubjectTokenHeader: tok}, "{}")
+		if resp.StatusCode != 401 {
+			t.Errorf("%s: %d %s", name, resp.StatusCode, body)
+		}
+		if strings.Contains(body, tok) || strings.Contains(logs.String(), tok) {
+			t.Errorf("%s: the token reached a response or a log", name)
+		}
 	}
 }
