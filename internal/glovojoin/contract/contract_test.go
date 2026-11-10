@@ -15,6 +15,7 @@
 package contract
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -25,7 +26,7 @@ import (
 
 func fileSHA(t *testing.T, path string) string {
 	t.Helper()
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) //nolint:gosec // fixed test paths inside the repository
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +130,7 @@ func TestRouteResponsesEqualPinnedToolOutputSchemas(t *testing.T) {
 		}
 		gb, _ := json.Marshal(got)
 		wb, _ := json.Marshal(want)
-		if string(gb) != string(wb) {
+		if !bytes.Equal(gb, wb) {
 			t.Errorf("route %s response schema differs from tool %s output schema", r.ID, *r.Tool)
 		}
 	}

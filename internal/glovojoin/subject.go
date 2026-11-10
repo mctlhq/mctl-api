@@ -32,7 +32,7 @@ import (
 
 // Header names of the join contract (contract.headers).
 const (
-	SubjectTokenHeader    = "X-Mctl-Subject-Token"
+	SubjectTokenHeader    = "X-Mctl-Subject-Token" //nolint:gosec // header name, not a credential
 	SelectedTenantHeader  = "X-Mctl-Selected-Tenant"
 	ScopeRefHeader        = "X-Mctl-Scope-Ref"
 	IdempotencyKeyHeader  = "Idempotency-Key"
