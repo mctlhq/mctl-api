@@ -64,6 +64,19 @@ type stack struct {
 	prepare     *Preparer
 }
 
+// cappedURL is url with a two-connection pool cap, for stores that open their
+// own pool from a connection string.
+func (s *stack) cappedURL(user string) string {
+	u, err := url.Parse(s.url(user))
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	q := u.Query()
+	q.Set("pool_max_conns", "2")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
 func (s *stack) url(user string) string {
 	u, err := url.Parse(s.base)
 	if err != nil {
@@ -127,7 +140,7 @@ func newStack(t *testing.T) *stack {
 	s.mp = s.pool(migURL)
 	s.rp = s.pool(s.url(s.rt))
 	lazy := &lazyOrders{}
-	s.work, err = workitems.NewStore(ctx, s.url(s.wi), workitems.WithGlovoOrders(lazy))
+	s.work, err = workitems.NewStore(ctx, s.cappedURL(s.wi), workitems.WithGlovoOrders(lazy))
 	if err != nil {
 		t.Fatalf("workitems.NewStore: %v", err)
 	}
@@ -148,7 +161,14 @@ func newStack(t *testing.T) *stack {
 
 func (s *stack) pool(u string) *pgxpool.Pool {
 	s.t.Helper()
-	p, err := pgxpool.New(context.Background(), u)
+	cfg, err := pgxpool.ParseConfig(u)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	// A stack is built many times in one run against a CI Postgres with a low
+	// max_connections: keep every pool small and release it with its test.
+	cfg.MaxConns = 2
+	p, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		s.t.Fatal(err)
 	}

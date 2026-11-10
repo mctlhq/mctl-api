@@ -117,13 +117,24 @@ func newEnvNoSchema(t *testing.T) *env {
 		_, _ = c.Exec(context.Background(), fmt.Sprintf(`DROP ROLE IF EXISTS %s`, mig))
 	})
 	var err2 error
-	if e.mp, err2 = pgxpool.New(ctx, e.migURL); err2 != nil {
+	if e.mp, err2 = smallPool(ctx, e.migURL); err2 != nil {
 		t.Fatal(err2)
 	}
-	if e.rp, err2 = pgxpool.New(ctx, e.rtURL); err2 != nil {
+	if e.rp, err2 = smallPool(ctx, e.rtURL); err2 != nil {
 		t.Fatal(err2)
 	}
 	return e
+}
+
+// smallPool opens a pool of at most two connections: the CI Postgres has a low
+// max_connections and these tests build many databases.
+func smallPool(ctx context.Context, u string) (*pgxpool.Pool, error) {
+	cfg, err := pgxpool.ParseConfig(u)
+	if err != nil {
+		return nil, err
+	}
+	cfg.MaxConns = 2
+	return pgxpool.NewWithConfig(ctx, cfg)
 }
 
 func newEnv(t *testing.T) *env {

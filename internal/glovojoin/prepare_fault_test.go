@@ -138,32 +138,36 @@ func TestPrepareLeavesNothingAfterAFailureAtAnyStatement(t *testing.T) {
 	}
 	full := s.allRows()
 
+	// One subtest per statement: its stack (database, roles, pools) is
+	// released when the subtest ends, so a run never holds more than one.
 	for at := 1; at <= total+1; at++ {
-		s := newStack(t)
-		s.activate("k-fault")
-		base := s.allRows()
-		st := &faultState{failAt: at}
-		commit := at == total+1
-		if commit {
-			st = &faultState{commitAt: true}
-		}
-		s.prepare.DB = faultDB{inner: s.rp, st: st}
-		p := s.preview(stackBasket)
-		res, rf := s.prepare.Prepare(context.Background(), s.req(p, "key-fault"))
-		if rf == nil || res != nil {
-			t.Fatalf("failure at statement %d (commit=%v) was reported as success", at, commit)
-		}
-		if got := s.allRows(); got != base {
-			t.Fatalf("failure at statement %d (commit=%v) left rows: %v, want %v", at, commit, got, base)
-		}
-		s.prepare.DB = s.rp
-		again, rf := s.prepare.Prepare(context.Background(), s.req(p, "key-fault"))
-		if rf != nil || again.Replayed {
-			t.Fatalf("retry after a failure at statement %d: %+v, %v", at, again, rf)
-		}
-		if got := s.allRows(); got != full {
-			t.Fatalf("retry after statement %d wrote %v, want %v", at, got, full)
-		}
+		t.Run(fmt.Sprintf("statement_%d", at), func(t *testing.T) {
+			s := newStack(t)
+			s.activate("k-fault")
+			base := s.allRows()
+			st := &faultState{failAt: at}
+			commit := at == total+1
+			if commit {
+				st = &faultState{commitAt: true}
+			}
+			s.prepare.DB = faultDB{inner: s.rp, st: st}
+			p := s.preview(stackBasket)
+			res, rf := s.prepare.Prepare(context.Background(), s.req(p, "key-fault"))
+			if rf == nil || res != nil {
+				t.Fatalf("failure at statement %d (commit=%v) was reported as success", at, commit)
+			}
+			if got := s.allRows(); got != base {
+				t.Fatalf("failure at statement %d (commit=%v) left rows: %v, want %v", at, commit, got, base)
+			}
+			s.prepare.DB = s.rp
+			again, rf := s.prepare.Prepare(context.Background(), s.req(p, "key-fault"))
+			if rf != nil || again.Replayed {
+				t.Fatalf("retry after a failure at statement %d: %+v, %v", at, again, rf)
+			}
+			if got := s.allRows(); got != full {
+				t.Fatalf("retry after statement %d wrote %v, want %v", at, got, full)
+			}
+		})
 	}
 }
 
