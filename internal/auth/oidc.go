@@ -191,6 +191,9 @@ type User struct {
 	// glovoWorker is set only on the Glovo worker principal, built by
 	// NewGlovoWorkerUser from the test-only worker credential.
 	glovoWorker bool
+	// glovoFacade is set only on the Glovo join facade principal, built by
+	// NewGlovoFacadeUser from a matched MCTL_GLOVO_FACADE_TOKEN.
+	glovoFacade bool
 
 	// oauthClientID is the verified client_id claim of a local OAuth access
 	// token. Provenance only: never read for authorization.
@@ -1065,6 +1068,7 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 	supportProducer := supportIncidentProducerToken()
 	securityProviders := securityProviderTokens()
 	glovoWorker := glovoWorkerToken()
+	glovoFacade := glovoFacadeToken()
 	var cfg middlewareConfig
 	for _, o := range opts {
 		o(&cfg)
@@ -1073,7 +1077,7 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 	federationDisabled := federationKillSwitchOn(os.Getenv("MCTL_FEDERATION_DISABLED"))
 	registry := cfg.federationRegistry
 	if !federationDisabled && registry == nil {
-		registry = defaultFederationRegistry(validator, resolver, dex, oauth, surfaces, usageWriter, evidenceWriter, registryPublisher, supportProducer, securityProviders, glovoWorker)
+		registry = defaultFederationRegistry(validator, resolver, dex, oauth, surfaces, usageWriter, evidenceWriter, registryPublisher, supportProducer, securityProviders, glovoWorker, glovoFacade)
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -1160,6 +1164,8 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 					user = sp
 				} else if gw := glovoWorkerUserFor(glovoWorker, token); gw != nil {
 					user = gw
+				} else if gf := glovoFacadeUserFor(glovoFacade, token); gf != nil {
+					user = gf
 				} else if isJWT(token) {
 					// Peek at the JWT issuer to route to the correct verifier.
 					if oauth != nil && jwtIssuer(token) == oauth.BaseURL {
@@ -1290,7 +1296,7 @@ func federationKillSwitchOn(v string) bool {
 // federation_config.go, with audience enforcement); this default is what
 // every existing caller of Middleware -- including every test in this
 // package -- exercises unchanged.
-func defaultFederationRegistry(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier, oauth *OAuthServer, surfaces map[string]string, usageWriter, evidenceWriter, registryPublisher, supportProducer string, securityProviders map[string]string, glovoWorker string) *Registry {
+func defaultFederationRegistry(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier, oauth *OAuthServer, surfaces map[string]string, usageWriter, evidenceWriter, registryPublisher, supportProducer string, securityProviders map[string]string, glovoWorker, glovoFacade string) *Registry {
 	bridgeProviders := bridgeProviderTokens()
 	static := []Provider{
 		newServiceTokenProvider(func() string { return strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN")) }),
@@ -1302,6 +1308,7 @@ func defaultFederationRegistry(validator *GitHubValidator, resolver TenantResolv
 		newSecurityProviderProvider(func() map[string]string { return securityProviders }),
 		newBridgeProviderProvider(func() map[string]string { return bridgeProviders }),
 		newGlovoWorkerProvider(func() string { return glovoWorker }),
+		newGlovoFacadeProvider(func() string { return glovoFacade }),
 	}
 	var jwtProviders []Provider
 	if oauth != nil && oauth.BaseURL != "" {
@@ -1375,6 +1382,8 @@ func userFromVerified(v *Verified) *User {
 		return NewEvidenceWriterUser()
 	case v.Identity.Provider == ProviderService && v.Identity.Subject == GlovoWorkerUserID:
 		return NewGlovoWorkerUser()
+	case v.Identity.Provider == ProviderService && v.Identity.Subject == GlovoFacadeUserID:
+		return NewGlovoFacadeUser()
 	case v.Identity.Provider == ProviderService && v.Identity.Subject == RegistryPublisherUserID:
 		return NewRegistryPublisherUser()
 	case v.Identity.Provider == ProviderService && v.Identity.Subject == SupportIncidentProducerUserID:

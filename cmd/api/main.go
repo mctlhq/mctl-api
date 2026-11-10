@@ -1145,6 +1145,14 @@ func main() {
 			}
 		}
 	}
+	// A Glovo join facade token that equals another machine token (or is too
+	// short) is a misconfiguration the process refuses to boot with
+	// (mctl-api#957): the credential would authenticate as two principals.
+	if problem := auth.GlovoFacadeTokenProblem(); problem != "" {
+		slog.Error("invalid configuration", "error", "MCTL_GLOVO_FACADE_TOKEN refused: "+problem)
+		stopSignals()
+		os.Exit(1)
+	}
 	// Glovo control routes (mctl-api#985): dark, see configureGlovoControl.
 	glovoControlRoutes, gcErr := configureGlovoControl(os.LookupEnv, auth.LoadGlovoControlWorker())
 	if gcErr != nil {

@@ -46,7 +46,7 @@ func (h *Handlers) requireGlovoTenantOwner(w http.ResponseWriter, r *http.Reques
 	_, relayed := user.RelaySurface()
 	_, surface := user.Surface()
 	if !human || id.Kind != auth.KindHuman || user.IsAgent() || user.IsService() || relayed || surface ||
-		user.IsGlovoAudience() || user.IsGlovoWorker() {
+		user.IsGlovoAudience() || user.IsGlovoWorker() || user.IsGlovoFacade() {
 		return deny(glovo.CodeNotAuthorized)
 	}
 	prn := user.PrincipalID()

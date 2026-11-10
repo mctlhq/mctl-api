@@ -245,6 +245,7 @@ func BuildFederationRegistry(ctx context.Context, cfg FederationProvidersConfig,
 	securityProviders := securityProviderTokens()
 	bridgeProviders := bridgeProviderTokens()
 	glovoWorker := glovoWorkerToken()
+	glovoFacade := glovoFacadeToken()
 	static := []Provider{
 		newServiceTokenProvider(func() string { return strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN")) }),
 		newSurfaceProvider(func() map[string]string { return surfaces }),
@@ -255,6 +256,7 @@ func BuildFederationRegistry(ctx context.Context, cfg FederationProvidersConfig,
 		newSecurityProviderProvider(func() map[string]string { return securityProviders }),
 		newBridgeProviderProvider(func() map[string]string { return bridgeProviders }),
 		newGlovoWorkerProvider(func() string { return glovoWorker }),
+		newGlovoFacadeProvider(func() string { return glovoFacade }),
 	}
 
 	var jwtProviders []Provider

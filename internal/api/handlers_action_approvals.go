@@ -693,7 +693,7 @@ func isGlovoOwnerCandidate(u *auth.User) bool {
 	_, surface := u.Surface()
 	prn := u.PrincipalID()
 	return human && id.Kind == auth.KindHuman && prn != "" && auth.ValidPrincipalID(prn) && !u.PrincipalUnresolved() &&
-		!u.IsAgent() && !u.IsService() && !u.IsCI() && !relayed && !surface && !u.IsGlovoAudience() && !u.IsGlovoWorker()
+		!u.IsAgent() && !u.IsService() && !u.IsCI() && !relayed && !surface && !u.IsGlovoAudience() && !u.IsGlovoWorker() && !u.IsGlovoFacade()
 }
 
 // isGlovoOwnerDecider is isGlovoOwnerCandidate plus the binding's owner.

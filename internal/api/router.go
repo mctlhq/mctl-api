@@ -572,6 +572,9 @@ func NewRouter(opts Options) http.Handler {
 		// reach; this group also mounts /mcp.
 		r.Use(h.glovoAudienceGate)
 		r.Use(h.supportAudienceGate)
+		// The Glovo join facade reaches only the join prefix, and nothing else
+		// reaches the join prefix (mctl-api#957).
+		r.Use(h.glovoJoinGate)
 		// A surface principal's ceiling counts every call it makes, so it
 		// runs before the gate: the gate turns a relay call into the linked
 		// human, and a refused relay still costs a link lookup.
