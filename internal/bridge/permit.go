@@ -102,6 +102,12 @@ func (s *Store) permitTx(ctx context.Context, tx pgx.Tx, c Caller, commandID, le
 		}
 		return nil, fmt.Errorf("%w: %v", ErrWriteFenceRefused, err)
 	}
+	// A fence that keeps PreLock state per transaction forgets it however the
+	// permit ends: Check consumes it, so this only matters when the permit
+	// fails between PreLock and Check (stale lease, cancelled command).
+	if rel, ok := s.currentFence().(interface{ Release(pgx.Tx) }); ok {
+		defer rel.Release(tx)
+	}
 	row, err := s.lockOwned(ctx, tx, c, commandID)
 	if err != nil {
 		return nil, err

@@ -115,3 +115,43 @@ func TestPGPreLockErrorMapping(t *testing.T) {
 		})
 	}
 }
+
+type releasingFence struct {
+	hookFence
+	released  int
+	releaseTx pgx.Tx
+}
+
+func (r *releasingFence) Release(tx pgx.Tx) { r.released++; r.releaseTx = tx }
+
+// A permit that fails between PreLock and Check releases the fence's state;
+// one that reaches Check does too (harmlessly: Check already consumed it).
+func TestPGPermitReleasesFenceStateOnEarlyFailure(t *testing.T) {
+	s := pgStore(t)
+	ctx := context.Background()
+	tenant := fmt.Sprintf("t-%d", time.Now().UnixNano())
+	c := Caller{ProviderRef: "glovo", Actor: "a", Tenants: []string{tenant}}
+	id := enqueue(t, s, tenant, KindPlaceOrderFake)
+	cmd := claimOne(t, s, c, id)
+	var d map[string]any
+	_ = json.Unmarshal(cmd, &d)
+	tok := d["lease_token"].(string)
+
+	r := &releasingFence{}
+	s.SetFence(r)
+	if _, err := s.IssueWritePermit(ctx, c, id, "lt_forged0123456789abc"); Code(err) != "lease_stale" {
+		t.Fatalf("forged token: %v", err)
+	}
+	if r.released != 1 || r.checkRan {
+		t.Fatalf("released=%d checkRan=%v after a stale lease, want 1 and false", r.released, r.checkRan)
+	}
+	if r.releaseTx != r.preTx {
+		t.Fatal("Release must name the transaction PreLock ran in")
+	}
+	if _, err := s.IssueWritePermit(ctx, c, id, tok); err != nil {
+		t.Fatal(err)
+	}
+	if r.released != 2 || !r.checkRan {
+		t.Fatalf("released=%d checkRan=%v after a permit", r.released, r.checkRan)
+	}
+}

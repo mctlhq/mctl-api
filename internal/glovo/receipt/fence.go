@@ -6,7 +6,6 @@ import (
 	"encoding/base32"
 	"errors"
 	"fmt"
-	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,7 +52,11 @@ const preLockTTL = 10 * time.Minute
 
 type preLocked struct {
 	commandID, tenant, owner, orderRef, approvalRef string
-	at                                              time.Time
+	// unfenced marks a command this fence does not authorize (another kind, or
+	// no order or approval reference): no lock was taken and Check refuses it
+	// permanently with approval_invalid, not with a retryable unavailable.
+	unfenced bool
+	at       time.Time
 }
 
 // Fence is the bridge.WriteFence of the Glovo write path. Every collaborator
@@ -77,20 +80,7 @@ func NewFence(a Approvals, o Orders, c Conns, m Membership) *Fence {
 	return &Fence{approvals: a, orders: o, conns: c, members: m, pre: map[pgx.Tx]preLocked{}, now: time.Now}
 }
 
-// isNil is true for an untyped nil and for a nil pointer inside an interface:
-// a nil *workitems.Store passed as Approvals is a missing collaborator, not a
-// working one.
-func isNil(v any) bool {
-	if v == nil {
-		return true
-	}
-	rv := reflect.ValueOf(v)
-	switch rv.Kind() {
-	case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Func, reflect.Interface, reflect.Chan:
-		return rv.IsNil()
-	}
-	return false
-}
+func isNil(v any) bool { return glovo.IsNil(v) }
 
 func (f *Fence) complete() bool {
 	return f != nil && !isNil(f.approvals) && !isNil(f.orders) && !isNil(f.conns) && !isNil(f.members)
@@ -119,6 +109,7 @@ func (f *Fence) PreLock(ctx context.Context, tx pgx.Tx, c bridge.Caller, command
 		return bridge.ErrCommandNotFound
 	}
 	if kind != kindPlaceOrderFake || orderRef == "" || approvalRef == "" {
+		f.remember(tx, preLocked{commandID: commandID, tenant: tenant, owner: owner, unfenced: true})
 		return nil
 	}
 	// Steps 2-4: L1 and L2 shared, L3, L4.
@@ -146,6 +137,24 @@ func (f *Fence) remember(tx pgx.Tx, p preLocked) {
 	}
 	p.at = now
 	f.pre[tx] = p
+}
+
+// Release forgets what PreLock recorded for tx. permitTx calls it when it
+// fails between PreLock and Check, so no entry outlives its transaction.
+func (f *Fence) Release(tx pgx.Tx) {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.pre, tx)
+}
+
+// pending is the number of transactions with a recorded PreLock (tests).
+func (f *Fence) pending() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.pre)
 }
 
 func (f *Fence) take(tx pgx.Tx) (preLocked, bool) {
@@ -176,6 +185,9 @@ func (f *Fence) Check(ctx context.Context, tx pgx.Tx, b bridge.FenceBinding) (st
 		// PreLock did not run for this transaction and command: the lock order
 		// cannot be trusted. Refuse rather than lock out of order.
 		return "", refuse(glovo.CodeUnavailable)
+	}
+	if pre.unfenced {
+		return "", refuse(glovo.CodeApprovalInvalid)
 	}
 	// Step 1: the locked command row, against what PreLock read and what the
 	// bridge presented.
