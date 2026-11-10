@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"reflect"
 	"sync"
 	"testing"
+	"unsafe"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -252,5 +254,53 @@ func TestGlovoOwnerSeesTheApproval(t *testing.T) {
 	e.h.opts.GlovoApprovals = nil
 	if res := get(e.human(glovoOwnerPRN, "olga")); res.code != http.StatusForbidden {
 		t.Fatalf("no ledger wired, owner read = %d", res.code)
+	}
+}
+
+// setUnexported flips a private flag of a test user. auth has no constructor
+// for a Glovo-audience or Glovo-worker caller that is otherwise a valid owner,
+// and the bar must hold exactly for that caller, so the test builds one.
+func setUnexported(t *testing.T, u *auth.User, field string) *auth.User {
+	t.Helper()
+	f := reflect.ValueOf(u).Elem().FieldByName(field)
+	if !f.IsValid() || f.Kind() != reflect.Bool {
+		t.Fatalf("auth.User has no bool field %q", field)
+	}
+	reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem().SetBool(true) //nolint:gosec // test-only
+	return u
+}
+
+// The facade's own tokens never decide, even when they carry the owner's
+// principal and a live developer membership: only the bar keeps them out.
+func TestGlovoOwnerDecisionBarsGlovoTokens(t *testing.T) {
+	e := newGlovoOwnerEnv(t)
+	owner := e.human(glovoOwnerPRN, "olga")
+	if res := e.decide(owner, e.aar, "approve"); res.code != http.StatusOK {
+		t.Fatalf("control: the owner alone = %d %s", res.code, res.raw)
+	}
+	forbidden := e.decide(e.human(glovoOtherPRN, "oleg"), e.aar, "approve")
+	for name, field := range map[string]string{"audience caller": "glovoAudience", "worker caller": "glovoWorker"} {
+		u := setUnexported(t, e.human(glovoOwnerPRN, "olga"), field)
+		res := e.decide(u, e.aar, "approve")
+		if res.code != http.StatusForbidden || res.raw != forbidden.raw {
+			t.Errorf("%s = %d %s, want the uniform 403", name, res.code, res.raw)
+		}
+	}
+	if n := e.dec.count(); n != 1 { // only the control decision
+		t.Fatalf("a barred token reached the ledger: %d decisions, want 1", n)
+	}
+}
+
+// glovoWorkerGate already keeps the worker off this route, so the route-level
+// test cannot see the handler's own bar for it. The predicate is held directly.
+func TestGlovoOwnerCandidateExcludesGlovoCallers(t *testing.T) {
+	e := newGlovoOwnerEnv(t)
+	if !isGlovoOwnerCandidate(e.human(glovoOwnerPRN, "olga")) {
+		t.Fatal("control: a plain human owner must be a candidate")
+	}
+	for _, field := range []string{"glovoAudience", "glovoWorker"} {
+		if isGlovoOwnerCandidate(setUnexported(t, e.human(glovoOwnerPRN, "olga"), field)) {
+			t.Errorf("a caller with %s set must not be a candidate", field)
+		}
 	}
 }
