@@ -37,6 +37,13 @@ import (
 const (
 	ActionKindGlovoPlaceOrderFake = "glovo.place_order_fake"
 
+	// ActionKindGlovoBasketApproval is the owner's approval of one frozen
+	// revision of a synthetic basket (mctl-api#1006). It authorizes nothing
+	// beyond its own approved state: no order, command or provider effect
+	// can spend it (the generic spend paths refuse every glovo.* kind, and
+	// the database admits only pending -> approved | denied for it).
+	ActionKindGlovoBasketApproval = "glovo.basket_approval"
+
 	// glovoKindPrefix is the namespace of Glovo kinds. The database CHECK
 	// action_approval_requests_glovo_kind_chk makes "starts with glovo." and
 	// "is in GlovoActionKinds" the same predicate.
@@ -72,7 +79,7 @@ const (
 const ReservePermitMargin = 120 * time.Second
 
 // GlovoActionKinds is the exact list of Glovo kinds.
-var GlovoActionKinds = []string{ActionKindGlovoPlaceOrderFake}
+var GlovoActionKinds = []string{ActionKindGlovoPlaceOrderFake, ActionKindGlovoBasketApproval}
 
 // glovoKindPredicate is the one SQL predicate for "this row is a Glovo
 // approval". It is parenthesized, so it can be ANDed or negated as it stands.
@@ -111,6 +118,11 @@ type GlovoBinding struct {
 	Provider          string
 	CommandID         string
 	CreatedAt         time.Time
+	// BasketID and BasketRevision are set only on the projection of a basket
+	// approval binding (GlovoBasketBinding.AsGlovoBinding); an order binding
+	// leaves them empty.
+	BasketID       string
+	BasketRevision int64
 }
 
 // glovoTarget is "glovo:v1:" plus the length-prefixed binding fields, so no

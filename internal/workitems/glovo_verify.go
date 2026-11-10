@@ -53,17 +53,19 @@ func VerifyGlovoApprovalSchema(ctx context.Context, q dbq.Querier) error {
 	if err := q.QueryRow(ctx, `SELECT count(*) FROM pg_trigger t
 		WHERE NOT t.tgisinternal AND t.tgenabled = 'O' AND (
 		   (t.tgrelid = 'public.action_approval_requests'::regclass AND t.tgname IN ('aar_guard','aar_binding_required'))
-		OR (t.tgrelid = 'glovo.approval_bindings'::regclass AND t.tgname = 'approval_bindings_guard'))`).Scan(&enabled); err != nil {
+		OR (t.tgrelid = 'glovo.approval_bindings'::regclass AND t.tgname = 'approval_bindings_guard')
+		OR (t.tgrelid = 'glovo.basket_approval_bindings'::regclass AND t.tgname = 'basket_approval_bindings_guard'))`).Scan(&enabled); err != nil {
 		return &glovo.NotReadyError{Reason: NotReadyApprovalCheckSQL, Cause: err}
 	}
-	if enabled != 3 {
+	if enabled != 4 {
 		return approvalNotReady(NotReadyApprovalTrigger)
 	}
 
 	var owners, member int
 	if err := q.QueryRow(ctx, `SELECT count(DISTINCT c.relowner),
 		count(*) FILTER (WHERE pg_has_role(current_user, c.relowner, 'MEMBER'))
-		FROM pg_class c WHERE c.oid IN ('public.action_approval_requests'::regclass, 'glovo.approval_bindings'::regclass)`).Scan(&owners, &member); err != nil {
+		FROM pg_class c WHERE c.oid IN ('public.action_approval_requests'::regclass, 'glovo.approval_bindings'::regclass,
+		                                'glovo.basket_approval_bindings'::regclass)`).Scan(&owners, &member); err != nil {
 		return &glovo.NotReadyError{Reason: NotReadyApprovalCheckSQL, Cause: err}
 	}
 	if owners != 1 || member != 0 {
@@ -78,6 +80,7 @@ func VerifyGlovoApprovalSchema(ctx context.Context, q dbq.Querier) error {
 	wants := []want{
 		{"public.action_approval_requests", map[string]bool{"SELECT": true, "INSERT": true, "UPDATE": false, "DELETE": false, "TRUNCATE": false}, glovoRuntimeUpdateColumns},
 		{"glovo.approval_bindings", map[string]bool{"SELECT": true, "INSERT": true, "UPDATE": false, "DELETE": false, "TRUNCATE": false}, []string{"command_id"}},
+		{"glovo.basket_approval_bindings", map[string]bool{"SELECT": true, "INSERT": true, "UPDATE": false, "DELETE": false, "TRUNCATE": false}, nil},
 	}
 	for _, g := range glovoPublicGrants {
 		wants = append(wants, want{"public." + g.Table, map[string]bool{"SELECT": true, "INSERT": true, "UPDATE": false, "DELETE": false, "TRUNCATE": false}, nil})

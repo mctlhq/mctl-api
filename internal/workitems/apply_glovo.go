@@ -18,7 +18,9 @@ import (
 // runtime role owns could be disabled by that role.
 
 // glovoApprovalSchemaVersion is recorded in glovo.approval_schema_version.
-const glovoApprovalSchemaVersion = 1
+// Version 2 adds the basket approval kind and its binding table
+// (mctl-api#1006).
+const glovoApprovalSchemaVersion = 2
 
 // glovoRuntimeUpdateColumns is the exact column-level UPDATE the Glovo runtime
 // role holds on action_approval_requests (#957 design 6d.1).
@@ -48,14 +50,16 @@ func init() {
 			Description: "approval bindings; column-level UPDATE of command_id only"},
 		glovo.GrantRow{Table: "approval_schema_version", Privileges: []string{"SELECT"},
 			Description: "recorded approval schema version, read at start"},
+		glovo.GrantRow{Table: "basket_approval_bindings", Privileges: []string{"SELECT", "INSERT"},
+			Description: "basket approval bindings (mctl-api#1006); insert-only"},
 	)
 }
 
 // glovoApprovalRelations and glovoApprovalFunctions are the objects of this
 // slice in schema glovo, held to the migration role by the ownership check.
 var (
-	glovoApprovalRelations = []string{"approval_bindings", "approval_schema_version"}
-	glovoApprovalFunctions = []string{"aar_guard", "approval_bindings_guard", "aar_binding_required"}
+	glovoApprovalRelations = []string{"approval_bindings", "approval_schema_version", "basket_approval_bindings"}
+	glovoApprovalFunctions = []string{"aar_guard", "approval_bindings_guard", "aar_binding_required", "basket_approval_bindings_guard"}
 )
 
 const glovoApprovalTables = `
@@ -76,6 +80,19 @@ CREATE TABLE IF NOT EXISTS glovo.approval_bindings (
 CREATE UNIQUE INDEX IF NOT EXISTS approval_bindings_command
   ON glovo.approval_bindings (command_id) WHERE command_id <> '';
 CREATE TABLE IF NOT EXISTS glovo.approval_schema_version (version INT NOT NULL);
+-- What the owner's approval of one frozen basket revision is bound to
+-- (mctl-api#1006). Insert-only: approval_bindings_guard's sibling below
+-- refuses every UPDATE and DELETE. No order, connection, execution or work
+-- item: a basket approval has no effect to bind.
+CREATE TABLE IF NOT EXISTS glovo.basket_approval_bindings (
+  approval_id        TEXT PRIMARY KEY REFERENCES public.action_approval_requests (id),
+  tenant             TEXT NOT NULL CHECK (tenant <> ''),
+  owner_principal_id TEXT NOT NULL CHECK (owner_principal_id LIKE 'prn\_%'),
+  basket_id          TEXT NOT NULL CHECK (basket_id ~ '^gbk_[A-Za-z0-9]{26}$'),
+  revision           BIGINT NOT NULL CHECK (revision >= 1),
+  basket_fingerprint TEXT NOT NULL CHECK (basket_fingerprint ~ '^sha256:[0-9a-f]{64}$'),
+  created_at         TIMESTAMPTZ NOT NULL,
+  UNIQUE (basket_id, revision));
 `
 
 // glovoApprovalChecks widens the state CHECK and adds the kind and state
@@ -94,12 +111,16 @@ BEGIN
             ADD CONSTRAINT action_approval_requests_state_check
                 CHECK (state IN ('pending', 'approved', 'denied', 'consumed', 'in_flight', 'executed', 'reserved', 'unknown')) NOT VALID;
     END IF;
+    -- Replace-once keyed on the basket kind (mctl-api#1006): a database of
+    -- version 1 carries the one-kind CHECK under the same name.
     IF NOT EXISTS (SELECT 1 FROM pg_constraint
                    WHERE conrelid = 'public.action_approval_requests'::regclass
-                     AND conname = 'action_approval_requests_glovo_kind_chk') THEN
+                     AND conname = 'action_approval_requests_glovo_kind_chk'
+                     AND strpos(pg_get_constraintdef(oid), 'glovo.basket_approval') > 0) THEN
         ALTER TABLE public.action_approval_requests
+            DROP CONSTRAINT IF EXISTS action_approval_requests_glovo_kind_chk,
             ADD CONSTRAINT action_approval_requests_glovo_kind_chk
-                CHECK (action_kind NOT LIKE 'glovo.%' OR action_kind = 'glovo.place_order_fake') NOT VALID;
+                CHECK (action_kind NOT LIKE 'glovo.%' OR action_kind IN ('glovo.place_order_fake', 'glovo.basket_approval')) NOT VALID;
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_constraint
                    WHERE conrelid = 'public.action_approval_requests'::regclass
@@ -155,6 +176,18 @@ BEGIN
   IF NEW.action_kind NOT LIKE 'glovo.%' THEN
     RETURN NULL;
   END IF;
+  IF NEW.action_kind = 'glovo.basket_approval' THEN
+    SELECT * INTO b FROM glovo.basket_approval_bindings x WHERE x.approval_id = NEW.id;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'a glovo approval is committed with its binding' USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF NEW.artifact_hash <> b.basket_fingerprint OR NEW.args_digest <> b.basket_fingerprint
+       OR NEW.execution_id <> b.basket_id OR NEW.work_item_id <> ''
+       OR NEW.subject_principal_id <> b.owner_principal_id THEN
+      RAISE EXCEPTION 'the approval and its binding disagree' USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NULL;
+  END IF;
   SELECT * INTO b FROM glovo.approval_bindings x WHERE x.approval_id = NEW.id;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'a glovo approval is committed with its binding' USING ERRCODE = 'integrity_constraint_violation';
@@ -164,6 +197,13 @@ BEGIN
     RAISE EXCEPTION 'the approval and its binding disagree' USING ERRCODE = 'integrity_constraint_violation';
   END IF;
   RETURN NULL;
+END
+$f$;
+
+CREATE OR REPLACE FUNCTION glovo.basket_approval_bindings_guard() RETURNS trigger
+LANGUAGE plpgsql AS $f$
+BEGIN
+  RAISE EXCEPTION 'basket approval bindings are insert-only' USING ERRCODE = 'integrity_constraint_violation';
 END
 $f$;
 
@@ -188,7 +228,7 @@ BEGIN
   END IF;
 
   IF TG_OP = 'INSERT' THEN
-    IF NEW.action_kind <> 'glovo.place_order_fake' OR NEW.state <> 'pending'
+    IF NEW.action_kind NOT IN ('glovo.place_order_fake', 'glovo.basket_approval') OR NEW.state <> 'pending'
        OR NEW.decided_by <> '' OR NEW.decided_at IS NOT NULL OR NEW.reason <> ''
        OR NEW.decided_by_principal_id <> '' OR NEW.decided_via_principal_id <> ''
        OR NEW.decided_context_digest <> '' OR NEW.authority_basis <> '' OR NEW.authz_mode <> ''
@@ -196,8 +236,11 @@ BEGIN
        OR NEW.executed_at IS NOT NULL THEN
       RAISE EXCEPTION 'a glovo approval is inserted pending and undecided' USING ERRCODE = 'integrity_constraint_violation';
     END IF;
-    IF NEW.requested_by <> 'service:glovo-prepare' OR NEW.policy_rule_id <> 'glovo.order.owner-approval'
-       OR NEW.policy_version <> '1' OR NEW.intent_source = '' OR NEW.policy_decision = ''
+    IF (NEW.action_kind = 'glovo.place_order_fake' AND (NEW.requested_by <> 'service:glovo-prepare'
+           OR NEW.policy_rule_id <> 'glovo.order.owner-approval' OR NEW.policy_version <> '1'))
+       OR (NEW.action_kind = 'glovo.basket_approval' AND (NEW.requested_by <> 'service:glovo-basket'
+           OR NEW.policy_rule_id <> 'glovo.basket.owner-approval' OR NEW.policy_version <> '1'))
+       OR NEW.intent_source = '' OR NEW.policy_decision = ''
        OR cardinality(NEW.policy_reasons) = 0 OR NEW.artifact_hash !~ '^sha256:[0-9a-f]{64}$' THEN
       RAISE EXCEPTION 'a glovo approval carries its complete policy context' USING ERRCODE = 'integrity_constraint_violation';
     END IF;
@@ -230,6 +273,11 @@ BEGIN
        ('reserved','consumed'), ('reserved','unknown'))) THEN
     RAISE EXCEPTION 'glovo approval transition not allowed' USING ERRCODE = 'integrity_constraint_violation';
   END IF;
+  -- A basket approval is only ever decided: it is never reserved, consumed
+  -- or revoked, because nothing spends it (mctl-api#1006).
+  IF OLD.action_kind = 'glovo.basket_approval' AND OLD.state <> 'pending' THEN
+    RAISE EXCEPTION 'glovo approval transition not allowed' USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
   -- Outside the transition's own columns, the recorded decision is kept.
   IF OLD.state <> 'pending' AND (
        NEW.decided_by_principal_id IS DISTINCT FROM OLD.decided_by_principal_id
@@ -239,7 +287,19 @@ BEGIN
        OR NEW.fresh_until IS DISTINCT FROM OLD.fresh_until) THEN
     RAISE EXCEPTION 'a recorded glovo decision does not change' USING ERRCODE = 'integrity_constraint_violation';
   END IF;
-  IF OLD.state = 'pending' AND NEW.state = 'approved' THEN
+  IF OLD.state = 'pending' AND NEW.state = 'approved' AND OLD.action_kind = 'glovo.basket_approval' THEN
+    SELECT * INTO b FROM glovo.basket_approval_bindings x WHERE x.approval_id = OLD.id;
+    IF NOT FOUND OR NEW.decided_by_principal_id <> b.owner_principal_id
+       OR NEW.authority_basis <> 'resource_owner' OR NEW.fresh_until IS NULL
+       OR OLD.expires_at <= clock_timestamp() THEN
+      RAISE EXCEPTION 'only the basket owner approves, before expiry, under resource_owner' USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+  ELSIF OLD.state = 'pending' AND NEW.state = 'denied' AND OLD.action_kind = 'glovo.basket_approval' THEN
+    SELECT * INTO b FROM glovo.basket_approval_bindings x WHERE x.approval_id = OLD.id;
+    IF NOT FOUND OR NEW.decided_by_principal_id <> b.owner_principal_id THEN
+      RAISE EXCEPTION 'only the basket owner refuses a basket approval' USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+  ELSIF OLD.state = 'pending' AND NEW.state = 'approved' THEN
     SELECT * INTO b FROM glovo.approval_bindings x WHERE x.approval_id = OLD.id;
     IF NOT FOUND OR NEW.decided_by_principal_id <> b.owner_principal_id
        OR NEW.authority_basis <> 'resource_owner' OR NEW.fresh_until IS NULL
@@ -280,10 +340,15 @@ BEGIN
     CREATE TRIGGER approval_bindings_guard BEFORE UPDATE OR DELETE ON glovo.approval_bindings
       FOR EACH ROW EXECUTE FUNCTION glovo.approval_bindings_guard();
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'basket_approval_bindings_guard' AND tgrelid = 'glovo.basket_approval_bindings'::regclass) THEN
+    CREATE TRIGGER basket_approval_bindings_guard BEFORE UPDATE OR DELETE ON glovo.basket_approval_bindings
+      FOR EACH ROW EXECUTE FUNCTION glovo.basket_approval_bindings_guard();
+  END IF;
 END $$;
 ALTER TABLE public.action_approval_requests ENABLE TRIGGER aar_guard;
 ALTER TABLE public.action_approval_requests ENABLE TRIGGER aar_binding_required;
 ALTER TABLE glovo.approval_bindings ENABLE TRIGGER approval_bindings_guard;
+ALTER TABLE glovo.basket_approval_bindings ENABLE TRIGGER basket_approval_bindings_guard;
 `
 
 // ApplyGlovoApprovalSchema creates the Glovo approval enforcement: the widened
