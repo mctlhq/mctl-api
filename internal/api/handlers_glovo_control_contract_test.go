@@ -94,8 +94,9 @@ func contractCases(t *testing.T) []contractCase {
 		return &control.CommandView{CommandID: ctlCommand, OrderRef: ctlOrder, Status: "completed", EffectState: "succeeded",
 			Outcome: "succeeded", ProviderEffect: "applied", ErrorCode: "none", ResultDigest: "sha256:aa"}, nil
 	}
-	out = append(out, record(t, g, "read command completed", http.MethodGet, commandPath, ""))
-	out = append(out, record(t, g, "read approval", http.MethodGet, approvalPath, ""))
+	out = append(out,
+		record(t, g, "read command completed", http.MethodGet, commandPath, ""),
+		record(t, g, "read approval", http.MethodGet, approvalPath, ""))
 
 	for _, code := range control.RefusalCodes {
 		code := code
@@ -139,7 +140,7 @@ func renderContract(t *testing.T) map[string][]byte {
 func TestControlContractMatchesRouter(t *testing.T) {
 	want := renderContract(t)
 	if os.Getenv("UPDATE_CONTRACT") == "1" {
-		if err := os.MkdirAll(contractDir, 0o755); err != nil {
+		if err := os.MkdirAll(contractDir, 0o750); err != nil {
 			t.Fatal(err)
 		}
 		old, _ := filepath.Glob(filepath.Join(contractDir, "*.json"))
@@ -147,7 +148,7 @@ func TestControlContractMatchesRouter(t *testing.T) {
 			_ = os.Remove(f)
 		}
 		for name, data := range want {
-			if err := os.WriteFile(filepath.Join(contractDir, name), data, 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(contractDir, name), data, 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -158,7 +159,7 @@ func TestControlContractMatchesRouter(t *testing.T) {
 		t.Fatalf("contract has %d cases, the router produces %d", len(have), len(want)-1)
 	}
 	for name, data := range want {
-		got, err := os.ReadFile(filepath.Join(contractDir, name))
+		got, err := os.ReadFile(filepath.Join(contractDir, name)) //nolint:gosec // fixed test directory
 		if err != nil || !bytes.Equal(got, data) {
 			t.Errorf("%s differs from the router (rerun with UPDATE_CONTRACT=1 if deliberate): %v", name, err)
 		}

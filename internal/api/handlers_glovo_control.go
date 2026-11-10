@@ -48,9 +48,6 @@ import (
 // field of a request. Nothing in a body is a payload, a basket, an endpoint or a
 // credential: the provider payload is built from the order index.
 
-// glovoControlPrefix is the path prefix of every control route.
-const glovoControlPrefix = "/api/v1/internal/glovo/"
-
 // glovoControlRoutes are the four routes the control worker may call.
 var glovoControlRoutes = []struct {
 	method string
