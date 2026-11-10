@@ -329,3 +329,27 @@ func TestHTTPSubjectTokenFailuresAre401AndLeakNothing(t *testing.T) {
 		}
 	}
 }
+
+// T11: the route table is exactly the contract's nine routes, only connect and
+// prepare write, and no join route can enqueue a bridge command: after the
+// whole read-to-prepare path the command table is empty (see the happy-path
+// test) and no handler holds a bridge enqueue seam at all.
+func TestHTTPRouteTableIsTheContractAndOnlyTwoWrite(t *testing.T) {
+	rt := &Routes{}
+	table := rt.RouteTable()
+	if len(table) != 9 {
+		t.Fatalf("%d routes, want 9", len(table))
+	}
+	writes := map[string]bool{}
+	for _, r := range table {
+		if r.Idempotent {
+			writes[r.ID] = true
+		}
+		if rt.handlerFor(r.ID) == nil {
+			t.Errorf("route %s has no handler", r.ID)
+		}
+	}
+	if len(writes) != 2 || !writes["connect"] || !writes["prepare"] {
+		t.Fatalf("idempotent routes = %v, want connect and prepare", writes)
+	}
+}

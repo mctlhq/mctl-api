@@ -48,3 +48,15 @@ func TestFixtureFilesOnlyUnderTheTag(t *testing.T) {
 		t.Errorf("bridge_fixture.go must be in the tagged build only:\nplain: %s\ntagged: %s", plain, tagged)
 	}
 }
+
+// The tagged half of the TTL seam runs as a child `go test` from here, so the
+// ordinary CI test job exercises it without any workflow naming the tag.
+func TestFixtureTTLSeamRunsUnderTheTag(t *testing.T) {
+	out, err := exec.Command("go", "test", "-tags", "glovojoin_fixture", "-count=1", "-run", "^TestFixtureApprovalTTLSeam$", "-v", ".").CombinedOutput() //nolint:gosec // fixed arguments of a test
+	if err != nil {
+		t.Fatalf("tagged seam test: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "--- PASS: TestFixtureApprovalTTLSeam") {
+		t.Fatalf("the tagged seam test did not run:\n%s", out)
+	}
+}
