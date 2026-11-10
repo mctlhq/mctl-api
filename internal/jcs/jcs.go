@@ -268,7 +268,7 @@ func hex4(b []byte) (rune, bool) {
 	if len(b) < 4 {
 		return 0, false
 	}
-	v, err := strconv.ParseUint(string(b[:4]), 16, 32)
+	v, err := strconv.ParseUint(string(b[:4]), 16, 16)
 	if err != nil {
 		return 0, false
 	}
@@ -277,7 +277,7 @@ func hex4(b []byte) (rune, bool) {
 			return 0, false
 		}
 	}
-	return rune(v), true //nolint:gosec // G115: v is parsed with ParseUint(.., 16, 32), so it fits
+	return rune(v), true // v <= 0xFFFF: four hex digits, bitSize 16
 }
 
 // str reads one string token. In strict mode an escape inside an object key
