@@ -49,14 +49,16 @@ func TestFixtureFilesOnlyUnderTheTag(t *testing.T) {
 	}
 }
 
-// The tagged half of the TTL seam runs as a child `go test` from here, so the
+// The tagged half of the TTL seam (the setter, and the value a prepare writes) runs as a child `go test` from here, so the
 // ordinary CI test job exercises it without any workflow naming the tag.
 func TestFixtureTTLSeamRunsUnderTheTag(t *testing.T) {
-	out, err := exec.Command("go", "test", "-tags", "glovojoin_fixture", "-count=1", "-run", "^TestFixtureApprovalTTLSeam$", "-v", ".").CombinedOutput() //nolint:gosec // fixed arguments of a test
+	out, err := exec.Command("go", "test", "-tags", "glovojoin_fixture", "-count=1", "-run", "^(TestFixtureApprovalTTLSeam|TestFixtureTTLReachesPrepare)$", "-v", ".").CombinedOutput() //nolint:gosec // fixed arguments of a test
 	if err != nil {
 		t.Fatalf("tagged seam test: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "--- PASS: TestFixtureApprovalTTLSeam") {
-		t.Fatalf("the tagged seam test did not run:\n%s", out)
+	for _, name := range []string{"TestFixtureApprovalTTLSeam", "TestFixtureTTLReachesPrepare"} {
+		if !strings.Contains(string(out), "--- PASS: "+name) {
+			t.Fatalf("the tagged test %s did not run:\n%s", name, out)
+		}
 	}
 }
