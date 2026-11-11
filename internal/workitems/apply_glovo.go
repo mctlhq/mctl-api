@@ -385,6 +385,11 @@ func ApplyGlovoApprovalSchema(ctx context.Context, migrationConnStr, runtimeRole
 		return fmt.Errorf("workitems: begin approval schema tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if cfg.txSetup != nil {
+		if err := cfg.txSetup(ctx, tx); err != nil {
+			return fmt.Errorf("workitems: approval schema tx setup: %w", err)
+		}
+	}
 	for _, k := range []string{"glovo-approval-schema", "glovo-schema"} {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, k); err != nil {
 			return fmt.Errorf("workitems: approval schema lock: %w", err)

@@ -159,7 +159,11 @@ ALTER TABLE glovo.baskets ENABLE TRIGGER baskets_guard;
 // operator (or a test), never at boot. It needs the glovo approval schema of
 // internal/workitems at version 2 or later, which owns
 // glovo.basket_approval_bindings.
-func ApplySchema(ctx context.Context, migrationConnStr, runtimeRole string) error {
+func ApplySchema(ctx context.Context, migrationConnStr, runtimeRole string, opts ...SchemaOption) error {
+	var cfg schemaConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	if !roleNameRE.MatchString(runtimeRole) {
 		return errors.New("glovo basket: invalid runtime role name")
 	}
@@ -173,6 +177,11 @@ func ApplySchema(ctx context.Context, migrationConnStr, runtimeRole string) erro
 		return fmt.Errorf("glovo basket: begin schema tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if cfg.txSetup != nil {
+		if err := cfg.txSetup(ctx, tx); err != nil {
+			return fmt.Errorf("glovo basket: schema tx setup: %w", err)
+		}
+	}
 	for _, key := range []string{"glovo-basket-schema", "glovo-approval-schema", "glovo-schema"} {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, key); err != nil {
 			return fmt.Errorf("glovo basket: schema lock: %w", err)
@@ -290,3 +299,15 @@ SELECT (SELECT max(version) FROM glovo.basket_schema_version),
 	}
 	return nil
 }
+
+// TxSetup runs first inside the schema transaction, before any lock is taken
+// (see glovo.TxSetup).
+type TxSetup func(ctx context.Context, tx pgx.Tx) error
+
+// SchemaOption configures ApplySchema.
+type SchemaOption func(*schemaConfig)
+
+type schemaConfig struct{ txSetup TxSetup }
+
+// WithTxSetup installs a TxSetup.
+func WithTxSetup(f TxSetup) SchemaOption { return func(c *schemaConfig) { c.txSetup = f } }

@@ -77,7 +77,26 @@ var genericGrants = []struct {
 // ApplyOption configures ApplySchema and ApplyGlovoApprovalSchema.
 type ApplyOption func(*applyConfig)
 
-type applyConfig struct{ workItemsRole string }
+type applyConfig struct {
+	workItemsRole string
+	txSetup       TxSetup
+}
+
+// TxSetup runs first inside each schema transaction, before any lock is
+// taken (see glovo.TxSetup). ApplyGlovoApprovalSchema runs two transactions
+// (the generic block, then the approval block) and calls it in both.
+type TxSetup func(ctx context.Context, tx pgx.Tx) error
+
+// WithTxSetup installs a TxSetup.
+func WithTxSetup(f TxSetup) ApplyOption { return func(c *applyConfig) { c.txSetup = f } }
+
+// CompiledWorkItemsSchemaVersion is the version ApplySchema records in
+// public.work_items_schema_version.
+func CompiledWorkItemsSchemaVersion() int { return workItemsSchemaVersion }
+
+// CompiledGlovoApprovalSchemaVersion is the version ApplyGlovoApprovalSchema
+// records in glovo.approval_schema_version.
+func CompiledGlovoApprovalSchemaVersion() int { return glovoApprovalSchemaVersion }
 
 // WithWorkItemsRole names the work-items role (WORK_ITEMS_DB_URL) that
 // receives the generic DML grants. Without it ApplySchema issues no generic
@@ -126,6 +145,11 @@ func ApplySchema(ctx context.Context, migrationConnStr, runtimeRole string, opts
 		return fmt.Errorf("workitems: begin schema tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if cfg.txSetup != nil {
+		if err := cfg.txSetup(ctx, tx); err != nil {
+			return fmt.Errorf("workitems: schema tx setup: %w", err)
+		}
+	}
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('workitems-schema'))`); err != nil {
 		return fmt.Errorf("workitems: schema lock: %w", err)
 	}

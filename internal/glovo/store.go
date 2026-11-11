@@ -42,7 +42,11 @@ var roleNameRE = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
 // object in schema glovo that another role owns, a recorded schema version
 // above the compiled one, and a runtimeRole that does not match
 // ^[a-z_][a-z0-9_]{0,62}$.
-func ApplySchema(ctx context.Context, migrationConnStr, runtimeRole string) error {
+func ApplySchema(ctx context.Context, migrationConnStr, runtimeRole string, opts ...SchemaOption) error {
+	var cfg schemaConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	if !roleNameRE.MatchString(runtimeRole) {
 		return fmt.Errorf("glovo: invalid runtime role name")
 	}
@@ -56,6 +60,11 @@ func ApplySchema(ctx context.Context, migrationConnStr, runtimeRole string) erro
 		return fmt.Errorf("glovo: begin schema tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if cfg.txSetup != nil {
+		if err := cfg.txSetup(ctx, tx); err != nil {
+			return fmt.Errorf("glovo: schema tx setup: %w", err)
+		}
+	}
 
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('glovo-schema'))`); err != nil {
 		return fmt.Errorf("glovo: schema lock: %w", err)
@@ -514,3 +523,21 @@ RETURNING `+connColsAs("c")+`, old.state, COALESCE(old.secret_ref, '')`, ids, st
 	}
 	return out, nil
 }
+
+// TxSetup runs first inside a schema transaction, before any lock is taken. The
+// operator-run migrator (cmd/glovo-migrate) uses it for SET LOCAL lock_timeout
+// and statement_timeout and to re-check current_user. A returned error aborts
+// and rolls the transaction back.
+type TxSetup func(ctx context.Context, tx pgx.Tx) error
+
+// SchemaOption configures ApplySchema.
+type SchemaOption func(*schemaConfig)
+
+type schemaConfig struct{ txSetup TxSetup }
+
+// WithTxSetup installs a TxSetup.
+func WithTxSetup(f TxSetup) SchemaOption { return func(c *schemaConfig) { c.txSetup = f } }
+
+// CompiledSchemaVersion is the version ApplySchema records in
+// glovo.glovo_schema_version.
+func CompiledSchemaVersion() int { return schemaVersion }
