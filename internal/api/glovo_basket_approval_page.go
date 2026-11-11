@@ -16,17 +16,16 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -35,6 +34,7 @@ import (
 
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/auth/flowstore"
 	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/workitems"
 )
@@ -66,8 +66,14 @@ import (
 // complete (see enabled), which cmd/api does only with
 // GLOVO_BASKET_UI_ENABLED=true and every dependency present.
 //
-// State is this process's memory, like the decide page: mctl-api runs one
-// replica, and a restart only means "open the link again".
+// State is shared, not this process's memory: mctl-api runs more than one
+// replica, and the start, the ZITADEL callback and the confirm POST may each
+// reach a different one, or a restarted one. The challenge lives in the OAuth
+// flow store (oauth_flow_entries, internal/auth/flowstore) with a TTL, under
+// keys that are bearer secrets kept only as hashes, and every step consumes
+// its entry with the store's atomic Take: an entry is handed out at most once
+// across all replicas. A store that cannot be read refuses the step; it is
+// never read as "no such challenge".
 
 // GlovoBasketApprovalKind is the action kind of a basket approval. The page
 // serves no other kind: a Glovo order approval is not decided here.
@@ -133,6 +139,9 @@ type GlovoBasketApprovalPageOptions struct {
 	Principals auth.PrincipalResolver
 	Authz      *auth.PrincipalAuthz
 	View       GlovoBasketApprovalView
+	// Flow is the shared store of challenges in flight: the OAuth server's
+	// flow store, so every replica sees every challenge.
+	Flow flowstore.Store
 
 	// clock replaces time.Now in tests.
 	clock func() time.Time
@@ -140,7 +149,7 @@ type GlovoBasketApprovalPageOptions struct {
 
 func (o *GlovoBasketApprovalPageOptions) enabled() bool {
 	return o != nil && o.ProviderName != "" && o.Issuer != "" && o.ClientID != "" && o.ClientSecret != "" &&
-		o.BaseURL != "" && o.Principals != nil && o.Authz != nil && o.View != nil
+		o.BaseURL != "" && o.Principals != nil && o.Authz != nil && o.View != nil && o.Flow != nil
 }
 
 const (
@@ -150,8 +159,8 @@ const (
 	basketCallbackPath    = "/glovo/basket/approvals/callback"
 	basketConfirmPath     = "/glovo/basket/approvals/confirm"
 	basketChallengeTTL    = 10 * time.Minute
-	basketMaxChallenges   = 1000
-	basketMaxPerIP        = 3
+	basketMaxLines        = 200
+	basketMaxFeesMinor    = 1_000_000_000
 	basketReasonApprove   = "approved on the Glovo basket approval page"
 	basketReasonReject    = "rejected on the Glovo basket approval page"
 	basketAuditOp         = "glovo-basket-approval-page"
@@ -161,41 +170,56 @@ const (
 // basketApprovalRefRe is an aar_ id as the store mints it.
 var basketApprovalRefRe = regexp.MustCompile(`^aar_[0-9a-f]{32}$`)
 
-type basketPhase int
-
+// Kinds of flow store entry. A key is looked up only within its kind, so a
+// state can never be redeemed as a confirm or as an OAuth server entry.
 const (
-	basketStarted basketPhase = iota
-	basketSignedIn
+	basketKindStart  = "glovo-basket-start"
+	basketKindDecide = "glovo-basket-decide"
 )
 
-type basketChallenge struct {
-	id          string
-	browserHash [32]byte
-	expiresAt   time.Time
-	startedAt   time.Time
-	phase       basketPhase
-	clientIP    string
+// basketStartEntry is a sign-in waiting for ZITADEL. Its key is the OAuth
+// state joined with this browser's cookie, so a callback from another
+// browser finds nothing and spends nothing.
+type basketStartEntry struct {
+	ApprovalRef string    `json:"approval_ref"`
+	StartedAt   time.Time `json:"started_at"`
+	Nonce       string    `json:"nonce"`
+	Verifier    string    `json:"verifier"`
+}
 
-	approvalRef string
-
-	state    string
-	nonce    string
-	verifier string
-
-	identity auth.Identity
-	csrfHash [32]byte
-	// shown is the binding of what the person was shown at sign-in; the
+// basketDecideEntry is a signed-in owner shown a basket. Its key is the
+// challenge id, the one-time CSRF token and this browser's cookie, joined:
+// a confirm missing any of them finds nothing and spends nothing, and the
+// one confirm that has all three takes the entry atomically.
+type basketDecideEntry struct {
+	ApprovalRef string         `json:"approval_ref"`
+	StartedAt   time.Time      `json:"started_at"`
+	Identity    basketIdentity `json:"identity"`
+	// Shown is the binding of what the person was shown at sign-in; the
 	// decision is bound to it and to nothing read later.
-	shown decisionBinding
+	Shown decisionBinding `json:"shown"`
+}
+
+// basketIdentity is the ZITADEL identity a sign-in proved, as stored.
+type basketIdentity struct {
+	Provider string `json:"provider"`
+	Issuer   string `json:"issuer"`
+	Subject  string `json:"subject"`
+	Display  string `json:"display"`
+}
+
+func (b basketIdentity) identity() auth.Identity {
+	return auth.Identity{Provider: b.Provider, Issuer: b.Issuer, Subject: b.Subject, Display: b.Display, Kind: auth.KindHuman}
+}
+
+func basketStartKey(state, browser string) string { return state + "\x00" + browser }
+
+func basketDecideKey(challenge, csrf, browser string) string {
+	return challenge + "\x00" + csrf + "\x00" + browser
 }
 
 type basketDecider struct {
 	opts *GlovoBasketApprovalPageOptions
-
-	mu      sync.Mutex
-	byID    map[string]*basketChallenge
-	byState map[string]*basketChallenge
-
 	lazyOIDCProvider
 	now func() time.Time
 }
@@ -205,68 +229,40 @@ func newBasketDecider(opts *GlovoBasketApprovalPageOptions) *basketDecider {
 	if opts.clock != nil {
 		now = opts.clock
 	}
-	return &basketDecider{
-		opts:             opts,
-		lazyOIDCProvider: lazyOIDCProvider{issuer: opts.Issuer},
-		byID:             map[string]*basketChallenge{},
-		byState:          map[string]*basketChallenge{},
-		now:              now,
-	}
+	return &basketDecider{opts: opts, lazyOIDCProvider: lazyOIDCProvider{issuer: opts.Issuer}, now: now}
 }
 
-func (d *basketDecider) sweepLocked(now time.Time) {
-	for id, c := range d.byID {
-		if now.After(c.expiresAt) {
-			d.dropLocked(id, c)
-		}
+// put stores v under (kind, key) for ttl.
+func (d *basketDecider) put(ctx context.Context, kind, key string, v any, ttl time.Duration) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
 	}
-	for k, c := range d.byState {
-		if d.byID[c.id] != c || now.After(c.expiresAt) {
-			delete(d.byState, k)
-		}
-	}
+	return d.opts.Flow.Put(ctx, kind, key, b, ttl)
 }
 
-func (d *basketDecider) liveLocked(c *basketChallenge, phase basketPhase, now time.Time) bool {
-	return d.byID[c.id] == c && c.phase == phase && !now.After(c.expiresAt)
-}
-
-func (d *basketDecider) dropLocked(id string, c *basketChallenge) {
-	delete(d.byID, id)
-	delete(d.byState, c.state)
-}
-
-func (d *basketDecider) abandon(c *basketChallenge) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.byID[c.id] == c {
-		d.dropLocked(c.id, c)
+// take consumes the entry under (kind, key) into v. found is false only when
+// the store answered that no live entry exists; err is a store that could
+// not be read, which the caller must refuse on, never read as absent.
+func (d *basketDecider) take(ctx context.Context, kind, key string, v any) (found bool, err error) {
+	b, found, err := d.opts.Flow.Take(ctx, kind, key)
+	if err != nil || !found {
+		return false, err
 	}
+	if err := json.Unmarshal(b, v); err != nil {
+		return false, fmt.Errorf("glovo basket approval: %s entry unreadable: %w", kind, err)
+	}
+	return true, nil
 }
 
-// capSourceLocked makes room for one more challenge from ip by dropping its
-// oldest one still waiting for ZITADEL; false when all of ip's are signed in.
-func (d *basketDecider) capSourceLocked(ip string) bool {
-	for {
-		mine := 0
-		var oldest *basketChallenge
-		for _, c := range d.byID {
-			if c.clientIP != ip {
-				continue
-			}
-			mine++
-			if c.phase == basketStarted && (oldest == nil || c.startedAt.Before(oldest.startedAt)) {
-				oldest = c
-			}
-		}
-		if mine < basketMaxPerIP {
-			return true
-		}
-		if oldest == nil {
-			return false
-		}
-		d.dropLocked(oldest.id, oldest)
-	}
+// remaining is what is left of a challenge's ten minutes.
+func (d *basketDecider) remaining(startedAt time.Time) time.Duration {
+	return startedAt.Add(basketChallengeTTL).Sub(d.now())
+}
+
+func (d *basketDecider) storeDown(w http.ResponseWriter, err error) {
+	slog.Warn("glovo basket approval: flow store unavailable", "error", err)
+	d.failed(w, http.StatusServiceUnavailable, "The approval page cannot reach its store right now; nothing was decided. Try again in a few minutes.")
 }
 
 func (d *basketDecider) oauthConfig(p *oidc.Provider) *oauth2.Config {
@@ -279,13 +275,13 @@ func (d *basketDecider) oauthConfig(p *oidc.Provider) *oauth2.Config {
 	}
 }
 
-func basketBrowserMatches(r *http.Request, c *basketChallenge) bool {
+// basketBrowser is this browser's cookie, "" when it has none.
+func basketBrowser(r *http.Request) string {
 	ck, err := r.Cookie(basketCookieName)
-	if err != nil || ck.Value == "" {
-		return false
+	if err != nil {
+		return ""
 	}
-	sum := sha256.Sum256([]byte(ck.Value))
-	return subtle.ConstantTimeCompare(sum[:], c.browserHash[:]) == 1
+	return ck.Value
 }
 
 func setBasketCookie(w http.ResponseWriter, value string, maxAge int) {
@@ -404,40 +400,24 @@ func (h *Handlers) handleGlovoBasketApprovalStart(w http.ResponseWriter, r *http
 		return
 	}
 	browser, err1 := randomLinkToken()
-	id, err2 := randomLinkToken()
-	state, err3 := randomLinkToken()
-	nonce, err4 := randomLinkToken()
-	if err := errors.Join(err1, err2, err3, err4); err != nil {
+	state, err2 := randomLinkToken()
+	nonce, err3 := randomLinkToken()
+	if err := errors.Join(err1, err2, err3); err != nil {
 		d.failed(w, http.StatusInternalServerError, "Internal error.")
 		return
 	}
-	now := d.now()
-	ip, _ := keyByTrustedIP(r)
-	c := &basketChallenge{
-		id: id, browserHash: sha256.Sum256([]byte(browser)), expiresAt: now.Add(basketChallengeTTL),
-		startedAt: now, clientIP: ip, approvalRef: ref,
-		state: state, nonce: nonce, verifier: oauth2.GenerateVerifier(),
-	}
-	d.mu.Lock()
-	d.sweepLocked(now)
-	if !d.capSourceLocked(ip) {
-		d.mu.Unlock()
-		d.failed(w, http.StatusTooManyRequests, "Too many approvals in progress from your network; finish one or try again in a few minutes.")
+	entry := basketStartEntry{ApprovalRef: ref, StartedAt: d.now(), Nonce: nonce, Verifier: oauth2.GenerateVerifier()}
+	// Abuse is bounded by the route's per-IP rate limit and the entry's TTL;
+	// the store's GC drops what is never finished.
+	if err := d.put(r.Context(), basketKindStart, basketStartKey(state, browser), entry, basketChallengeTTL); err != nil {
+		d.storeDown(w, err)
 		return
 	}
-	if len(d.byID) >= basketMaxChallenges {
-		d.mu.Unlock()
-		d.failed(w, http.StatusServiceUnavailable, "Too many approvals in progress; try again in a few minutes.")
-		return
-	}
-	d.byID[c.id] = c
-	d.byState[c.state] = c
-	d.mu.Unlock()
 
 	setBasketCookie(w, browser, int(basketChallengeTTL.Seconds()))
 	// prompt=login: the person signs in now, in this browser. max_age=0
 	// makes auth_time a REQUIRED claim (OIDC Core 3.1.2.1), checked below.
-	authURL := d.oauthConfig(prov).AuthCodeURL(state, oauth2.S256ChallengeOption(c.verifier), oidc.Nonce(nonce),
+	authURL := d.oauthConfig(prov).AuthCodeURL(state, oauth2.S256ChallengeOption(entry.Verifier), oidc.Nonce(nonce),
 		oauth2.SetAuthURLParam("prompt", "login"), oauth2.SetAuthURLParam("max_age", "0"))
 	http.Redirect(w, r, authURL, http.StatusSeeOther)
 }
@@ -563,10 +543,19 @@ func basketTableOf(s *GlovoBasketApprovalSnapshot) (*basketTable, error) {
 	if len(s.Lines) == 0 {
 		return nil, errors.New("empty basket")
 	}
+	if len(s.Lines) > basketMaxLines {
+		return nil, errors.New("too many lines")
+	}
 	if !currencyRe.MatchString(s.Currency) {
 		return nil, errors.New("malformed currency")
 	}
+	if s.FeesMinor < 0 || s.FeesMinor > basketMaxFeesMinor || s.TotalMinor < 0 {
+		return nil, errors.New("negative or oversized fees or total")
+	}
 	t := &basketTable{Currency: s.Currency}
+	// Every bound is checked before it is multiplied or added: a line is at
+	// most 1e6 * 1e9 = 1e15, so 200 of them and the fees stay far below
+	// MaxInt64, and the explicit check below holds even if a bound moves.
 	var sum int64
 	for _, l := range s.Lines {
 		if l.Quantity <= 0 || l.UnitPriceMinor < 0 || l.LineTotalMinor < 0 {
@@ -575,10 +564,13 @@ func basketTableOf(s *GlovoBasketApprovalSnapshot) (*basketTable, error) {
 		if l.Quantity > 1_000_000 || l.UnitPriceMinor > 1_000_000_000 || l.Quantity*l.UnitPriceMinor != l.LineTotalMinor {
 			return nil, errors.New("line total mismatch")
 		}
+		if sum > math.MaxInt64-l.LineTotalMinor {
+			return nil, errors.New("basket total overflows")
+		}
 		sum += l.LineTotalMinor
 		t.Lines = append(t.Lines, basketTableLine{Name: l.Name, Quantity: l.Quantity, Unit: formatMinor(l.UnitPriceMinor), Total: formatMinor(l.LineTotalMinor)})
 	}
-	if s.FeesMinor < 0 || sum+s.FeesMinor != s.TotalMinor {
+	if sum > math.MaxInt64-s.FeesMinor || sum+s.FeesMinor != s.TotalMinor {
 		return nil, errors.New("basket total mismatch")
 	}
 	if s.FeesMinor > 0 {
@@ -629,25 +621,23 @@ func (h *Handlers) handleGlovoBasketApprovalCallback(w http.ResponseWriter, r *h
 		return
 	}
 	q := r.URL.Query()
-	d.mu.Lock()
-	now := d.now()
-	d.sweepLocked(now)
-	c, ok := d.byState[q.Get("state")]
-	valid := ok && d.liveLocked(c, basketStarted, now) && basketBrowserMatches(r, c)
-	if valid {
-		delete(d.byState, c.state)
-	}
-	d.mu.Unlock()
-	if !valid {
-		d.failed(w, http.StatusBadRequest, "This sign-in is unknown, expired, started in another browser, or replaced by a newer one started in this browser.")
+	state, browser := q.Get("state"), basketBrowser(r)
+	if state == "" || browser == "" {
+		d.failed(w, http.StatusBadRequest, basketUnknownSignIn)
 		return
 	}
-	advanced := false
-	defer func() {
-		if !advanced {
-			d.abandon(c)
-		}
-	}()
+	// Consumed now, on whichever replica the callback reached: a replayed
+	// callback finds nothing.
+	var c basketStartEntry
+	found, err := d.take(r.Context(), basketKindStart, basketStartKey(state, browser), &c)
+	if err != nil {
+		d.storeDown(w, err)
+		return
+	}
+	if !found || d.remaining(c.StartedAt) <= 0 {
+		d.failed(w, http.StatusBadRequest, basketUnknownSignIn)
+		return
+	}
 	if q.Get("error") != "" {
 		d.failed(w, http.StatusBadRequest, "ZITADEL refused the sign-in.")
 		return
@@ -662,7 +652,7 @@ func (h *Handlers) handleGlovoBasketApprovalCallback(w http.ResponseWriter, r *h
 		d.failed(w, http.StatusBadGateway, "ZITADEL is not reachable right now.")
 		return
 	}
-	tok, err := d.oauthConfig(prov).Exchange(r.Context(), code, oauth2.VerifierOption(c.verifier))
+	tok, err := d.oauthConfig(prov).Exchange(r.Context(), code, oauth2.VerifierOption(c.Verifier))
 	if err != nil {
 		slog.Warn("glovo basket approval: ZITADEL code exchange failed", "error", err)
 		d.failed(w, http.StatusBadGateway, "Could not complete the ZITADEL sign-in.")
@@ -680,11 +670,11 @@ func (h *Handlers) handleGlovoBasketApprovalCallback(w http.ResponseWriter, r *h
 		AuthTime          int64  `json:"auth_time"`
 		PreferredUsername string `json:"preferred_username"`
 	}
-	if err := idt.Claims(&claims); err != nil || subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(c.nonce)) != 1 {
+	if err := idt.Claims(&claims); err != nil || subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(c.Nonce)) != 1 {
 		d.failed(w, http.StatusBadRequest, "The ZITADEL sign-in does not belong to this approval.")
 		return
 	}
-	if claims.AuthTime == 0 || time.Unix(claims.AuthTime, 0).Before(c.startedAt.Add(-time.Minute)) {
+	if claims.AuthTime == 0 || time.Unix(claims.AuthTime, 0).Before(c.StartedAt.Add(-time.Minute)) {
 		d.failed(w, http.StatusBadRequest, "ZITADEL did not report a fresh sign-in for this approval.")
 		return
 	}
@@ -692,16 +682,17 @@ func (h *Handlers) handleGlovoBasketApprovalCallback(w http.ResponseWriter, r *h
 	if display == "" {
 		display = idt.Subject
 	}
-	id := auth.Identity{Provider: d.opts.ProviderName, Issuer: idt.Issuer, Subject: idt.Subject, Display: display, Kind: auth.KindHuman}
+	stored := basketIdentity{Provider: d.opts.ProviderName, Issuer: idt.Issuer, Subject: idt.Subject, Display: display}
+	id := stored.identity()
 	user, err := d.signedInUser(r.Context(), id)
 	if err != nil {
-		h.auditBasketPage(r, nil, id, c.approvalRef, "denied", "sign-in refused")
+		h.auditBasketPage(r, nil, id, c.ApprovalRef, "denied", "sign-in refused")
 		d.failed(w, http.StatusNotFound, basketNotFoundMessage)
 		return
 	}
-	shown, ref := h.readBasketApproval(r, d, user, c.approvalRef)
+	shown, ref := h.readBasketApproval(r, d, user, c.ApprovalRef)
 	if ref != nil {
-		h.auditBasketPage(r, user, id, c.approvalRef, "denied", ref.audit)
+		h.auditBasketPage(r, user, id, c.ApprovalRef, "denied", ref.audit)
 		d.failed(w, ref.status, ref.msg)
 		return
 	}
@@ -719,25 +710,57 @@ func (h *Handlers) handleGlovoBasketApprovalCallback(w http.ResponseWriter, r *h
 		d.renderPage(w, http.StatusOK, "This basket is "+state, append(shown.lines(display), "There is nothing left to decide."), page)
 		return
 	}
-	csrf, err := randomLinkToken()
-	if err != nil {
+	// The decision handler requires live developer membership of the
+	// binding's team. Asked here too, so a click that would be refused is
+	// never offered.
+	if mem := h.basketMembership(user, shown.snap.Tenant); mem.refused() {
+		h.auditBasketPage(r, user, id, c.ApprovalRef, mem.auditStatus, "membership: "+mem.detail)
+		if mem.status != http.StatusForbidden {
+			d.failed(w, http.StatusServiceUnavailable, "Your membership of the team cannot be checked right now; try again later.")
+			return
+		}
+		d.renderPage(w, http.StatusForbidden, "You cannot decide this basket", append(shown.lines(display),
+			basketNotMemberMessage(shown.snap.Tenant)), page)
+		return
+	}
+	left := d.remaining(c.StartedAt)
+	challenge, err1 := randomLinkToken()
+	csrf, err2 := randomLinkToken()
+	if err := errors.Join(err1, err2); err != nil {
 		d.failed(w, http.StatusInternalServerError, "Internal error.")
 		return
 	}
-	d.mu.Lock()
-	live := d.liveLocked(c, basketStarted, d.now())
-	if live {
-		c.identity, c.csrfHash, c.phase, c.shown = id, sha256.Sum256([]byte(csrf)), basketSignedIn, shown.binding()
-		advanced = true
-	}
-	d.mu.Unlock()
-	if !live {
+	if left <= 0 {
 		d.failed(w, http.StatusBadRequest, "This approval page expired while ZITADEL was being verified.")
 		return
 	}
-	page.Decide = &struct{ Action, Challenge, CSRF string }{Action: basketConfirmPath, Challenge: c.id, CSRF: csrf}
+	entry := basketDecideEntry{ApprovalRef: c.ApprovalRef, StartedAt: c.StartedAt, Identity: stored, Shown: shown.binding()}
+	if err := d.put(r.Context(), basketKindDecide, basketDecideKey(challenge, csrf, browser), entry, left); err != nil {
+		d.storeDown(w, err)
+		return
+	}
+	page.Decide = &struct{ Action, Challenge, CSRF string }{Action: basketConfirmPath, Challenge: challenge, CSRF: csrf}
 	d.renderPage(w, http.StatusOK, "Approve or reject this basket", append(shown.lines(display),
 		"Approving records your approval of exactly this revision. It orders, pays and sends nothing."), page)
+}
+
+const basketUnknownSignIn = "This sign-in is unknown, expired, already used, started in another browser, or replaced by a newer one started in this browser."
+
+func basketNotMemberMessage(tenant string) string {
+	return "You are not a developer of team " + tenant + " any more, so you cannot approve or reject this basket. Nothing was decided. Ask an admin of the team to restore your membership, then open the approval link again."
+}
+
+// basketMembership is the decision handler's live membership check
+// (glovoOwnerCheck), asked by the page before it offers or passes on a
+// click. It decides nothing the handler would not: the handler asks again.
+func (h *Handlers) basketMembership(user *auth.User, tenant string) roleRefusal {
+	var read func() ([][]string, error)
+	if h.opts.TenantAuthzMode == TenantAuthzPrincipal && h.opts.PrincipalMembership != nil {
+		prn := user.PrincipalID()
+		read = func() ([][]string, error) { return h.opts.PrincipalMembership.MemberRolesForPrincipal(tenant, prn) }
+	}
+	return decideWrittenRole(user.PrincipalID(), "principal membership reader", tenant, glovoMinDeciderRole,
+		"deciding a Glovo basket approval", read)
 }
 
 // handleGlovoBasketApprovalConfirm: POST /glovo/basket/approvals/confirm.
@@ -756,56 +779,76 @@ func (h *Handlers) handleGlovoBasketApprovalConfirm(w http.ResponseWriter, r *ht
 		d.failed(w, http.StatusBadRequest, "Choose Approve or Reject.")
 		return
 	}
-	sum := sha256.Sum256([]byte(r.PostForm.Get("csrf")))
-	d.mu.Lock()
-	now := d.now()
-	d.sweepLocked(now)
-	c, ok := d.byID[r.PostForm.Get("challenge")]
-	valid := ok && d.liveLocked(c, basketSignedIn, now) && basketBrowserMatches(r, c) &&
-		subtle.ConstantTimeCompare(sum[:], c.csrfHash[:]) == 1
-	if valid {
-		// Used once, whatever happens next: a double click or a replayed
-		// form finds nothing.
-		d.dropLocked(c.id, c)
-	}
-	d.mu.Unlock()
-	setBasketCookie(w, "", -1)
-	if !valid {
-		d.failed(w, http.StatusBadRequest, "This approval page is unknown, expired, already used, or was opened in another browser.")
+	challenge, csrf, browser := r.PostForm.Get("challenge"), r.PostForm.Get("csrf"), basketBrowser(r)
+	if challenge == "" || csrf == "" || browser == "" {
+		d.failed(w, http.StatusBadRequest, basketUnknownConfirm)
 		return
 	}
+	// Used once, whatever happens next, across every replica: the store's
+	// Take hands the entry to exactly one confirm, so a double click, a
+	// replayed form or a race on two replicas finds nothing. A forged or
+	// cross-browser post names another key and spends nothing, and keeps
+	// this browser's cookie.
+	var c basketDecideEntry
+	found, err := d.take(r.Context(), basketKindDecide, basketDecideKey(challenge, csrf, browser), &c)
+	if err != nil {
+		d.storeDown(w, err)
+		return
+	}
+	if !found || d.remaining(c.StartedAt) <= 0 {
+		d.failed(w, http.StatusBadRequest, basketUnknownConfirm)
+		return
+	}
+	setBasketCookie(w, "", -1)
+	id := c.Identity.identity()
 	// Resolved and read again: a principal disabled, a membership lost or a
 	// basket revised since the sign-in decides now.
-	user, err := d.signedInUser(r.Context(), c.identity)
+	user, err := d.signedInUser(r.Context(), id)
 	if err != nil {
-		h.auditBasketPage(r, nil, c.identity, c.approvalRef, "denied", "sign-in refused")
+		h.auditBasketPage(r, nil, id, c.ApprovalRef, "denied", "sign-in refused")
 		d.failed(w, http.StatusNotFound, basketNotFoundMessage)
 		return
 	}
-	shown, ref := h.readBasketApproval(r, d, user, c.approvalRef)
+	shown, ref := h.readBasketApproval(r, d, user, c.ApprovalRef)
 	if ref != nil {
-		h.auditBasketPage(r, user, c.identity, c.approvalRef, "denied", ref.audit)
+		h.auditBasketPage(r, user, id, c.ApprovalRef, "denied", ref.audit)
 		d.failed(w, ref.status, ref.msg)
 		return
 	}
-	if shown.superseded() || shown.binding() != c.shown {
-		h.auditBasketPage(r, user, c.identity, c.approvalRef, "denied", "basket changed since it was shown")
+	if shown.superseded() || shown.binding() != c.Shown {
+		h.auditBasketPage(r, user, id, c.ApprovalRef, "denied", "basket changed since it was shown")
 		d.failed(w, http.StatusConflict, "The basket or its approval changed after you were shown it; nothing was decided.")
 		return
 	}
 	if !shown.decidable(d.now()) {
-		h.auditBasketPage(r, user, c.identity, c.approvalRef, "denied", "not pending")
+		h.auditBasketPage(r, user, id, c.ApprovalRef, "denied", "not pending")
 		d.failed(w, http.StatusConflict, "This approval is already "+basketStateWord(shown.state)+" or has expired; nothing was decided.")
+		return
+	}
+	if mem := h.basketMembership(user, shown.snap.Tenant); mem.refused() {
+		h.auditBasketPage(r, user, id, c.ApprovalRef, mem.auditStatus, "membership: "+mem.detail)
+		if mem.status != http.StatusForbidden {
+			d.failed(w, http.StatusServiceUnavailable, "Your membership of the team cannot be checked right now; nothing was decided. Try again later.")
+			return
+		}
+		d.failed(w, http.StatusForbidden, basketNotMemberMessage(shown.snap.Tenant))
 		return
 	}
 	body := map[string]any{"decision": workitems.DecisionDeny, "reason": basketReasonReject}
 	if decision == "approve" {
-		body = map[string]any{"decision": workitems.DecisionApprove, "reason": basketReasonApprove, "binding": c.shown}
+		body = map[string]any{"decision": workitems.DecisionApprove, "reason": basketReasonApprove, "binding": c.Shown}
 	}
-	status, resp := h.callAs(r, user, http.MethodPost, "id", c.approvalRef, body, h.DecideActionApproval)
+	status, resp := h.callAs(r, user, http.MethodPost, "id", c.ApprovalRef, body, h.DecideActionApproval)
 	if status != http.StatusOK {
-		h.auditBasketPage(r, user, c.identity, c.approvalRef, "failed", decision+": "+errorText(resp))
-		d.failed(w, status, "The "+decision+" was refused: "+errorText(resp)+".")
+		h.auditBasketPage(r, user, id, c.ApprovalRef, "failed", decision+": "+errorText(resp))
+		msg := "The " + decision + " was refused: " + errorText(resp) + "."
+		if status == http.StatusForbidden {
+			// The handler's one answer for every non-decider names admins,
+			// which is not this page's audience. Its checks ran after ours:
+			// what changed in between is the owner's standing.
+			msg = "You may no longer decide this basket: your ownership or your membership of team " + shown.snap.Tenant + " changed. Nothing was decided."
+		}
+		d.failed(w, status, msg)
 		return
 	}
 	var got struct {
@@ -814,15 +857,17 @@ func (h *Handlers) handleGlovoBasketApprovalConfirm(w http.ResponseWriter, r *ht
 		} `json:"approval"`
 	}
 	_ = json.Unmarshal(resp, &got)
-	h.auditBasketPage(r, user, c.identity, c.approvalRef, "succeeded", decision)
+	h.auditBasketPage(r, user, id, c.ApprovalRef, "succeeded", decision)
 	title := "Basket approved"
 	if decision == "reject" {
 		title = "Basket rejected"
 	}
 	shown.state = got.Approval.State
-	d.renderPage(w, http.StatusOK, title, append(shown.lines(c.identity.Display),
+	d.renderPage(w, http.StatusOK, title, append(shown.lines(id.Display),
 		"The assistant that asked can now read this result. Nothing was ordered or paid."), basketPageData{Basket: shown.table})
 }
+
+const basketUnknownConfirm = "This approval page is unknown, expired, already used, or was opened in another browser."
 
 // auditBasketPage records what the page itself decided. Ids only: no
 // product, price or basket content, no token. The decision handler writes

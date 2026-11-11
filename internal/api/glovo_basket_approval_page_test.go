@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/auth/flowstore"
 	"github.com/mctlhq/mctl-api/internal/glovo"
 	"github.com/mctlhq/mctl-api/internal/workitems"
 )
@@ -128,6 +129,7 @@ type basketEnv struct {
 	prins   *fakeSignInPrincipals
 	page    http.Handler
 	pool    *pgxpool.Pool
+	opts    *GlovoBasketApprovalPageOptions
 }
 
 func newBasketEnv(t *testing.T) *basketEnv {
@@ -167,14 +169,60 @@ func newBasketEnv(t *testing.T) *basketEnv {
 		Authz: &auth.PrincipalAuthz{Admins: map[string]bool{basketAdminPRN: true}, Members: noTenants{}},
 		View:  e.view,
 	}
+	// The OAuth server's shared flow store, on the test database: every
+	// replica below reads and writes the same rows.
+	opts.Flow = basketFlowStore(t, e.connStr)
+	e.opts = opts
 	e.h.glovoBasketApproval = newBasketDecider(opts)
-	r := chi.NewRouter()
-	r.Post(basketStartPath, e.h.handleGlovoBasketApprovalStart)
-	r.Get(basketCallbackPath, e.h.handleGlovoBasketApprovalCallback)
-	r.Post(basketConfirmPath, e.h.handleGlovoBasketApprovalConfirm)
-	r.Get(basketPagePrefix+"{approval_ref}", e.h.handleGlovoBasketApprovalPage)
-	e.page = r
+	e.page = basketRouter(e.h)
 	return e
+}
+
+// basketFlowStore is one flow store for the whole test binary, on a small
+// pool whose idle connections close at once: a store per test, or a pool
+// kept open, would hold the test database's connections for the rest of
+// the package.
+func basketFlowStore(t *testing.T, connStr string) flowstore.Store {
+	t.Helper()
+	basketFlow.once.Do(func() {
+		sep := "?"
+		if strings.Contains(connStr, "?") {
+			sep = "&"
+		}
+		basketFlow.store, basketFlow.err = flowstore.NewPostgresStore(context.Background(), connStr+sep+"pool_max_conns=2&pool_max_conn_idle_time=1s&pool_health_check_period=1s")
+	})
+	if basketFlow.err != nil {
+		t.Fatal(basketFlow.err)
+	}
+	return basketFlow.store
+}
+
+var basketFlow struct {
+	once  sync.Once
+	store *flowstore.PostgresStore
+	err   error
+}
+
+func basketRouter(h *Handlers) http.Handler {
+	r := chi.NewRouter()
+	r.Post(basketStartPath, h.handleGlovoBasketApprovalStart)
+	r.Get(basketCallbackPath, h.handleGlovoBasketApprovalCallback)
+	r.Post(basketConfirmPath, h.handleGlovoBasketApprovalConfirm)
+	r.Get(basketPagePrefix+"{approval_ref}", h.handleGlovoBasketApprovalPage)
+	return r
+}
+
+// replica is another mctl-api process: its own Handlers and page, nothing in
+// memory shared with e.page, the same database (ledger, approvals, flow
+// store) and the same ZITADEL. edit adjusts its options (a clock, a store).
+func (e *basketEnv) replica(edit ...func(*GlovoBasketApprovalPageOptions)) http.Handler {
+	h := &Handlers{opts: e.h.opts}
+	o := *e.opts
+	for _, f := range edit {
+		f(&o)
+	}
+	h.glovoBasketApproval = newBasketDecider(&o)
+	return basketRouter(h)
 }
 
 // basketApproval opens a pending basket aar_ owned by owner in tenant, with
@@ -208,6 +256,10 @@ func (e *basketEnv) pending(key string) string {
 }
 
 func (e *basketEnv) send(method, target string, ck *http.Cookie, form url.Values) *httptest.ResponseRecorder {
+	return e.sendTo(e.page, method, target, ck, form)
+}
+
+func (e *basketEnv) sendTo(page http.Handler, method, target string, ck *http.Cookie, form url.Values) *httptest.ResponseRecorder {
 	var req *http.Request
 	if form != nil {
 		req = httptest.NewRequest(method, target, strings.NewReader(form.Encode()))
@@ -219,7 +271,7 @@ func (e *basketEnv) send(method, target string, ck *http.Cookie, form url.Values
 		req.AddCookie(ck)
 	}
 	rec := httptest.NewRecorder()
-	e.page.ServeHTTP(rec, req)
+	page.ServeHTTP(rec, req)
 	return rec
 }
 
@@ -234,7 +286,16 @@ func (e *basketEnv) signIn(ref, subject string) (*httptest.ResponseRecorder, *ht
 	if len(page.Result().Cookies()) != 0 || strings.Contains(page.Body.String(), "Synthetic") {
 		e.t.Fatalf("the link page set state or showed the basket")
 	}
-	start := e.send(http.MethodPost, basketStartPath, nil, url.Values{"approval_ref": {ref}})
+	ck, state := e.startOn(e.page, ref)
+	rec, form := e.callbackOn(e.page, ck, state, subject)
+	return rec, ck, form
+}
+
+// startOn posts the sign-in form to page and plays ZITADEL's side of the
+// authorize request. It returns the browser's cookie and the OAuth state.
+func (e *basketEnv) startOn(page http.Handler, ref string) (*http.Cookie, string) {
+	e.t.Helper()
+	start := e.sendTo(page, http.MethodPost, basketStartPath, nil, url.Values{"approval_ref": {ref}})
 	if start.Code != http.StatusSeeOther {
 		e.t.Fatalf("start = %d %s", start.Code, start.Body.String())
 	}
@@ -256,20 +317,32 @@ func (e *basketEnv) signIn(ref, subject string) (*httptest.ResponseRecorder, *ht
 	}
 	e.idp.mu.Lock()
 	e.idp.challenge, e.idp.nonce = q.Get("code_challenge"), q.Get("nonce")
+	e.idp.mu.Unlock()
+	return ck, q.Get("state")
+}
+
+// callbackOn comes back from ZITADEL as subject to page.
+func (e *basketEnv) callbackOn(page http.Handler, ck *http.Cookie, state, subject string) (*httptest.ResponseRecorder, url.Values) {
+	e.t.Helper()
+	e.idp.mu.Lock()
 	e.idp.extra = map[string]any{"sub": subject}
 	e.idp.mu.Unlock()
-	rec := e.send(http.MethodGet, basketCallbackPath+"?code=z-code&state="+url.QueryEscape(q.Get("state")), ck, nil)
+	rec := e.sendTo(page, http.MethodGet, basketCallbackPath+"?code=z-code&state="+url.QueryEscape(state), ck, nil)
 	form := url.Values{}
 	for _, m := range basketField.FindAllStringSubmatch(rec.Body.String(), -1) {
 		form.Set(m[1], html.UnescapeString(m[2]))
 	}
-	return rec, ck, form
+	return rec, form
 }
 
 var basketField = regexp.MustCompile(`name="(challenge|csrf)" value="([^"]+)"`)
 
 func (e *basketEnv) confirm(ck *http.Cookie, form url.Values, decision string) *httptest.ResponseRecorder {
-	return e.send(http.MethodPost, basketConfirmPath, ck, url.Values{
+	return e.confirmOn(e.page, ck, form, decision)
+}
+
+func (e *basketEnv) confirmOn(page http.Handler, ck *http.Cookie, form url.Values, decision string) *httptest.ResponseRecorder {
+	return e.sendTo(page, http.MethodPost, basketConfirmPath, ck, url.Values{
 		"challenge": {form.Get("challenge")}, "csrf": {form.Get("csrf")}, "decision": {decision},
 	})
 }
@@ -519,6 +592,18 @@ func TestGlovoBasketPage_RefusesInconsistentSnapshots(t *testing.T) {
 		"basket total wrong":                func(s *GlovoBasketApprovalSnapshot) { s.TotalMinor = 1 },
 		"no lines":                          func(s *GlovoBasketApprovalSnapshot) { s.Lines = nil },
 		"malformed currency":                func(s *GlovoBasketApprovalSnapshot) { s.Currency = "<b>" },
+		"too many lines": func(s *GlovoBasketApprovalSnapshot) {
+			s.Lines, s.TotalMinor = nil, s.FeesMinor
+			for i := 0; i <= basketMaxLines; i++ {
+				s.Lines = append(s.Lines, GlovoBasketLine{ProductID: "p", Name: "Synthetic", Quantity: 1, UnitPriceMinor: 1, LineTotalMinor: 1})
+				s.TotalMinor++
+			}
+		},
+		"oversized fees": func(s *GlovoBasketApprovalSnapshot) {
+			s.TotalMinor += basketMaxFeesMinor + 1 - s.FeesMinor
+			s.FeesMinor = basketMaxFeesMinor + 1
+		},
+		"negative total": func(s *GlovoBasketApprovalSnapshot) { s.TotalMinor = -1 },
 	} {
 		id := e.pending("bad-" + strings.ReplaceAll(name, " ", "-"))
 		e.view.edit(id, mut)
@@ -581,6 +666,9 @@ func TestGlovoBasketPage_ConfirmNeedsCookieAndCSRF(t *testing.T) {
 	forged := url.Values{"challenge": {form.Get("challenge")}, "csrf": {"guess"}}
 	if res := e.confirm(ck, forged, "approve"); res.Code != http.StatusBadRequest {
 		t.Errorf("wrong csrf = %d", res.Code)
+	} else if len(res.Result().Cookies()) != 0 {
+		// A forged post must not log the real browser out of its decision.
+		t.Errorf("an invalid confirm touched the cookie: %v", res.Result().Cookies())
 	}
 	if res := e.confirm(nil, form, "approve"); res.Code != http.StatusBadRequest {
 		t.Errorf("no cookie = %d", res.Code)
@@ -595,8 +683,12 @@ func TestGlovoBasketPage_ConfirmNeedsCookieAndCSRF(t *testing.T) {
 	if e.ledger.count() != 0 || e.state(id) != workitems.ApprovalPending {
 		t.Fatal("a forged confirm decided")
 	}
-	if res := e.confirm(ck, form, "approve"); res.Code != http.StatusOK {
+	res := e.confirm(ck, form, "approve")
+	if res.Code != http.StatusOK {
 		t.Fatalf("the real confirm = %d %s", res.Code, res.Body.String())
+	}
+	if cs := res.Result().Cookies(); len(cs) != 1 || cs[0].Name != basketCookieName || cs[0].MaxAge >= 0 {
+		t.Errorf("the used confirm did not clear the cookie: %v", cs)
 	}
 }
 
@@ -620,10 +712,13 @@ func TestGlovoBasketPage_DarkByDefault(t *testing.T) {
 	full := GlovoBasketApprovalPageOptions{
 		ProviderName: "zitadel", Issuer: "https://auth.example", ClientID: "c", ClientSecret: "s",
 		BaseURL: "https://api.example", Principals: &fakeSignInPrincipals{}, Authz: &auth.PrincipalAuthz{}, View: view,
+		Flow: &flowstore.PostgresStore{},
 	}
 	incomplete := full
 	incomplete.View = nil
-	for name, o := range map[string]*GlovoBasketApprovalPageOptions{"nil": nil, "no view": &incomplete} {
+	noFlow := full
+	noFlow.Flow = nil
+	for name, o := range map[string]*GlovoBasketApprovalPageOptions{"nil": nil, "no view": &incomplete, "no flow store": &noFlow} {
 		for _, req := range []*http.Request{
 			httptest.NewRequest(http.MethodGet, ref, nil),
 			httptest.NewRequest(http.MethodPost, basketStartPath, nil),

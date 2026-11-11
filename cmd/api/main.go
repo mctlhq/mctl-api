@@ -1444,7 +1444,7 @@ func main() {
 		OAuthServer:                    oauthServer,
 		IdentityLink:                   identityLinkOptions(cfg, principalStore, principalCache, oauthServer, ghValidator),
 		DevLoopDecide:                  devLoopDecideOptions(cfg, principalResolver, principalAuthz),
-		GlovoBasketApproval:            glovoBasketApprovalOptions(cfg, glovoBasketUIEnvFromOS(), principalResolver, principalAuthz, nil),
+		GlovoBasketApproval:            glovoBasketApprovalOptions(cfg, glovoBasketUIEnvFromOS(), principalResolver, principalAuthz, nil, oauthFlowStore(oauthServer)),
 		OAuthUpstream:                  cfg.oauthUpstreamMode(),
 		OAuthZitadel:                   oauthZitadelOptions(cfg, principalStore, oauthServer),
 		SurfaceZitadel:                 surfaceZitadelOptions(cfg),

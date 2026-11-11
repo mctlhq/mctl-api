@@ -6,6 +6,7 @@ import (
 
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/auth/flowstore"
 	"github.com/mctlhq/mctl-api/internal/principals"
 )
 
@@ -26,11 +27,12 @@ func TestGlovoBasketApprovalOptionsGating(t *testing.T) {
 	var pr auth.PrincipalResolver = principals.NewResolver(&principals.Store{}, nil, false)
 	authz := &auth.PrincipalAuthz{Admins: map[string]bool{}}
 	var view mctlapi.GlovoBasketApprovalView = stubBasketView{}
+	var flow flowstore.Store = &flowstore.PostgresStore{}
 
 	c, env := full()
-	o := glovoBasketApprovalOptions(c, env, pr, authz, view)
+	o := glovoBasketApprovalOptions(c, env, pr, authz, view, flow)
 	if o == nil || o.ProviderName != "zitadel" || o.Issuer != "https://auth.example" || o.ClientID != "id" ||
-		o.ClientSecret != "secret" || o.BaseURL != "https://api.example" || o.Principals != pr || o.Authz != authz || o.View != view {
+		o.ClientSecret != "secret" || o.BaseURL != "https://api.example" || o.Principals != pr || o.Authz != authz || o.View != view || o.Flow != flow {
 		t.Fatalf("full config: %+v, want the page on", o)
 	}
 	type parts struct {
@@ -39,6 +41,7 @@ func TestGlovoBasketApprovalOptionsGating(t *testing.T) {
 		pr   *auth.PrincipalResolver
 		az   **auth.PrincipalAuthz
 		view *mctlapi.GlovoBasketApprovalView
+		flow *flowstore.Store
 	}
 	off := map[string]func(p parts){
 		"flag off":            func(p parts) { p.env.Enabled = false },
@@ -48,16 +51,20 @@ func TestGlovoBasketApprovalOptionsGating(t *testing.T) {
 		"no principal store":  func(p parts) { *p.pr = nil },
 		"not principal mode":  func(p parts) { *p.az = nil },
 		"no basket view":      func(p parts) { *p.view = nil },
+		"no flow store":       func(p parts) { *p.flow = nil },
 		"federation disabled": func(p parts) { p.c.FederationDisabled = true },
 		"no provider entry":   func(p parts) { p.c.ZitadelLinkProvider = "other" },
 		"malformed providers": func(p parts) { p.c.OIDCProvidersRaw = "{" },
 	}
 	for name, mutate := range off {
 		c, env := full()
-		p, a, v := pr, authz, view
-		mutate(parts{&c, &env, &p, &a, &v})
-		if o := glovoBasketApprovalOptions(c, env, p, a, v); o != nil {
+		p, a, v, f := pr, authz, view, flow
+		mutate(parts{&c, &env, &p, &a, &v, &f})
+		if o := glovoBasketApprovalOptions(c, env, p, a, v, f); o != nil {
 			t.Errorf("%s: %+v, want nil", name, o)
 		}
+	}
+	if oauthFlowStore(nil) != nil || oauthFlowStore(&auth.OAuthServer{}) != nil {
+		t.Error("no OAuth server, or one without a flow store, must give no flow store")
 	}
 }

@@ -21,6 +21,7 @@ import (
 
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/auth/flowstore"
 )
 
 // glovoBasketUIEnv is what turns the Glovo basket approval page on
@@ -45,14 +46,16 @@ func glovoBasketUIEnvFromOS() glovoBasketUIEnv {
 // is off, silently, unless GLOVO_BASKET_UI_ENABLED is exactly "true"; it
 // fails closed on anything else missing, the basket view included. main
 // passes a nil view until the basket store (mctl-api#1006 slice 1) is wired,
-// so the flag alone mounts nothing.
-func glovoBasketApprovalOptions(cfg config, env glovoBasketUIEnv, pr auth.PrincipalResolver, authz *auth.PrincipalAuthz, view mctlapi.GlovoBasketApprovalView) *mctlapi.GlovoBasketApprovalPageOptions {
+// so the flag alone mounts nothing. flow is the OAuth server's shared flow
+// store: without it the page would keep challenges in one replica's memory,
+// so it stays off.
+func glovoBasketApprovalOptions(cfg config, env glovoBasketUIEnv, pr auth.PrincipalResolver, authz *auth.PrincipalAuthz, view mctlapi.GlovoBasketApprovalView, flow flowstore.Store) *mctlapi.GlovoBasketApprovalPageOptions {
 	if !env.Enabled {
 		return nil
 	}
 	opts := &mctlapi.GlovoBasketApprovalPageOptions{
 		ClientID: env.ClientID, ClientSecret: env.ClientSecret,
-		BaseURL: cfg.SelfURL, Principals: pr, Authz: authz, View: view,
+		BaseURL: cfg.SelfURL, Principals: pr, Authz: authz, View: view, Flow: flow,
 	}
 	var missing []string
 	if env.ClientID == "" || env.ClientSecret == "" {
@@ -72,6 +75,9 @@ func glovoBasketApprovalOptions(cfg config, env glovoBasketUIEnv, pr auth.Princi
 	if view == nil {
 		missing = append(missing, "the Glovo basket store")
 	}
+	if flow == nil {
+		missing = append(missing, "the shared OAuth flow store (OAUTH_DB_URL)")
+	}
 	if cfg.FederationDisabled {
 		missing = append(missing, "the federation registry (MCTL_FEDERATION_DISABLED is on)")
 	} else if entries, err := auth.ParseOIDCProviders(cfg.OIDCProvidersRaw); err == nil {
@@ -90,4 +96,13 @@ func glovoBasketApprovalOptions(cfg config, env glovoBasketUIEnv, pr auth.Princi
 	}
 	slog.Info("glovo basket approval page enabled", "provider", opts.ProviderName, "issuer", opts.Issuer)
 	return opts
+}
+
+// oauthFlowStore is the OAuth server's shared flow store, or nil when there
+// is no OAuth server or its store did not start.
+func oauthFlowStore(s *auth.OAuthServer) flowstore.Store {
+	if s == nil {
+		return nil
+	}
+	return s.FlowStore
 }
