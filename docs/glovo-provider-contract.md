@@ -89,7 +89,10 @@ Output (`Intent`, `v = mctl-reorder-intent/v1`):
 - `substitutions`: candidates for the user to confirm. They are never added
   and never counted in the estimate.
 - `excluded`: every other line, with its class and reason codes.
-- The estimated and historical subtotals and the price delta. Fees are not
+- The estimated and historical subtotals and the price delta.
+  `historical_currency` names the currency of the historical figures; when
+  it differs from `currency`, the delta is not computed and the
+  `currency_mismatch_price_delta_unknown` warning is set. Fees are not
   estimated, and the `fees_not_estimated` warning says so.
 - Warnings, for example `native_reorder_unavailable_manual_reconstruction`.
   `native_reorder_allowed = false` does not block a manual reconstruction.
@@ -119,6 +122,11 @@ then material change. A material change is any of:
 - the price of an approved line or a substitution changed (options
   included);
 - an item became unavailable or was removed;
+- the product id now carries another name (`renamed`), because it may be a
+  different item;
+- the product moved into a category the user excluded;
+- the store closed after planning, unless the intent already warned
+  `store_closed`;
 - an option was removed or a required group became unsatisfiable;
 - the store was removed;
 - the currency changed;
@@ -126,6 +134,11 @@ then material change. A material change is any of:
 
 Changes to excluded lines are not material, because the human did not
 approve them.
+
+`Build` and `Revalidate` recompute `CartFingerprint` from the observed cart
+lines. A snapshot whose stored fingerprint is empty or does not match its
+content is treated as unobserved, so an adapter cannot hide a cart change
+behind a stale value.
 
 ## Write protocol (`CartWriter`, not wired)
 

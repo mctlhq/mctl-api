@@ -209,10 +209,17 @@ func CartFingerprint(c CartSnapshot) (string, error) {
 		lines[i] = l
 	}
 	sort.Slice(lines, func(a, b int) bool {
-		if lines[a].ProductID != lines[b].ProductID {
-			return lines[a].ProductID < lines[b].ProductID
+		la, lb := lines[a], lines[b]
+		if la.ProductID != lb.ProductID {
+			return la.ProductID < lb.ProductID
 		}
-		return OptionKey(lines[a].Options) < OptionKey(lines[b].Options)
+		if ka, kb := OptionKey(la.Options), OptionKey(lb.Options); ka != kb {
+			return ka < kb
+		}
+		if la.Quantity != lb.Quantity {
+			return la.Quantity < lb.Quantity
+		}
+		return la.UnitPriceMinor < lb.UnitPriceMinor
 	})
 	body := struct {
 		V        string     `json:"v"`

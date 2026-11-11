@@ -264,7 +264,8 @@ func TestMatchingThresholdAndTies(t *testing.T) {
 			{ID: "prd_x2", StoreID: "st_t", CategoryID: "cat_a", Name: "Tomato Soup Small", PriceMinor: 300, Available: true},
 			{ID: "prd_x3", StoreID: "st_t", CategoryID: "cat_a", Name: "Green Salad Bowl", PriceMinor: 400, Available: true},
 		}}
-	cart := gp.CartSnapshot{Lines: []gp.CartLine{}, Fingerprint: "sha256:empty"}
+	cart := gp.CartSnapshot{Lines: []gp.CartLine{}}
+	cart.Fingerprint, _ = gp.CartFingerprint(cart)
 	run := func(name string) reorder.Intent {
 		in, err := reorder.Build(reorder.Request{Now: now, Order: gp.HistoricalOrder{
 			Summary: gp.OrderSummary{ID: "ord_t", StoreID: "st_t", Currency: "EUR", NativeReorderAllowed: true},
@@ -478,6 +479,85 @@ func TestRevalidateMatrix(t *testing.T) {
 	tampered.EstimatedSubtotalMinor--
 	if r := reorder.Revalidate(tampered, reorder.Snapshot{}, now); r.Verdict != reorder.VerdictTampered {
 		t.Fatalf("tampered: %s", r.Verdict)
+	}
+}
+
+// TestRevalidateSnapshotEdits covers changes the synthetic knobs cannot
+// express: a same-id rename, a retag into an excluded category, a store that
+// closed after planning, and an adapter-supplied cart fingerprint that does
+// not match the cart content.
+func TestRevalidateSnapshotEdits(t *testing.T) {
+	ctx := context.Background()
+	p := provider(t)
+	in := plan(t, p, "ord_synth_0001", reorder.Constraints{ExcludeCategoryTags: []string{"drinks"}})
+	fresh := func() reorder.Snapshot {
+		snap, err := reorder.Gather(ctx, p, "st_synth_burger_01")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return snap
+	}
+	if r := reorder.Revalidate(in, fresh(), now); r.Verdict != reorder.VerdictUnchanged {
+		t.Fatalf("baseline %+v", r)
+	}
+	cases := []struct {
+		name    string
+		edit    func(*reorder.Snapshot)
+		verdict reorder.Verdict
+		changes []reorder.Change
+	}{
+		{"renamed", func(s *reorder.Snapshot) {
+			for i := range s.Catalog.Products {
+				if s.Catalog.Products[i].ID == "prd_fries" {
+					s.Catalog.Products[i].Name = "Vegan Nuggets"
+				}
+			}
+		}, reorder.VerdictMaterialChange, []reorder.Change{{ProductID: "prd_fries", Kind: reorder.ChangeRenamed}}},
+		{"retagged into excluded", func(s *reorder.Snapshot) {
+			for i := range s.Catalog.Categories {
+				if s.Catalog.Categories[i].ID == "cat_sides" {
+					s.Catalog.Categories[i].Tags = []string{"Drinks"}
+				}
+			}
+		}, reorder.VerdictMaterialChange, []reorder.Change{{ProductID: "prd_fries", Kind: reorder.ChangeExcludedCategory}}},
+		{"store closed", func(s *reorder.Snapshot) { s.Catalog.Open = false },
+			reorder.VerdictMaterialChange, []reorder.Change{{Kind: reorder.ChangeStore}}},
+		{"stale cart fingerprint", func(s *reorder.Snapshot) { s.Cart.Lines = []gp.CartLine{} },
+			reorder.VerdictUnknown, []reorder.Change{}},
+		{"empty cart fingerprint", func(s *reorder.Snapshot) { s.Cart.Fingerprint = "" },
+			reorder.VerdictUnknown, []reorder.Change{}},
+	}
+	for _, c := range cases {
+		snap := fresh()
+		c.edit(&snap)
+		if r := reorder.Revalidate(in, snap, now); r.Verdict != c.verdict || !reflect.DeepEqual(r.Changes, c.changes) {
+			t.Errorf("%s: %+v, want %s %+v", c.name, r, c.verdict, c.changes)
+		}
+	}
+	// Build refuses an untrustworthy cart fingerprint as unobserved.
+	snap := fresh()
+	snap.Cart.Fingerprint = ""
+	if _, err := reorder.Build(reorder.Request{Order: order(t, p, "ord_synth_0001"), Now: now}, snap); !errors.Is(err, gp.ErrUnobserved) {
+		t.Fatalf("empty fingerprint: %v", err)
+	}
+	// A closed store already flagged at planning time is not a new change.
+	closed := plan(t, p, "ord_synth_0003", reorder.Constraints{})
+	snap3, _ := reorder.Gather(ctx, p, "st_synth_pizza_01")
+	if r := reorder.Revalidate(closed, snap3, now); r.Verdict != reorder.VerdictUnchanged {
+		t.Fatalf("known-closed store: %+v", r)
+	}
+}
+
+func TestCurrencyMismatchKeepsHistoricalCurrency(t *testing.T) {
+	p := provider(t)
+	o := order(t, p, "ord_synth_0002")
+	o.Summary.Currency = "USD"
+	in, err := reorder.Plan(context.Background(), p, reorder.Request{Order: o, Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in.Currency != "EUR" || in.HistoricalCurrency != "USD" || in.PriceDeltaMinor != 0 || !contains(in.Warnings, reorder.WarnCurrencyMismatch) {
+		t.Fatalf("currency mismatch: cur=%s hist=%s delta=%d %v", in.Currency, in.HistoricalCurrency, in.PriceDeltaMinor, in.Warnings)
 	}
 }
 

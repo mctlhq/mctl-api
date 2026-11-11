@@ -227,16 +227,14 @@ func (p *Provider) check(ctx context.Context, op string) error {
 }
 
 // clone deep-copies v through JSON so a caller can never mutate the fixture.
-func clone[T any](v T) T {
+func clone[T any](v T) (T, error) {
+	var out T
 	raw, err := json.Marshal(v)
 	if err != nil {
-		panic(err) // the fixture types always marshal
+		return out, err
 	}
-	var out T
-	if err := json.Unmarshal(raw, &out); err != nil {
-		panic(err)
-	}
-	return out
+	err = json.Unmarshal(raw, &out)
+	return out, err
 }
 
 // Location implements glovoprovider.Provider.
@@ -285,7 +283,10 @@ func (p *Provider) catalog(storeID string) (gp.Catalog, error) {
 		if c.StoreID != storeID {
 			continue
 		}
-		c = clone(c)
+		c, err := clone(c)
+		if err != nil {
+			return gp.Catalog{}, gp.Unobserved(gp.OpCatalog, err)
+		}
 		products := make([]gp.Product, 0, len(c.Products))
 		for _, pr := range c.Products {
 			if contains(p.scenario.RemovedProducts, pr.ID) {
@@ -390,7 +391,11 @@ func (p *Provider) Order(ctx context.Context, orderID string) (gp.HistoricalOrde
 	}
 	for i := range p.fx.Orders {
 		if o := p.fx.Orders[i]; o.Summary.ID == orderID {
-			return clone(o), nil
+			out, err := clone(o)
+			if err != nil {
+				return gp.HistoricalOrder{}, gp.Unobserved(gp.OpOrder, err)
+			}
+			return out, nil
 		}
 	}
 	return gp.HistoricalOrder{}, gp.Absent(gp.OpOrder)
@@ -401,9 +406,13 @@ func (p *Provider) Cart(ctx context.Context) (gp.CartSnapshot, error) {
 	if err := p.check(ctx, gp.OpCart); err != nil {
 		return gp.CartSnapshot{}, err
 	}
-	c := clone(p.fx.Cart)
+	src := p.fx.Cart
 	if p.scenario.Cart != nil {
-		c = clone(*p.scenario.Cart)
+		src = *p.scenario.Cart
+	}
+	c, err := clone(src)
+	if err != nil {
+		return gp.CartSnapshot{}, gp.Unobserved(gp.OpCart, err)
 	}
 	if c.Lines == nil {
 		c.Lines = []gp.CartLine{}

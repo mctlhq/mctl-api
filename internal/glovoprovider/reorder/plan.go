@@ -202,6 +202,10 @@ func Build(req Request, snap Snapshot) (Intent, error) {
 	if snap.Catalog == nil && !snap.StoreAbsent {
 		return Intent{}, errUnobserved("catalog")
 	}
+	cartFP, ok := observedCartFingerprint(snap.Cart)
+	if !ok {
+		return Intent{}, errUnobserved("cart fingerprint")
+	}
 	if snap.Catalog != nil && snap.Catalog.StoreID != req.Order.Summary.StoreID {
 		return Intent{}, invalidReq("catalog is for another store")
 	}
@@ -217,11 +221,12 @@ func Build(req Request, snap Snapshot) (Intent, error) {
 		SourceOrderID:        req.Order.Summary.ID,
 		StoreID:              req.Order.Summary.StoreID,
 		Currency:             req.Order.Summary.Currency,
+		HistoricalCurrency:   req.Order.Summary.Currency,
 		CreatedAt:            now.Format(time.RFC3339),
 		ExpiresAt:            now.Add(ttl).Format(time.RFC3339),
 		NativeReorderAllowed: req.Order.Summary.NativeReorderAllowed,
 		Constraints:          Constraints{ExcludeCategoryTags: exclude, MaxBudgetMinor: req.Constraints.MaxBudgetMinor},
-		CartFingerprint:      snap.Cart.Fingerprint,
+		CartFingerprint:      cartFP,
 		Lines:                []Line{},
 		Substitutions:        []Substitution{},
 		Excluded:             []Excluded{},

@@ -144,6 +144,7 @@ type Intent struct {
 	SourceOrderID           string         `json:"source_order_id"`
 	StoreID                 string         `json:"store_id"`
 	Currency                string         `json:"currency"`
+	HistoricalCurrency      string         `json:"historical_currency"`
 	CreatedAt               string         `json:"created_at"`
 	ExpiresAt               string         `json:"expires_at"`
 	NativeReorderAllowed    bool           `json:"native_reorder_allowed"`
@@ -189,6 +190,17 @@ func (in Intent) Expired(now time.Time) bool {
 		return true
 	}
 	return !now.Before(exp)
+}
+
+// observedCartFingerprint recomputes the cart fingerprint from the observed
+// content. A snapshot whose stored fingerprint is empty or disagrees with
+// its content is not a trustworthy observation.
+func observedCartFingerprint(c *gp.CartSnapshot) (string, bool) {
+	fp, err := gp.CartFingerprint(*c)
+	if err != nil || fp != c.Fingerprint {
+		return "", false
+	}
+	return fp, true
 }
 
 func errUnobserved(what string) error {

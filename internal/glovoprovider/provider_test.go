@@ -69,6 +69,16 @@ func TestCartFingerprint(t *testing.T) {
 	if a != b || !strings.HasPrefix(a, "sha256:") {
 		t.Fatalf("order or version changed the fingerprint: %s vs %s", a, b)
 	}
+	// Two lines with the same product and options sort by quantity and
+	// price, so their read order cannot change the fingerprint.
+	dupA := gp.CartSnapshot{StoreID: "st_a", Currency: "EUR", Lines: []gp.CartLine{
+		{ProductID: "prd_a", Quantity: 1, UnitPriceMinor: 100}, {ProductID: "prd_a", Quantity: 2, UnitPriceMinor: 90}}}
+	dupB := gp.CartSnapshot{StoreID: "st_a", Currency: "EUR", Lines: []gp.CartLine{dupA.Lines[1], dupA.Lines[0]}}
+	fa, _ := gp.CartFingerprint(dupA)
+	fb, _ := gp.CartFingerprint(dupB)
+	if fa != fb {
+		t.Fatal("duplicate-product lines: order changed the fingerprint")
+	}
 	mutations := map[string]func(*gp.CartSnapshot){
 		"quantity": func(c *gp.CartSnapshot) { c.Lines[1].Quantity = 3 },
 		"price":    func(c *gp.CartSnapshot) { c.Lines[1].UnitPriceMinor = 51 },

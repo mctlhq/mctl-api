@@ -53,6 +53,12 @@ const (
 	ChangeCartState    ChangeKind = "cart_state"
 	ChangeStore        ChangeKind = "store"
 	ChangeCurrency     ChangeKind = "currency"
+	// ChangeRenamed: the approved product id now carries another name, so
+	// it may be a different item.
+	ChangeRenamed ChangeKind = "renamed"
+	// ChangeExcludedCategory: the product moved into a category the user
+	// excluded.
+	ChangeExcludedCategory ChangeKind = "excluded_category"
 )
 
 // Change is one material difference.
@@ -86,8 +92,12 @@ func Revalidate(in Intent, snap Snapshot, now time.Time) Result {
 	if snap.Cart == nil || (snap.Catalog == nil && !snap.StoreAbsent) {
 		return result(VerdictUnknown, nil)
 	}
+	cartFP, ok := observedCartFingerprint(snap.Cart)
+	if !ok {
+		return result(VerdictUnknown, nil)
+	}
 	var changes []Change
-	if snap.Cart.Fingerprint != in.CartFingerprint {
+	if cartFP != in.CartFingerprint {
 		changes = append(changes, Change{Kind: ChangeCartState})
 	}
 	switch {
@@ -96,12 +106,16 @@ func Revalidate(in Intent, snap Snapshot, now time.Time) Result {
 	case snap.Catalog.Currency != in.Currency:
 		changes = append(changes, Change{Kind: ChangeCurrency})
 	default:
+		if !snap.Catalog.Open && !hasWarning(in, WarnStoreClosed) {
+			changes = append(changes, Change{Kind: ChangeStore})
+		}
+		exclude := in.Constraints.ExcludeCategoryTags
 		for _, l := range in.Lines {
-			changes = append(changes, lineChanges(*snap.Catalog, l.ProductID, l.Options, l.UnitPriceMinor)...)
+			changes = append(changes, lineChanges(*snap.Catalog, exclude, l.ProductID, l.Name, l.Options, l.UnitPriceMinor)...)
 		}
 		for i := range in.Substitutions {
 			s := &in.Substitutions[i]
-			changes = append(changes, lineChanges(*snap.Catalog, s.CandidateProductID, s.Options, s.UnitPriceMinor)...)
+			changes = append(changes, lineChanges(*snap.Catalog, exclude, s.CandidateProductID, s.CandidateName, s.Options, s.UnitPriceMinor)...)
 		}
 	}
 	if len(changes) == 0 {
@@ -116,12 +130,27 @@ func Revalidate(in Intent, snap Snapshot, now time.Time) Result {
 	return result(VerdictMaterialChange, changes)
 }
 
-func lineChanges(c gp.Catalog, productID string, opts []OptionRef, unitPrice int64) []Change {
+func hasWarning(in Intent, w string) bool {
+	for _, x := range in.Warnings {
+		if x == w {
+			return true
+		}
+	}
+	return false
+}
+
+func lineChanges(c gp.Catalog, exclude []string, productID, name string, opts []OptionRef, unitPrice int64) []Change {
 	p, ok := c.Product(productID)
 	if !ok {
 		return []Change{{ProductID: productID, Kind: ChangeItemRemoved}}
 	}
 	var out []Change
+	if !sameName(p.Name, name) {
+		out = append(out, Change{ProductID: productID, Kind: ChangeRenamed})
+	}
+	if cat, ok := c.Category(p.CategoryID); ok && intersects(lowerSet(cat.Tags), exclude) {
+		out = append(out, Change{ProductID: productID, Kind: ChangeExcludedCategory})
+	}
 	if !p.Available {
 		out = append(out, Change{ProductID: productID, Kind: ChangeAvailability})
 	}
