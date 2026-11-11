@@ -826,3 +826,199 @@ func TestDeploymentSupportIncidentProducerToken(t *testing.T) {
 		t.Errorf("unexpected secretKeyRef: %+v", ref)
 	}
 }
+
+type ingressPath struct {
+	Path string `yaml:"path"`
+}
+
+type ingressRule struct {
+	Host string `yaml:"host"`
+	HTTP struct {
+		Paths []ingressPath `yaml:"paths"`
+	} `yaml:"http"`
+}
+
+type ingress struct {
+	Spec struct {
+		Rules []ingressRule `yaml:"rules"`
+		TLS   []struct {
+			Hosts []string `yaml:"hosts"`
+		} `yaml:"tls"`
+	} `yaml:"spec"`
+}
+
+// glovoHostValues is the host entry the canary adds (mctlhq/mctl-api#1006).
+var glovoHostValues = []string{
+	"--set", "ingress.hosts[0].host=api.mctl.ai",
+	"--set", "ingress.hosts[1].host=glovo.mctl.ai",
+	"--set", "ingress.hosts[1].paths[0]=/mcp",
+	"--set", "ingress.hosts[1].paths[1]=/.well-known/oauth-protected-resource",
+}
+
+func renderIngress(t *testing.T, setArgs ...string) (ingress, []byte) {
+	t.Helper()
+	helmPath := requireHelm(t)
+	args := append([]string{"template", "mctl-api", ".", "--show-only", "templates/ingress.yaml"}, setArgs...)
+	// #nosec G204 -- see renderDeployment.
+	cmd := exec.Command(helmPath, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("helm template failed: %v\nstderr: %s", err, stderr.String())
+	}
+	var in ingress
+	if err := yaml.Unmarshal(stdout.Bytes(), &in); err != nil {
+		t.Fatalf("failed to unmarshal rendered ingress: %v\noutput:\n%s", err, stdout.String())
+	}
+	return in, stdout.Bytes()
+}
+
+func rulePaths(r ingressRule) []string {
+	var out []string
+	for _, p := range r.HTTP.Paths {
+		out = append(out, p.Path)
+	}
+	return out
+}
+
+func ruleByHost(t *testing.T, in ingress, host string) ingressRule {
+	t.Helper()
+	for _, r := range in.Spec.Rules {
+		if r.Host == host {
+			return r
+		}
+	}
+	t.Fatalf("no ingress rule for host %q", host)
+	return ingressRule{}
+}
+
+// Positive control: with the shipped values every host routes the ten
+// existing paths, and /glovo is NOT among them (extraPaths is empty).
+func TestIngressDefaultRenderUnchanged(t *testing.T) {
+	in, _ := renderIngress(t)
+	want := []string{"/healthz", "/readyz", "/openapi.yaml", "/docs", "/.well-known", "/oauth", "/identity", "/devloop", "/api", "/mcp"}
+	if len(in.Spec.Rules) != 2 {
+		t.Fatalf("expected the two default hosts, got %d rules", len(in.Spec.Rules))
+	}
+	for _, r := range in.Spec.Rules {
+		if got := strings.Join(rulePaths(r), " "); got != strings.Join(want, " ") {
+			t.Errorf("host %s paths = %q, want %q", r.Host, got, strings.Join(want, " "))
+		}
+	}
+}
+
+func TestIngressEmptyExtraPathsRenderUnchanged(t *testing.T) {
+	_, defaultOut := renderIngress(t)
+	_, emptyOut := renderIngress(t, "--set", "ingress.extraPaths=null")
+	if !bytes.Equal(defaultOut, emptyOut) {
+		t.Error("empty ingress.extraPaths should render byte-identical output to the default")
+	}
+}
+
+func TestIngressHostWithoutPathsKeepsGlobalList(t *testing.T) {
+	// Only the Glovo host carries its own paths; api.mctl.ai must not change.
+	in, _ := renderIngress(t, glovoHostValues...)
+	_, defaultOut := renderIngress(t, "--set", "ingress.hosts[0].host=api.mctl.ai")
+	var def ingress
+	if err := yaml.Unmarshal(defaultOut, &def); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(rulePaths(ruleByHost(t, in, "api.mctl.ai")), " ")
+	want := strings.Join(rulePaths(ruleByHost(t, def, "api.mctl.ai")), " ")
+	if got != want {
+		t.Errorf("api.mctl.ai paths changed when another host got its own paths: %q vs %q", got, want)
+	}
+}
+
+func TestIngressRendersGlovoHostWithOwnPathsOnly(t *testing.T) {
+	in, _ := renderIngress(t, glovoHostValues...)
+	g := rulePaths(ruleByHost(t, in, "glovo.mctl.ai"))
+	want := []string{"/mcp", "/.well-known/oauth-protected-resource"}
+	if strings.Join(g, " ") != strings.Join(want, " ") {
+		t.Errorf("glovo.mctl.ai paths = %v, want exactly %v", g, want)
+	}
+	// None of the main-router paths may leak onto the Glovo host.
+	for _, p := range g {
+		switch p {
+		case "/healthz", "/readyz", "/docs", "/oauth", "/identity", "/devloop", "/api", "/openapi.yaml", "/.well-known", "/glovo":
+			t.Errorf("glovo.mctl.ai must not route %s", p)
+		}
+	}
+	tlsHosts := 0
+	for _, tl := range in.Spec.TLS {
+		for _, h := range tl.Hosts {
+			if h == "glovo.mctl.ai" {
+				tlsHosts++
+			}
+		}
+	}
+	if tlsHosts != 1 {
+		t.Errorf("expected one TLS entry for glovo.mctl.ai, got %d", tlsHosts)
+	}
+}
+
+func TestIngressExtraPathsAppendToHostsWithoutOwnPaths(t *testing.T) {
+	args := append([]string{"--set", "ingress.extraPaths[0]=/glovo"}, glovoHostValues...)
+	in, _ := renderIngress(t, args...)
+	api := rulePaths(ruleByHost(t, in, "api.mctl.ai"))
+	if api[len(api)-1] != "/glovo" || len(api) != 11 {
+		t.Errorf("api.mctl.ai paths = %v, want the ten defaults plus /glovo", api)
+	}
+	for _, p := range rulePaths(ruleByHost(t, in, "glovo.mctl.ai")) {
+		if p == "/glovo" {
+			t.Error("extraPaths must not reach a host that has its own paths")
+		}
+	}
+}
+
+func TestDeploymentDefaultRenderHasNoGlovoBasketUI(t *testing.T) {
+	d, _ := renderDeployment(t)
+	c := mainContainer(t, d)
+	for _, name := range []string{"GLOVO_BASKET_UI_CLIENT_ID", "GLOVO_BASKET_UI_CLIENT_SECRET"} {
+		if _, ok := findEnv(c, name); ok {
+			t.Errorf("default render should not set %s", name)
+		}
+	}
+}
+
+func TestDeploymentEmptyGlovoBasketUISecretRendersUnchanged(t *testing.T) {
+	_, defaultOut := renderDeployment(t)
+	_, emptyOut := renderDeployment(t, "--set", "glovoBasketUISecret=")
+	if !bytes.Equal(defaultOut, emptyOut) {
+		t.Error("empty glovoBasketUISecret should render byte-identical output to the default")
+	}
+}
+
+func TestDeploymentRendersGlovoBasketUISecretRefs(t *testing.T) {
+	d, _ := renderDeployment(t, "--set", "glovoBasketUISecret=mctl-api-oidc-zitadel")
+	c := mainContainer(t, d)
+	for _, name := range []string{"GLOVO_BASKET_UI_CLIENT_ID", "GLOVO_BASKET_UI_CLIENT_SECRET"} {
+		if n := countEnv(c, name); n != 1 {
+			t.Fatalf("expected exactly one %s entry, got %d", name, n)
+		}
+		e, _ := findEnv(c, name)
+		if e.Value != "" || e.ValueFrom == nil || e.ValueFrom.SecretKeyRef == nil {
+			t.Fatalf("%s must come from a secretKeyRef only: %+v", name, e)
+		}
+		ref := e.ValueFrom.SecretKeyRef
+		if ref.Name != "mctl-api-oidc-zitadel" || ref.Key != name || !ref.Optional {
+			t.Errorf("%s secretKeyRef = %+v", name, ref)
+		}
+	}
+}
+
+func TestDeploymentGlovoBasketUISecretConflictsWithEnv(t *testing.T) {
+	helmPath := requireHelm(t)
+	// #nosec G204 -- see renderDeployment.
+	cmd := exec.Command(helmPath, "template", "mctl-api", ".", "--show-only", "templates/deployment.yaml",
+		"--set", "glovoBasketUISecret=mctl-api-oidc-zitadel",
+		"--set", "env.GLOVO_BASKET_UI_CLIENT_ID=x")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected the render to fail when the id is set both in env and through the slot")
+	}
+	if !strings.Contains(string(out), "glovoBasketUISecret") {
+		t.Errorf("failure should name glovoBasketUISecret, got: %s", out)
+	}
+}

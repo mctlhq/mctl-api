@@ -3,6 +3,8 @@
 {{- if not $paths }}
 {{- $paths = list "/healthz" "/readyz" "/openapi.yaml" "/docs" "/.well-known" "/oauth" "/identity" "/devloop" "/api" "/mcp" }}
 {{- end }}
+{{- /* extraPaths extends the global list for every host that has no paths of its own. */}}
+{{- $paths = concat $paths (.Values.ingress.extraPaths | default list) }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -26,7 +28,8 @@ spec:
     - host: {{ .host }}
       http:
         paths:
-          {{- range $paths }}
+          {{- /* A host with its own paths routes exactly those; the global list is then not used for it. */}}
+          {{- range (default $paths .paths) }}
           - path: {{ . }}
             pathType: Prefix
             backend:

@@ -27,6 +27,16 @@ ingress:
   enabled: true
   className: traefik
   tls: true
+  # Each host may carry its own `paths` list, which then replaces the global
+  # list below for that host only. The Glovo basket MCP host
+  # (mctlhq/mctl-api#1006) uses it to route /mcp and the RFC 9728 metadata
+  # path and nothing else, e.g.:
+  #   - host: glovo.mctl.ai
+  #     paths:
+  #       - /mcp
+  #       - /.well-known/oauth-protected-resource
+  # A host without `paths` keeps the global list, so existing values render
+  # unchanged.
   hosts:
     - host: api.mctl.ai
     - host: api.mctl.me
@@ -46,6 +56,11 @@ ingress:
     - /devloop
     - /api
     - /mcp
+  # Paths appended to the global list for hosts without their own `paths`.
+  # Empty by default, so nothing is added to a deployed chart. The Glovo
+  # basket approval page (/glovo/basket/approvals/*, mctlhq/mctl-api#1007) is
+  # reached through ["/glovo"]; set it only together with the page.
+  extraPaths: []
 
 resources:
   requests:
@@ -283,3 +298,11 @@ usagePricingConfigMap: ""
 # Key inside that ConfigMap holding the rate-card JSON. Defaults to
 # "catalog.json", the key mctl-gitops publishes.
 usagePricingConfigMapKey: ""
+
+# Optional: Secret holding GLOVO_BASKET_UI_CLIENT_ID and
+# GLOVO_BASKET_UI_CLIENT_SECRET, the confidential ZITADEL client of the Glovo
+# basket owner approval page (mctlhq/mctl-api#1007, #1006). In production the
+# zitadel-iac Job writes both into the same Secret as MCTL_OIDC_PROVIDERS.
+# Optional refs, so absent keys leave the page off (logged) rather than
+# failing the pod. Empty by default: renders nothing.
+glovoBasketUISecret: ""
