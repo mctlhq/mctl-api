@@ -51,15 +51,15 @@ import (
 
 const basketHost = "glovo.mctl.ai"
 
-type basketEnv struct {
+type mcpBasketEnv struct {
 	*e2eEnv
 	srv  *httptest.Server
 	priv ed25519.PrivateKey
 }
 
-func newBasketEnv(t *testing.T) *basketEnv {
+func newMCPBasketEnv(t *testing.T) *mcpBasketEnv {
 	t.Helper()
-	be := &basketEnv{}
+	be := &mcpBasketEnv{}
 	e := newE2E(t, e2eOpts{configure: func(e *e2eEnv, o *Options) {
 		ctx := context.Background()
 		wi := "g1006wi_" + e2eRand(6)
@@ -161,9 +161,9 @@ func (h hostRT) RoundTrip(r *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(r)
 }
 
-func (b *basketEnv) httpClient() *http.Client { return &http.Client{Transport: hostRT{basketHost}} }
+func (b *mcpBasketEnv) httpClient() *http.Client { return &http.Client{Transport: hostRT{basketHost}} }
 
-func (b *basketEnv) raw(method, path, bearer, body string) (int, http.Header, []byte) {
+func (b *mcpBasketEnv) raw(method, path, bearer, body string) (int, http.Header, []byte) {
 	b.t.Helper()
 	req, _ := http.NewRequest(method, b.srv.URL+path, strings.NewReader(body))
 	if bearer != "" {
@@ -181,7 +181,7 @@ func (b *basketEnv) raw(method, path, bearer, body string) (int, http.Header, []
 }
 
 // mcpClient is the real mcp-go Streamable HTTP client with the bearer.
-func (b *basketEnv) mcpClient(tok string) *client.Client {
+func (b *mcpBasketEnv) mcpClient(tok string) *client.Client {
 	b.t.Helper()
 	c, err := client.NewStreamableHttpClient(b.srv.URL+"/mcp",
 		transport.WithHTTPBasicClient(b.httpClient()),
@@ -235,7 +235,7 @@ func basketRev(m map[string]any) (string, float64) {
 }
 
 // resign re-signs tok's claims, changed by mut, with the real signing key.
-func (b *basketEnv) resign(tok string, mut func(map[string]any)) string {
+func (b *mcpBasketEnv) resign(tok string, mut func(map[string]any)) string {
 	b.t.Helper()
 	parts := strings.Split(tok, ".")
 	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
@@ -254,7 +254,7 @@ func (b *basketEnv) resign(tok string, mut func(map[string]any)) string {
 
 // decide is the human owner's decision, the way the decision surface sends
 // it: the binding read from the payload route.
-func (b *basketEnv) decide(human, ref, decision string, mutBinding func(map[string]any)) (int, map[string]any) {
+func (b *mcpBasketEnv) decide(human, ref, decision string, mutBinding func(map[string]any)) (int, map[string]any) {
 	b.t.Helper()
 	code, p := b.callJSON(http.MethodGet, "/api/v1/action-approvals/"+ref+"/glovo-basket", human, nil)
 	if code != http.StatusOK {
@@ -272,7 +272,7 @@ func (b *basketEnv) decide(human, ref, decision string, mutBinding func(map[stri
 }
 
 func TestGlovoBasketMCPOAuthHarness(t *testing.T) {
-	b := newBasketEnv(t)
+	b := newMCPBasketEnv(t)
 
 	// Discovery: the basket host's 401 points at its own metadata, which
 	// names the Glovo resource and the API as the authorization server.
@@ -408,7 +408,7 @@ func TestGlovoBasketMCPOAuthHarness(t *testing.T) {
 }
 
 func TestGlovoBasketMCPRefusals(t *testing.T) {
-	b := newBasketEnv(t)
+	b := newMCPBasketEnv(t)
 	tok := b.mint(prnA1, "alpha")
 	init := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"x","version":"1"}}}`
 	list := `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`
