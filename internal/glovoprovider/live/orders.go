@@ -54,9 +54,10 @@ func (r *Reader) OrderHistory(ctx context.Context, q gp.HistoryQuery) ([]gp.Orde
 	out := []gp.OrderSummary{}
 	cursor := ""
 	seen := map[string]bool{}
-	for page := 0; page < maxOrderPages && len(out) < q.Limit; page++ {
+	for page := 0; page < maxOrderPages; page++ {
 		if seen[cursor] {
-			break
+			// A cursor that repeats cannot be paged to its end.
+			return nil, unobserved(gp.OpOrderHistory, ErrSchemaDrift)
 		}
 		seen[cursor] = true
 		qs := url.Values{"offset": {firstNonEmpty(cursor, "0")}, "limit": {strconv.Itoa(ordersPageSize)}}
@@ -92,10 +93,12 @@ func (r *Reader) OrderHistory(ctx context.Context, q gp.HistoryQuery) ([]gp.Orde
 			}
 		}
 		if cursor == "" {
-			break
+			return out, nil
 		}
 	}
-	return out, nil
+	// The page budget ran out with a next cursor still pending: the list is
+	// not known to be complete, so it is not returned as if it were.
+	return nil, unobserved(gp.OpOrderHistory, ErrUnavailable)
 }
 
 // Order returns one past order. A 404 is the provider's absence signal.

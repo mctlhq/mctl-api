@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -280,6 +281,22 @@ func TestSchemaDriftAcrossEndpoints(t *testing.T) {
 	f.onFixture("GET", "/v3/customer/orders/990002", "order_990002.json")
 	if got, err := r.OrderHistory(ctx, gp.HistoryQuery{Limit: 3}); !errors.Is(err, gp.ErrUnobserved) || got != nil {
 		t.Fatalf("partial history must be an error, got %+v %v", got, err)
+	}
+	// A repeated cursor, or a page budget that ends with a cursor pending,
+	// is not a complete history.
+	f.on("GET", "/v3/customer/orders-list", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"pagination":{"next":{"offset":"same"}},"orders":[]}`))
+	})
+	if got, err := r.OrderHistory(ctx, gp.HistoryQuery{Limit: 3}); !errors.Is(err, gp.ErrUnobserved) || got != nil {
+		t.Fatalf("looping cursor must be an error: %+v %v", got, err)
+	}
+	n := 0
+	f.on("GET", "/v3/customer/orders-list", func(w http.ResponseWriter, _ *http.Request) {
+		n++
+		_, _ = w.Write([]byte(`{"pagination":{"next":{"offset":"p` + strconv.Itoa(n) + `"}},"orders":[]}`))
+	})
+	if got, err := r.OrderHistory(ctx, gp.HistoryQuery{Limit: 3}); !errors.Is(err, gp.ErrUnobserved) || got != nil {
+		t.Fatalf("exhausted page budget must be an error: %+v %v", got, err)
 	}
 	f.on("GET", "/v1/authenticated/customers/900001/baskets", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`[{"basketId":"b","basketVer`)) })
 	if got, err := r.Cart(ctx); !errors.Is(err, live.ErrSchemaDrift) || len(got.Lines) != 0 || got.Fingerprint != "" {

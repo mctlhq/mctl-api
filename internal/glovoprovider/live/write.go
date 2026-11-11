@@ -34,6 +34,8 @@ const (
 	MutationRemove      MutationKind = "remove"
 )
 
+const maxLineQuantity = 99
+
 // WriteRejected is the state of a write the provider definitively refused
 // (4xx): nothing was applied.
 const WriteRejected gp.WriteState = "rejected"
@@ -77,6 +79,13 @@ type CartMutator interface {
 
 // Writer adds the cart write to a Reader. It exists as a separate type so
 // that holding a Reader gives no way to change the cart.
+//
+// Writer is NOT a glovoprovider.CartWriter: that interface binds a write to
+// a cart fingerprint, an intent digest and a live human approval grant. Any
+// caller of ApplyCart must sit behind an approval-bound wrapper that verifies
+// the grant first; the adapter checks only the basket version. WriteRejected
+// is outside glovoprovider's transition table and is terminal, like the
+// other refusals.
 type Writer struct{ *Reader }
 
 var _ CartMutator = (*Writer)(nil)
@@ -94,7 +103,7 @@ func (m CartMutation) validate() error {
 	op := gp.OpApplyCart
 	switch m.Kind {
 	case MutationAdd, MutationSetQuantity:
-		if m.Quantity < 1 || m.Quantity > 99 {
+		if m.Quantity < 1 || m.Quantity > maxLineQuantity {
 			return gp.Invalid(op, "quantity")
 		}
 	case MutationRemove:
@@ -218,12 +227,19 @@ func (c *core) planWrite(ctx context.Context, m CartMutation, live *basket) (req
 	exp := expectedCart{storeRef: m.StoreRef, lines: map[string]int64{}}
 	var existing *basketLine
 	if live != nil {
+		matches := 0
 		for i := range live.lines {
 			l := live.lines[i]
 			exp.lines[lineKey(l.line.ProductID, l.line.Options)] += l.line.Quantity
 			if l.line.ProductID == m.ProductID && gp.OptionKey(l.line.Options) == gp.OptionKey(m.Options) {
 				existing = &live.lines[i]
+				matches++
 			}
+		}
+		// Two lines with the same product and options cannot be told apart
+		// by the neutral model; changing one would never reconcile.
+		if matches > 1 {
+			return reqSpec{}, exp, gp.Invalid(op, "ambiguous line")
 		}
 	}
 	key := lineKey(m.ProductID, m.Options)
@@ -271,6 +287,9 @@ func (c *core) planWrite(ctx context.Context, m CartMutation, live *basket) (req
 			"handlingStrategy": "DELIVERY",
 		}}, exp, nil
 	case existing != nil:
+		if existing.line.Quantity+m.Quantity > maxLineQuantity {
+			return reqSpec{}, exp, gp.Invalid(op, "quantity")
+		}
 		return c.quantityRequest(cid, live, existing.basketProductID, existing.line.Quantity+m.Quantity), exp, nil
 	default:
 		// Echo the basket as read, with its basketVersion, and append the line.

@@ -243,8 +243,10 @@ content with the requested change (`reconciled`, or `reconcile_mismatch`).
 The write is never retried and never replayed after a 401. A 4xx is
 `rejected` (`ErrWriteRejected`); a timeout, 5xx or dropped connection is
 `reconcile_unknown` (`ErrWriteUnknown`), and the caller must read the cart
-back. Approval-grant verification stays outside the adapter, as in
-`CartWriter`.
+back. `Writer` is not a `glovoprovider.CartWriter`: the approval-grant and
+fingerprint checks stay outside the adapter, so any caller must sit behind an
+approval-bound wrapper. A line that appears twice with the same product and
+options is refused before any write.
 
 Unverified, because no real Glovo call can be made in this change: every wire
 shape (field names come from upstream code and tests, not from recorded real

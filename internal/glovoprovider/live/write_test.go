@@ -303,3 +303,32 @@ func TestReaderHasNoWriteSurface(t *testing.T) {
 		t.Fatal("Writer reads through Provider")
 	}
 }
+
+func TestAmbiguousDuplicateLinesAreRefusedBeforeWriting(t *testing.T) {
+	f := newFake(t)
+	b := seededBasket()
+	b.lines = append(b.lines, fakeLine{BPID: "bp-synth-2", Product: "800001", Qty: 1, Unit: 1030, Opts: [][2]string{{"701", "801"}}})
+	b.wire(f)
+	w := newWriter(t, f, newTokens())
+	for _, k := range []live.MutationKind{live.MutationSetQuantity, live.MutationRemove, live.MutationAdd} {
+		_, err := w.ApplyCart(context.Background(), live.CartMutation{Kind: k, StoreRef: storeRefBurger, ProductID: "800001", Options: opts("701", "801"), Quantity: 2, ExpectedVersion: "7"})
+		if !errors.Is(err, gp.ErrInvalidRequest) {
+			t.Fatalf("%s: err = %v", k, err)
+		}
+	}
+	if f.writes() != 0 {
+		t.Fatal("a write was sent for an ambiguous line")
+	}
+}
+
+func TestAddCannotPushALineOverTheQuantityCap(t *testing.T) {
+	f := newFake(t)
+	b := seededBasket()
+	b.lines[0].Qty = 98
+	b.wire(f)
+	w := newWriter(t, f, newTokens())
+	_, err := w.ApplyCart(context.Background(), live.CartMutation{Kind: live.MutationAdd, StoreRef: storeRefBurger, ProductID: "800001", Options: opts("701", "801"), Quantity: 2, ExpectedVersion: "7"})
+	if !errors.Is(err, gp.ErrInvalidRequest) || f.writes() != 0 {
+		t.Fatalf("err = %v writes = %d", err, f.writes())
+	}
+}
