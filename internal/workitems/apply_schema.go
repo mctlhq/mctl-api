@@ -220,19 +220,32 @@ func grantGeneric(ctx context.Context, tx pgx.Tx, role string) error {
 	return nil
 }
 
+// GenericForeignOwned lists the relations and functions of the generic block
+// that current_user (the migration role) does not own.
+func GenericForeignOwned(ctx context.Context, q dbq.Querier) ([]string, error) {
+	var out []string
+	err := q.QueryRow(ctx, `
+SELECT coalesce(array_agg(x ORDER BY x), '{}') FROM (
+  SELECT 'public.' || c.relname AS x FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public' AND c.relname = ANY($1) AND pg_get_userbyid(c.relowner) <> current_user
+  UNION ALL
+  SELECT 'public.' || p.proname || '()' FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'public' AND p.proname = ANY($2) AND pg_get_userbyid(p.proowner) <> current_user) s`,
+		genericRelations, genericFunctions).Scan(&out)
+	if err != nil {
+		return nil, fmt.Errorf("workitems: ownership check: %w", err)
+	}
+	return out, nil
+}
+
 // checkGenericOwnership refuses a relation or function of the generic block
 // that current_user (the migration role) does not own.
 func checkGenericOwnership(ctx context.Context, q dbq.Querier) error {
-	var bad int
-	if err := q.QueryRow(ctx, `
-SELECT (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-         WHERE n.nspname = 'public' AND c.relname = ANY($1) AND pg_get_userbyid(c.relowner) <> current_user)
-     + (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-         WHERE n.nspname = 'public' AND p.proname = ANY($2) AND pg_get_userbyid(p.proowner) <> current_user)`,
-		genericRelations, genericFunctions).Scan(&bad); err != nil {
-		return fmt.Errorf("workitems: ownership check: %w", err)
+	foreign, err := GenericForeignOwned(ctx, q)
+	if err != nil {
+		return err
 	}
-	if bad != 0 {
+	if len(foreign) != 0 {
 		return errors.New("workitems: an object of the generic work-items schema is not owned by the migration role")
 	}
 	return nil

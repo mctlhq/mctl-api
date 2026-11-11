@@ -252,18 +252,32 @@ func ApplySchema(ctx context.Context, migrationConnStr, runtimeRole string, opts
 	return nil
 }
 
-func checkOwnership(ctx context.Context, tx pgx.Tx) error {
-	var bad int
-	if err := tx.QueryRow(ctx, `
-SELECT (SELECT count(*) FROM pg_namespace WHERE nspname = 'glovo' AND pg_get_userbyid(nspowner) <> current_user)
-     + (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-         WHERE n.nspname = 'glovo' AND c.relname = ANY($1) AND pg_get_userbyid(c.relowner) <> current_user)
-     + (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-         WHERE n.nspname = 'glovo' AND p.proname IN ('basket_revisions_frozen', 'baskets_guard')
-           AND pg_get_userbyid(p.proowner) <> current_user)`, basketTables).Scan(&bad); err != nil {
-		return fmt.Errorf("glovo basket: ownership check: %w", err)
+// ForeignOwned lists schema glovo, and the basket relations and functions in
+// it, that current_user (the migration role) does not own: what ApplySchema
+// refuses. The migrator's preflight calls it too.
+func ForeignOwned(ctx context.Context, q dbq.Querier) ([]string, error) {
+	var out []string
+	if err := q.QueryRow(ctx, `
+SELECT coalesce(array_agg(x ORDER BY x), '{}') FROM (
+  SELECT 'schema glovo' AS x FROM pg_namespace WHERE nspname = 'glovo' AND pg_get_userbyid(nspowner) <> current_user
+  UNION ALL
+  SELECT 'glovo.' || c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'glovo' AND c.relname = ANY($1) AND pg_get_userbyid(c.relowner) <> current_user
+  UNION ALL
+  SELECT 'glovo.' || p.proname || '()' FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'glovo' AND p.proname IN ('basket_revisions_frozen', 'baskets_guard')
+      AND pg_get_userbyid(p.proowner) <> current_user) s`, basketTables).Scan(&out); err != nil {
+		return nil, fmt.Errorf("glovo basket: ownership check: %w", err)
 	}
-	if bad != 0 {
+	return out, nil
+}
+
+func checkOwnership(ctx context.Context, tx pgx.Tx) error {
+	foreign, err := ForeignOwned(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if len(foreign) != 0 {
 		return errors.New("glovo basket: schema glovo or a basket object in it is not owned by the migration role")
 	}
 	return nil

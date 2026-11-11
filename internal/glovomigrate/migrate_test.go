@@ -585,9 +585,13 @@ func TestPartialFailureRollsBackTheFailedStepOnly(t *testing.T) {
 	e := newEnv(t)
 	before := e.dump()
 	c := e.cfg(ModeApply)
-	c.RuntimeRole = "gm_no_such_role_" + rnd()
 	var order []string
-	c.onStep = func(n string) { order = append(order, n) }
+	c.onStep = func(n string) {
+		order = append(order, n)
+		if n == StepBase { // the runtime role vanishes after the preflight
+			e.dropRole(e.rt)
+		}
+	}
 	err := e.run(c)
 	if !errors.Is(err, ErrStepFailed) {
 		t.Fatalf("missing runtime role: %v", err)
@@ -603,9 +607,13 @@ func TestPartialFailureRollsBackTheFailedStepOnly(t *testing.T) {
 	// step 2's tables are not there, step 3 never ran.
 	e2 := newEnv(t)
 	c = e2.cfg(ModeApply)
-	c.WorkItemsRole = "gm_no_such_wi_" + rnd()
 	order = nil
-	c.onStep = func(n string) { order = append(order, n) }
+	c.onStep = func(n string) {
+		order = append(order, n)
+		if n == StepApproval { // the work-items role vanishes after step 1
+			e2.dropRole(e2.wi)
+		}
+	}
 	if err := e2.run(c); !errors.Is(err, ErrStepFailed) {
 		t.Fatalf("missing work-items role: %v", err)
 	}
@@ -622,6 +630,8 @@ func TestPartialFailureRollsBackTheFailedStepOnly(t *testing.T) {
 		t.Fatalf("after step 2 failed: base=%v work_items=%v approval=%v basket=%v", baseOK, wi, appr, basket)
 	}
 	// Fixing the cause and re-running completes from where it stopped.
+	e2.exec(e2.root(), fmt.Sprintf(`CREATE ROLE %s LOGIN PASSWORD '%s' NOSUPERUSER`, e2.wi, testPassword))
+	e2.exec(e2.root(), fmt.Sprintf(`GRANT CONNECT ON DATABASE %s TO %s`, e2.db, e2.wi))
 	if err := e2.run(e2.cfg(ModeApply)); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
@@ -657,7 +667,7 @@ func TestDryRunChangesNothingAndPrintsThePlan(t *testing.T) {
 	}
 }
 
-func TestVerifyEmptyIsNotReadyAndBlindRoleCouldNotObserve(t *testing.T) {
+func TestVerifyEmptyIsNotReadyAndAFailedReadCouldNotObserve(t *testing.T) {
 	e := newEnv(t)
 	if err := e.run(e.cfg(ModeVerify)); !errors.Is(err, ErrNotReady) {
 		t.Fatalf("verify on an empty database: %v", err)
@@ -668,10 +678,24 @@ func TestVerifyEmptyIsNotReadyAndBlindRoleCouldNotObserve(t *testing.T) {
 	if err := e.run(e.cfg(ModeApply)); err != nil {
 		t.Fatal(err)
 	}
-	// A role that can connect but cannot read the catalog objects: the read
-	// fails, and that must be "could not observe", never "clean" or "absent".
+	// A read that fails (here: a version table held ACCESS EXCLUSIVE past
+	// lock_timeout) must be "could not observe", never "clean" or "absent".
+	ctx := context.Background()
+	holder, herr := pgx.Connect(ctx, e.dsn(e.mig))
+	if herr != nil {
+		t.Fatal(herr)
+	}
+	defer func() { _ = holder.Close(ctx) }()
+	htx, herr := holder.Begin(ctx)
+	if herr != nil {
+		t.Fatal(herr)
+	}
+	defer func() { _ = htx.Rollback(ctx) }()
+	if _, herr := htx.Exec(ctx, `LOCK TABLE glovo.approval_schema_version IN ACCESS EXCLUSIVE MODE`); herr != nil {
+		t.Fatal(herr)
+	}
 	c := e.cfg(ModeVerify)
-	c.ExpectRole, c.DSN = e.blind, e.dsn(e.blind)
+	c.LockTimeout = 300 * time.Millisecond
 	err := e.run(c)
 	if !errors.Is(err, ErrCouldNotObserve) {
 		t.Fatalf("verify as a role without access: %v\n%s", err, e.buf.String())
@@ -827,4 +851,140 @@ func TestCompiledVersionsMatchThePackages(t *testing.T) {
 	if glovo.CompiledSchemaVersion() < 1 || workitems.CompiledGlovoApprovalSchemaVersion() != 2 || glovobasket.SchemaVersion != 1 {
 		t.Fatalf("versions: glovo=%d approval=%d basket=%d", glovo.CompiledSchemaVersion(), workitems.CompiledGlovoApprovalSchemaVersion(), glovobasket.SchemaVersion)
 	}
+}
+
+// refusedUpFront asserts a mode refuses with ErrRefused (exit 1) before any
+// step runs and without changing the database.
+func (e *env) refusedUpFront(c Config, want string) {
+	e.t.Helper()
+	before := e.dump()
+	var order []string
+	c.onStep = func(n string) { order = append(order, n) }
+	err := e.run(c)
+	if !errors.Is(err, ErrRefused) || ExitCode(err) != ExitRefused {
+		e.t.Fatalf("expected a refusal (exit 1), got %v\n%s", err, e.buf.String())
+	}
+	if want != "" && !strings.Contains(err.Error(), want) {
+		e.t.Fatalf("the refusal does not name %q: %v", want, err)
+	}
+	if len(order) != 0 || e.dump() != before {
+		e.t.Fatalf("steps ran (%v) or the database changed before the refusal", order)
+	}
+}
+
+// A partly done D1 transfer: every object the apply steps check, one at a time,
+// left with the legacy owner, must be refused up front (exit 1), never as
+// "could not observe" and never after step 1 has committed.
+func TestPartialOwnershipTransferIsRefusedUpFront(t *testing.T) {
+	leftovers := []struct{ name, stmt, want string }{
+		{"generic version table", `ALTER TABLE public.work_items_schema_version OWNER TO %s`, "work_items_schema_version"},
+		{"generic table", `ALTER TABLE public.work_item_events OWNER TO %s`, "work_item_events"},
+		{"generic function", `ALTER FUNCTION public.execution_provenance_immutable() OWNER TO %s`, "execution_provenance_immutable"},
+		{"second generic function", `ALTER FUNCTION public.work_item_context_snapshots_immutable() OWNER TO %s`, "work_item_context_snapshots_immutable"},
+	}
+	for _, l := range leftovers {
+		t.Run(l.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.legacyEra()
+			e.exec(e.root(), fmt.Sprintf(l.stmt, e.legacy))
+			e.exec(e.root(), fmt.Sprintf(`GRANT ALL ON ALL TABLES IN SCHEMA public TO %s`, e.mig)) // no help: ownership is what is checked
+			e.refusedUpFront(e.cfg(ModeApply), l.want)
+			// Dry-run reports it as a refusal too and verify is "not ready", not "could not observe".
+			if err := e.run(e.cfg(ModeDryRun)); err != nil || !strings.Contains(e.buf.String(), "would REFUSE") {
+				t.Fatalf("dry-run: %v\n%s", err, e.buf.String())
+			}
+			if err := e.run(e.cfg(ModeVerify)); !errors.Is(err, ErrNotReady) {
+				t.Fatalf("verify: %v", err)
+			}
+		})
+	}
+}
+
+func TestForeignOwnedApprovalFunctionIsRefusedUpFront(t *testing.T) {
+	for _, fn := range []string{"aar_guard", "approval_bindings_guard", "aar_binding_required", "basket_approval_bindings_guard"} {
+		t.Run(fn, func(t *testing.T) {
+			e := newEnv(t)
+			if err := e.run(e.cfg(ModeApply)); err != nil {
+				t.Fatal(err)
+			}
+			e.exec(e.root(), fmt.Sprintf(`ALTER FUNCTION glovo.%s() OWNER TO %s`, fn, e.legacy))
+			e.refusedUpFront(e.cfg(ModeApply), fn)
+		})
+	}
+}
+
+func TestForeignOwnedObjectInGlovoSchemaIsRefusedUpFront(t *testing.T) {
+	e := newEnv(t)
+	if err := e.run(e.cfg(ModeApply)); err != nil {
+		t.Fatal(err)
+	}
+	// A function and a view owned by another role, in schema glovo.
+	e.exec(e.root(), `CREATE FUNCTION glovo.gm_foreign() RETURNS int LANGUAGE sql AS 'SELECT 1'`)
+	e.exec(e.root(), fmt.Sprintf(`ALTER FUNCTION glovo.gm_foreign() OWNER TO %s`, e.legacy))
+	e.refusedUpFront(e.cfg(ModeApply), "glovo")
+	e.exec(e.root(), `DROP FUNCTION glovo.gm_foreign()`)
+	e.exec(e.root(), `CREATE MATERIALIZED VIEW glovo.gm_mv AS SELECT 1 AS x`)
+	e.exec(e.root(), fmt.Sprintf(`ALTER MATERIALIZED VIEW glovo.gm_mv OWNER TO %s`, e.legacy))
+	e.refusedUpFront(e.cfg(ModeApply), "glovo")
+}
+
+func TestForeignOwnedBasketTableIsRefusedUpFront(t *testing.T) {
+	e := newEnv(t)
+	if err := e.run(e.cfg(ModeApply)); err != nil {
+		t.Fatal(err)
+	}
+	e.exec(e.root(), fmt.Sprintf(`ALTER FUNCTION glovo.baskets_guard() OWNER TO %s`, e.legacy))
+	e.refusedUpFront(e.cfg(ModeApply), "")
+}
+
+// A role the grants name must exist before anything is applied; otherwise the
+// GRANT at the end of a step fails after its DDL.
+func TestMissingGrantRoleIsRefusedUpFront(t *testing.T) {
+	e := newEnv(t)
+	c := e.cfg(ModeApply)
+	c.RuntimeRole = "gm_no_such_role_" + rnd()
+	e.refusedUpFront(c, "does not exist")
+	c = e.cfg(ModeApply)
+	c.WorkItemsRole = "gm_no_such_wi_" + rnd()
+	e.refusedUpFront(c, "does not exist")
+}
+
+// The superuser refusal holds in every transaction, not only in the preflight.
+func TestSetupRefusesASuperuserInEveryTransaction(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	root := e.root()
+	var su string
+	if err := root.QueryRow(ctx, `SELECT current_user::text`).Scan(&su); err != nil {
+		t.Fatal(err)
+	}
+	cfg := e.cfg(ModeApply)
+	cfg.ExpectRole = su
+	cfg.withDefaults()
+	tx, err := root.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := cfg.setup(ctx, tx); !errors.Is(err, ErrRefused) {
+		t.Fatalf("setup as a superuser: %v", err)
+	}
+}
+
+// dropRole removes a grant role after the preflight has seen it.
+func (e *env) dropRole(r string) {
+	e.t.Helper()
+	e.exec(e.root(), fmt.Sprintf(`REVOKE CONNECT ON DATABASE %s FROM %s`, e.db, r))
+	e.exec(e.root(), `DROP ROLE `+r)
+}
+
+// The privileges the first statements of the steps need are checked up front.
+func TestMissingCreatePrivilegeIsRefusedUpFront(t *testing.T) {
+	e := newEnv(t)
+	e.exec(e.root(), fmt.Sprintf(`REVOKE CREATE ON DATABASE %s FROM %s`, e.db, e.mig))
+	e.refusedUpFront(e.cfg(ModeApply), "CREATE on the database")
+	e2 := newEnv(t)
+	e2.exec(e2.root(), `REVOKE CREATE ON SCHEMA public FROM PUBLIC`)
+	e2.exec(e2.root(), fmt.Sprintf(`ALTER SCHEMA public OWNER TO %s`, e2.legacy)) // not the migrator, no CREATE
+	e2.refusedUpFront(e2.cfg(ModeApply), "CREATE on schema public")
 }

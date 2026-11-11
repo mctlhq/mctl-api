@@ -142,22 +142,37 @@ func ApplySchema(ctx context.Context, migrationConnStr, runtimeRole string, opts
 	return nil
 }
 
+// ForeignOwned lists the schema, relations and functions in schema glovo that
+// current_user (the migration role) does not own: what ApplySchema refuses to
+// adopt. The operator-run migrator's preflight calls it too, so what it
+// refuses up front and what the apply refuses are one predicate.
+func ForeignOwned(ctx context.Context, q dbq.Querier) ([]string, error) {
+	var out []string
+	err := q.QueryRow(ctx, `
+SELECT coalesce(array_agg(x ORDER BY x), '{}') FROM (
+  SELECT 'schema glovo' AS x FROM pg_namespace n, pg_roles r
+    WHERE n.nspname = 'glovo' AND r.rolname = current_user AND n.nspowner <> r.oid
+  UNION ALL
+  SELECT 'glovo.' || c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace, pg_roles r
+    WHERE n.nspname = 'glovo' AND r.rolname = current_user AND c.relowner <> r.oid
+  UNION ALL
+  SELECT 'glovo.' || p.proname || '()' FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace, pg_roles r
+    WHERE n.nspname = 'glovo' AND r.rolname = current_user AND p.proowner <> r.oid) s`).Scan(&out)
+	if err != nil {
+		return nil, fmt.Errorf("glovo: ownership check: %w", err)
+	}
+	return out, nil
+}
+
 // checkOwnership refuses schema glovo, or any relation or function in it, that
 // current_user (the migration role) does not own.
 func checkOwnership(ctx context.Context, q dbq.Querier) error {
-	var n int
-	err := q.QueryRow(ctx, `
-SELECT (SELECT count(*) FROM pg_namespace WHERE nspname = 'glovo' AND nspowner <> r.oid)
-     + (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-         WHERE n.nspname = 'glovo' AND c.relowner <> r.oid)
-     + (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-         WHERE n.nspname = 'glovo' AND p.proowner <> r.oid)
-FROM pg_roles r WHERE r.rolname = current_user`).Scan(&n)
+	foreign, err := ForeignOwned(ctx, q)
 	if err != nil {
-		return fmt.Errorf("glovo: ownership check: %w", err)
+		return err
 	}
-	if n != 0 {
-		return fmt.Errorf("glovo: schema glovo holds %d object(s) owned by another role; refusing to adopt them", n)
+	if len(foreign) != 0 {
+		return fmt.Errorf("glovo: schema glovo holds %d object(s) owned by another role; refusing to adopt them", len(foreign))
 	}
 	return nil
 }

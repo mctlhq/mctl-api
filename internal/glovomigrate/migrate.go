@@ -321,7 +321,7 @@ func steps(cfg *Config) []stepRunner {
 }
 
 // setup is the first statement block of every transaction: the timeouts, local
-// to the transaction, then a re-check of the role (the connection string could
+// to the transaction, then a re-check of the role and that it is not a superuser (the connection string could
 // have changed between the preflight and this connection).
 func (c *Config) setup(ctx context.Context, tx pgx.Tx) error {
 	if _, err := tx.Exec(ctx, fmt.Sprintf(`SET LOCAL lock_timeout = '%dms'`, c.LockTimeout.Milliseconds())); err != nil {
@@ -331,11 +331,15 @@ func (c *Config) setup(ctx context.Context, tx pgx.Tx) error {
 		return fmt.Errorf("set statement_timeout: %w", err)
 	}
 	var cur string
-	if err := tx.QueryRow(ctx, `SELECT current_user::text`).Scan(&cur); err != nil {
-		return fmt.Errorf("read current_user: %w", err)
+	var super bool
+	if err := tx.QueryRow(ctx, `SELECT current_user::text, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)`).Scan(&cur, &super); err != nil {
+		return fmt.Errorf("read the current role: %w", err)
 	}
 	if cur != c.ExpectRole {
 		return fmt.Errorf("%w: connected as a role other than %q", ErrRefused, c.ExpectRole)
+	}
+	if super {
+		return fmt.Errorf("%w: the migration role must not be a superuser", ErrRefused)
 	}
 	return nil
 }

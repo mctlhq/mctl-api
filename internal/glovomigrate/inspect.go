@@ -167,12 +167,8 @@ func preflight(ctx context.Context, cfg *Config) ([]stepState, error) {
 		return nil, observeErr("prepare the read-only transaction", err)
 	}
 
-	var super bool
-	if err := tx.QueryRow(ctx, `SELECT rolsuper FROM pg_roles WHERE rolname = current_user`).Scan(&super); err != nil {
-		return nil, observeErr("read the role attributes", err)
-	}
-	if super {
-		return nil, fmt.Errorf("%w: the migration role must not be a superuser", ErrRefused)
+	if err := cfg.checkRolesExist(ctx, tx); err != nil {
+		return nil, err
 	}
 
 	var out []stepState
@@ -204,24 +200,58 @@ func readComponent(ctx context.Context, tx pgx.Tx, c *component) error {
 	return nil
 }
 
+// foreignRefusal turns a list of foreign-owned objects into a refusal text and
+// marks the step's version tables unread: the migration role cannot select from
+// objects another role owns, and the refusal already decides the step.
+func (s *stepState) foreignRefusal(foreign []string, hint string) bool {
+	if len(foreign) == 0 {
+		return false
+	}
+	shown := foreign
+	if len(shown) > 5 {
+		shown = shown[:5]
+	}
+	msg := fmt.Sprintf("%d object(s) not owned by the migration role (%s", len(foreign), strings.Join(shown, ", "))
+	if len(foreign) > len(shown) {
+		msg += ", ..."
+	}
+	msg += ")" + hint
+	s.refusals = append(s.refusals, msg)
+	for i := range s.components {
+		s.components[i].unread = true
+	}
+	return true
+}
+
 func readBase(ctx context.Context, tx pgx.Tx) (stepState, error) {
 	s := stepState{name: StepBase, components: []component{{label: "glovo", table: "glovo.glovo_schema_version", compiled: glovo.CompiledSchemaVersion()}}}
+	// The same predicate glovo.ApplySchema refuses on, read before anything
+	// that needs access to the objects.
+	foreign, err := glovo.ForeignOwned(ctx, tx)
+	if err != nil {
+		return s, observeErr("read schema glovo ownership", err)
+	}
+	if s.foreignRefusal(foreign, "") {
+		return s, nil
+	}
 	if err := readComponent(ctx, tx, &s.components[0]); err != nil {
 		return s, err
 	}
 	var exists bool
-	var foreign int
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'glovo'),
-	  (SELECT count(*) FROM pg_namespace WHERE nspname = 'glovo' AND pg_get_userbyid(nspowner) <> current_user)
-	  + (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-	      WHERE n.nspname = 'glovo' AND c.relkind IN ('r','p','S','v') AND pg_get_userbyid(c.relowner) <> current_user)`).Scan(&exists, &foreign); err != nil {
-		return s, observeErr("read schema glovo ownership", err)
-	}
-	if foreign > 0 {
-		s.refusals = append(s.refusals, fmt.Sprintf("%d object(s) of schema glovo are not owned by the migration role", foreign))
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'glovo')`).Scan(&exists); err != nil {
+		return s, observeErr("read schema glovo", err)
 	}
 	if !exists {
 		s.problems = append(s.problems, "schema glovo is absent")
+		// CREATE SCHEMA needs CREATE on the database; without it the step
+		// fails on its first statement.
+		var can bool
+		if err := tx.QueryRow(ctx, `SELECT has_database_privilege(current_user, current_database(), 'CREATE')`).Scan(&can); err != nil {
+			return s, observeErr("read the database CREATE privilege", err)
+		}
+		if !can {
+			s.refusals = append(s.refusals, "the migration role lacks CREATE on the database, so schema glovo cannot be created")
+		}
 	}
 	return s, nil
 }
@@ -239,44 +269,28 @@ func readApproval(ctx context.Context, tx pgx.Tx) (stepState, error) {
 		{label: "work-items", table: "public.work_items_schema_version", compiled: workitems.CompiledWorkItemsSchemaVersion()},
 		{label: "approval", table: "glovo.approval_schema_version", compiled: workitems.CompiledGlovoApprovalSchemaVersion()},
 	}}
-	// Ownership of the shared tables: the real risk of the activation (the
-	// legacy role owns them until the operator's ownership transfer).
-	rows, err := tx.Query(ctx, `SELECT c.oid::regclass::text, pg_get_userbyid(c.relowner) <> current_user
-	  FROM pg_class c WHERE c.oid IN (to_regclass('public.action_approval_requests'),
-	    to_regclass('glovo.approval_bindings'), to_regclass('glovo.basket_approval_bindings'))
-	  ORDER BY 1`)
+	// Ownership first, and exactly what ApplyGlovoApprovalSchema refuses on:
+	// every generic work-items relation and function and the approval slice.
+	// A partly done D1 transfer is then a refusal, never a later step failure.
+	foreign, err := workitems.ApprovalStepForeignOwned(ctx, tx)
 	if err != nil {
-		return s, observeErr("read approval table owners", err)
+		return s, observeErr("read approval ownership", err)
 	}
-	var foreign []string
-	for rows.Next() {
-		var rel string
-		var other bool
-		if err := rows.Scan(&rel, &other); err != nil {
-			rows.Close()
-			return s, observeErr("scan approval table owners", err)
-		}
-		if other {
-			foreign = append(foreign, rel)
-		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return s, observeErr("read approval table owners", err)
-	}
-	if len(foreign) > 0 {
-		// A decided refusal outranks reading further: the version tables of
-		// public are the very objects this role cannot select from yet.
-		s.refusals = append(s.refusals, strings.Join(foreign, ", ")+" not owned by the migration role (the ownership transfer of runbook step D1 is not done)")
-		for i := range s.components {
-			s.components[i].unread = true
-		}
+	if s.foreignRefusal(foreign, " (the ownership transfer of runbook step D1 is not complete)") {
 		return s, nil
 	}
 	for i := range s.components {
 		if err := readComponent(ctx, tx, &s.components[i]); err != nil {
 			return s, err
 		}
+	}
+	// A database without the work-items tables gets them created in public.
+	var fresh, canCreate bool
+	if err := tx.QueryRow(ctx, `SELECT to_regclass('public.work_items') IS NULL, has_schema_privilege(current_user, 'public', 'CREATE')`).Scan(&fresh, &canCreate); err != nil {
+		return s, observeErr("read the public schema CREATE privilege", err)
+	}
+	if fresh && !canCreate {
+		s.refusals = append(s.refusals, "the migration role lacks CREATE on schema public, so the work-items tables cannot be created")
 	}
 	missing, err := missingTriggers(ctx, tx, approvalTriggers)
 	if err != nil {
@@ -294,6 +308,13 @@ var basketTriggers = [][2]string{
 
 func readBasket(ctx context.Context, tx pgx.Tx) (stepState, error) {
 	s := stepState{name: StepBasket, components: []component{{label: "basket", table: "glovo.basket_schema_version", compiled: glovobasket.SchemaVersion}}}
+	foreign, err := glovobasket.ForeignOwned(ctx, tx)
+	if err != nil {
+		return s, observeErr("read basket ownership", err)
+	}
+	if s.foreignRefusal(foreign, "") {
+		return s, nil
+	}
 	if err := readComponent(ctx, tx, &s.components[0]); err != nil {
 		return s, err
 	}
@@ -309,15 +330,6 @@ func readBasket(ctx context.Context, tx pgx.Tx) (stepState, error) {
 	}
 	if !fk {
 		s.problems = append(s.problems, "basket_approval_bindings_revision_fk missing or not validated")
-	}
-	var foreign int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-	  WHERE n.nspname = 'glovo' AND c.relname IN ('baskets','basket_revisions','basket_schema_version')
-	    AND pg_get_userbyid(c.relowner) <> current_user`).Scan(&foreign); err != nil {
-		return s, observeErr("read basket table owners", err)
-	}
-	if foreign > 0 {
-		s.refusals = append(s.refusals, fmt.Sprintf("%d basket table(s) are not owned by the migration role", foreign))
 	}
 	return s, nil
 }
@@ -339,4 +351,33 @@ func missingTriggers(ctx context.Context, tx pgx.Tx, want [][2]string) ([]string
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// checkRolesExist refuses, before anything is applied, a runtime or work-items
+// role that does not exist: the GRANTs at the end of a step would fail after its
+// DDL. pg_roles lists a role to everyone, so a failed read is a failed read.
+func (c *Config) checkRolesExist(ctx context.Context, tx pgx.Tx) error {
+	rows, err := tx.Query(ctx, `SELECT rolname FROM pg_roles WHERE rolname = ANY($1)`, []string{c.RuntimeRole, c.WorkItemsRole})
+	if err != nil {
+		return observeErr("read the grant roles", err)
+	}
+	have := map[string]bool{}
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			rows.Close()
+			return observeErr("scan the grant roles", err)
+		}
+		have[n] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return observeErr("read the grant roles", err)
+	}
+	for _, r := range []string{c.RuntimeRole, c.WorkItemsRole} {
+		if !have[r] {
+			return fmt.Errorf("%w: the role %q does not exist, so the grants of a step would fail; nothing was changed", ErrRefused, r)
+		}
+	}
+	return nil
 }
