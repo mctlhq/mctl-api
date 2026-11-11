@@ -1,0 +1,7 @@
+{"data": {"addresses": [
+  {"entryType": "SAVED_ADDRESS", "title": "PIISENTINEL Home", "subtitle": "PIISENTINEL Street 0",
+   "address": {"id": 1, "countryCode": "ZZ", "cityCode": "SYNCITY", "addressLine": "PIISENTINEL Street 0", "details": "PIISENTINEL flat 0",
+               "latitude": 0.5, "longitude": 0.5, "tag": "HOME", "cityName": "Synthetic City"}},
+  {"entryType": "SAVED_ADDRESS", "title": "PIISENTINEL Other",
+   "address": {"id": 2, "countryCode": "ZZ", "cityCode": "OTHERCITY", "addressLine": "PIISENTINEL Road 9", "latitude": 0.7, "longitude": 0.7}}
+]}}

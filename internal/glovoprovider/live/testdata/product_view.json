@@ -1,0 +1,16 @@
+{"data": {
+  "metadata": {"product": {
+    "id": 800001, "externalId": "ext-burger-1", "storeProductId": "sp-burger-1", "categoryId": 600001,
+    "name": "Classic Burger", "priceInfo": {"amount": 9.5},
+    "attributeGroups": [
+      {"id": 701, "attributeGroupId": "grp-stable-701", "externalId": "grp-ext-701", "position": 1, "name": "Doneness", "min": 1, "max": 1,
+       "attributes": [
+         {"id": 801, "attributeId": "opt-stable-801", "externalId": "opt-ext-801", "name": "Medium", "priceInfo": {"amount": 0}, "available": true},
+         {"id": 802, "attributeId": "opt-stable-802", "externalId": "opt-ext-802", "name": "Well done", "available": true}]},
+      {"id": 702, "attributeGroupId": "grp-stable-702", "externalId": "grp-ext-702", "position": 2, "name": "Extras", "min": 0, "max": 2,
+       "attributes": [
+         {"id": 811, "attributeId": "opt-stable-811", "externalId": "opt-ext-811", "name": "Cheese", "priceInfo": {"amount": 0.8}, "available": true},
+         {"id": 812, "attributeId": "opt-stable-812", "externalId": "opt-ext-812", "name": "Bacon", "priceInfo": {"amount": 1.2}, "available": false}]}
+    ]}},
+  "footer": {"data": {"elements": [{"data": {"isEnabled": true}}]}}
+}}

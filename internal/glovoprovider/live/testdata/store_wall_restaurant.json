@@ -1,0 +1,4 @@
+{"data": {"category": {"id": 1}, "stores": {"pagination": {}, "entries": [
+  {"id": 700001, "metadata": {"storeAddressId": 710001}, "title": "Synthetic Burger Bar", "open": true, "distance": "PIISENTINEL 1 km"},
+  {"id": 700002, "metadata": {"storeAddressId": 710002}, "title": "Synthetic Pizza Corner", "availability": {"status": "CLOSED"}}
+]}}}
