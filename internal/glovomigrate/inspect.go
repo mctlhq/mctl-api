@@ -243,17 +243,58 @@ func readBase(ctx context.Context, tx pgx.Tx) (stepState, error) {
 	}
 	if !exists {
 		s.problems = append(s.problems, "schema glovo is absent")
-		// CREATE SCHEMA needs CREATE on the database; without it the step
-		// fails on its first statement.
-		var can bool
-		if err := tx.QueryRow(ctx, `SELECT has_database_privilege(current_user, current_database(), 'CREATE')`).Scan(&can); err != nil {
-			return s, observeErr("read the database CREATE privilege", err)
-		}
-		if !can {
-			s.refusals = append(s.refusals, "the migration role lacks CREATE on the database, so schema glovo cannot be created")
-		}
+	}
+	if err := s.requireCreates(ctx, tx, needDatabase|needGlovo|needPlpgsql); err != nil {
+		return s, err
 	}
 	return s, nil
+}
+
+// What a step needs the migration role to be allowed to create, read before
+// anything is applied. Postgres checks the creation privilege of the target
+// namespace (CREATE SCHEMA: of the database) BEFORE it looks at IF NOT EXISTS,
+// so a step whose statements are all no-ops on an existing object still fails
+// without it. Every run of a step therefore needs the privileges of every
+// CREATE statement the step issues, not only a fresh database.
+const (
+	// needDatabase: CREATE SCHEMA IF NOT EXISTS glovo (steps 1 and 2).
+	needDatabase = 1 << iota
+	// needPublic: the generic block's CREATE TABLE/INDEX IF NOT EXISTS and
+	// CREATE OR REPLACE FUNCTION in schema public (step 2).
+	needPublic
+	// needGlovo: the CREATE TABLE/INDEX IF NOT EXISTS and CREATE OR REPLACE
+	// FUNCTION in schema glovo (steps 1, 2 and 3). A schema the migration role
+	// creates itself is always creatable by it, so this is read only when the
+	// schema exists.
+	needGlovo
+	// needPlpgsql: every trigger function of every step is LANGUAGE plpgsql,
+	// and CREATE FUNCTION needs USAGE on its language (revoked from PUBLIC on
+	// hardened clusters).
+	needPlpgsql
+)
+
+func (s *stepState) requireCreates(ctx context.Context, tx pgx.Tx, need int) error {
+	var db, pub, glv, lang bool
+	if err := tx.QueryRow(ctx, `SELECT
+	  has_database_privilege(current_user, current_database(), 'CREATE'),
+	  has_schema_privilege(current_user, 'public', 'CREATE'),
+	  CASE WHEN to_regnamespace('glovo') IS NULL THEN true ELSE has_schema_privilege(current_user, 'glovo', 'CREATE') END,
+	  has_language_privilege(current_user, 'plpgsql', 'USAGE')`).Scan(&db, &pub, &glv, &lang); err != nil {
+		return observeErr("read the CREATE privileges of the migration role", err)
+	}
+	if need&needDatabase != 0 && !db {
+		s.refusals = append(s.refusals, "the migration role lacks CREATE on the database, so CREATE SCHEMA IF NOT EXISTS glovo is refused")
+	}
+	if need&needPublic != 0 && !pub {
+		s.refusals = append(s.refusals, "the migration role lacks CREATE on schema public, so the work-items DDL is refused")
+	}
+	if need&needGlovo != 0 && !glv {
+		s.refusals = append(s.refusals, "the migration role lacks CREATE on schema glovo")
+	}
+	if need&needPlpgsql != 0 && !lang {
+		s.refusals = append(s.refusals, "the migration role lacks USAGE on language plpgsql, so CREATE FUNCTION is refused")
+	}
+	return nil
 }
 
 // approvalTriggers are the four enabled guards VerifyGlovoApprovalSchema counts.
@@ -284,13 +325,11 @@ func readApproval(ctx context.Context, tx pgx.Tx) (stepState, error) {
 			return s, err
 		}
 	}
-	// A database without the work-items tables gets them created in public.
-	var fresh, canCreate bool
-	if err := tx.QueryRow(ctx, `SELECT to_regclass('public.work_items') IS NULL, has_schema_privilege(current_user, 'public', 'CREATE')`).Scan(&fresh, &canCreate); err != nil {
-		return s, observeErr("read the public schema CREATE privilege", err)
-	}
-	if fresh && !canCreate {
-		s.refusals = append(s.refusals, "the migration role lacks CREATE on schema public, so the work-items tables cannot be created")
+	// Step 2 runs the generic block (CREATE ... IF NOT EXISTS in public) and
+	// then CREATE SCHEMA IF NOT EXISTS glovo with the approval DDL in it: all
+	// of it on every run, so the privileges are needed on every run.
+	if err := s.requireCreates(ctx, tx, needDatabase|needPublic|needGlovo|needPlpgsql); err != nil {
+		return s, err
 	}
 	missing, err := missingTriggers(ctx, tx, approvalTriggers)
 	if err != nil {
@@ -316,6 +355,9 @@ func readBasket(ctx context.Context, tx pgx.Tx) (stepState, error) {
 		return s, nil
 	}
 	if err := readComponent(ctx, tx, &s.components[0]); err != nil {
+		return s, err
+	}
+	if err := s.requireCreates(ctx, tx, needGlovo|needPlpgsql); err != nil {
 		return s, err
 	}
 	missing, err := missingTriggers(ctx, tx, basketTriggers)

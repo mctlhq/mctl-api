@@ -45,6 +45,7 @@ type env struct {
 	base, db                   string
 	mig, rt, wi, legacy, blind string
 	buf                        bytes.Buffer
+	rootc                      *pgx.Conn // one superuser connection per test, not one per call
 }
 
 func adminURL(t *testing.T) string {
@@ -119,11 +120,15 @@ func (e *env) root() *pgx.Conn {
 	if e.db != "" {
 		db = e.db
 	}
+	if e.rootc != nil && !e.rootc.IsClosed() {
+		return e.rootc
+	}
 	c, err := pgx.Connect(context.Background(), urlFor(e.t, e.base, "", "", db))
 	if err != nil {
 		e.t.Fatalf("admin connect: %v", err)
 	}
 	e.t.Cleanup(func() { _ = c.Close(context.Background()) })
+	e.rootc = c
 	return c
 }
 
@@ -240,15 +245,17 @@ func (e *env) dump() string {
 	for _, q := range []string{
 		`SELECT n.nspname || '.' || c.relname || ':' || c.relkind::text || ':' || pg_get_userbyid(c.relowner) || ':' || coalesce(c.relacl::text,'')
 		   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname IN ('glovo','public') AND c.relkind IN ('r','S','i') ORDER BY 1`,
-		`SELECT p.oid::regprocedure::text || ':' || pg_get_userbyid(p.proowner) || ':' || md5(p.prosrc) FROM pg_proc p
+		`SELECT p.oid::regprocedure::text || ':' || pg_get_userbyid(p.proowner) || ':' || md5(replace(replace(replace(p.prosrc, '%[1]s', 'MIG'), '%[2]s', 'RT'), '%[3]s', 'WI')) FROM pg_proc p
 		   WHERE p.pronamespace IN (to_regnamespace('glovo'), to_regnamespace('public')) ORDER BY 1`,
 		`SELECT tgrelid::regclass::text || ':' || tgname || ':' || tgenabled::text FROM pg_trigger WHERE NOT tgisinternal ORDER BY 1`,
 		`SELECT conrelid::regclass::text || ':' || conname || ':' || convalidated::text || ':' || pg_get_constraintdef(oid) FROM pg_constraint
 		   WHERE connamespace IN (to_regnamespace('glovo'), to_regnamespace('public')) ORDER BY 1`,
+		`SELECT attrelid::regclass::text || '.' || attname || ':' || format_type(atttypid, atttypmod) || ':' || attnotnull::text FROM pg_attribute
+		   WHERE attnum > 0 AND NOT attisdropped AND attrelid IN (SELECT oid FROM pg_class WHERE relkind = 'r' AND relnamespace IN (to_regnamespace('glovo'), to_regnamespace('public'))) ORDER BY 1`,
 		`SELECT attrelid::regclass::text || '.' || attname || ':' || attacl::text FROM pg_attribute WHERE attacl IS NOT NULL
 		   AND attrelid IN (SELECT oid FROM pg_class WHERE relnamespace IN (to_regnamespace('glovo'), to_regnamespace('public'))) ORDER BY 1`,
 	} {
-		rows, err := c.Query(ctx, q)
+		rows, err := c.Query(ctx, strings.NewReplacer("%[1]s", e.mig, "%[2]s", e.rt, "%[3]s", e.wi).Replace(q))
 		if err != nil {
 			e.t.Fatal(err)
 		}
@@ -975,6 +982,7 @@ func TestSetupRefusesASuperuserInEveryTransaction(t *testing.T) {
 func (e *env) dropRole(r string) {
 	e.t.Helper()
 	e.exec(e.root(), fmt.Sprintf(`REVOKE CONNECT ON DATABASE %s FROM %s`, e.db, r))
+	e.exec(e.root(), `DROP OWNED BY `+r) // grants an earlier step already made to it
 	e.exec(e.root(), `DROP ROLE `+r)
 }
 

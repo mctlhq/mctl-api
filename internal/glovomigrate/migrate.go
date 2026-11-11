@@ -131,6 +131,10 @@ type Config struct {
 	allowInsecureTLS bool
 	// onStep, when set, is called with the step name just before it is applied.
 	onStep func(name string)
+	// ignoreRefusals (tests only) applies the steps even though the preflight
+	// found refusals. It is the oracle of the preflight tests: a refusal is
+	// only correct if the step it guards would really have failed.
+	ignoreRefusals bool
 }
 
 // Step names, in apply order.
@@ -252,7 +256,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	// Apply. Refuse up front what a step would refuse later, so a known
 	// precondition never leaves an earlier step committed alone.
 	for _, s := range states {
-		if len(s.refusals) > 0 {
+		if len(s.refusals) > 0 && !cfg.ignoreRefusals {
 			return fmt.Errorf("%w: %s: %s; nothing was changed", ErrRefused, s.name, strings.Join(s.refusals, "; "))
 		}
 	}

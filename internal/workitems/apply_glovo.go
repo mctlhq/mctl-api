@@ -499,8 +499,6 @@ func grantRow(ctx context.Context, tx pgx.Tx, role, tbl string, privs, updateCol
 	return nil
 }
 
-// checkGlovoApprovalOwnership refuses schema glovo, or a relation or function
-// of this slice in it, that current_user (the migration role) does not own.
 // GlovoApprovalForeignOwned lists schema glovo, and the relations and
 // functions of the approval slice in it, that current_user (the migration
 // role) does not own.
@@ -537,6 +535,8 @@ func ApprovalStepForeignOwned(ctx context.Context, q dbq.Querier) ([]string, err
 	return append(g, a...), nil
 }
 
+// checkGlovoApprovalOwnership refuses schema glovo, or a relation or function
+// of this slice in it, that current_user (the migration role) does not own.
 func checkGlovoApprovalOwnership(ctx context.Context, q dbq.Querier) error {
 	foreign, err := GlovoApprovalForeignOwned(ctx, q)
 	if err != nil {
