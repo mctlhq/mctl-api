@@ -65,10 +65,18 @@ the refresh and serve path.
 Per connection, at most one `/oauth/refresh` request is in flight across all
 replicas.
 
-1. **Process-local single-flight.** Concurrent callers in one pod share one
-   refresh. This is load-bearing, not an optimization: the lease is
-   re-entrant for the same holder, so without it one pod would refresh once
-   per caller. Mutation M13 proves it.
+1. **One flight per connection, one lease holder per flight.** The only two
+   entry points that can refresh, `AccessToken` and `Rejected`, both go
+   through one process-local single-flight keyed by the connection alone;
+   the seen/force logic runs inside the flight. The lease holder id is
+   `HolderID/<random>` per flight, not per process, because the lease is
+   re-entrant for one holder: a process-wide id would let a second flight
+   (or a pod that shares a `HolderID`) take the lease and send the same
+   rotating refresh token again (found in review of #1020). The two layers
+   are independent: either alone serializes the flights, and the tests kill
+   each layer's removal separately only where the other cannot mask it
+   (holder alone: two managers with one `HolderID`; both removed:
+   `AccessToken` plus `Rejected` race).
 2. **Row lease.** `AcquireLease` is one `UPDATE ... WHERE lease_holder IS NULL
    OR lease_holder = me OR lease_until <= clock_timestamp()`. Time is the
    database clock, so replica clock skew does not matter. A replica that

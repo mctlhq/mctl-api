@@ -16,6 +16,8 @@ package session
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -260,7 +262,20 @@ func (m *Manager) Rejected(ctx context.Context, key Key, usedGeneration int64) (
 		m.audit("relogin_required", key, rec.Generation, ReasonAccessRejectedAfter)
 		return AccessToken{}, &ReloginError{Reason: ReasonAccessRejectedAfter}
 	}
-	return m.refresh(ctx, key, rec.Generation, true)
+	tok, err := m.refresh(ctx, key, rec.Generation, true)
+	if err == nil && tok.Generation <= usedGeneration {
+		// This call joined a flight that did not force (it found the old
+		// token still fresh), so the rejected token came back. That flight
+		// sent nothing; run once more, forced.
+		return m.refresh(ctx, key, rec.Generation, true)
+	}
+	return tok, err
+}
+
+func randSuffix() string {
+	b := make([]byte, 6)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 func stateErr(rec Record) error {
@@ -282,7 +297,11 @@ func tokenOf(rec Record) AccessToken {
 // seen is the generation the caller observed; force skips the freshness
 // double-check (a rejected token is stale whatever its expiry says).
 func (m *Manager) refresh(ctx context.Context, key Key, seen int64, force bool) (AccessToken, error) {
-	sfKey := fmt.Sprintf("%s|%s|%s|%d|%t", key.TenantID, key.PrincipalID, key.ConnectionID, seen, force)
+	// One flight per connection, whatever the entry point (AccessToken or
+	// Rejected) and whatever generation the caller saw: the seen/force logic
+	// runs INSIDE the flight, so two entry points can never each send the
+	// connection's refresh token.
+	sfKey := key.TenantID + "|" + key.PrincipalID + "|" + key.ConnectionID
 	// The shared call must not die with one caller's context: a rotated token
 	// has to reach the store even if the caller that triggered the refresh
 	// gave up. Each caller still stops waiting when its own ctx ends.
@@ -302,8 +321,13 @@ func (m *Manager) refresh(ctx context.Context, key Key, seen int64, force bool) 
 
 func (m *Manager) refreshOnce(ctx context.Context, key Key, seen int64, force bool) (AccessToken, error) {
 	deadline := m.cfg.Now().Add(m.cfg.WaitMax)
+	// The lease holder is unique per flight, not per process. The lease is
+	// re-entrant for one holder, so a process-wide id would let a second
+	// flight of this pod (or a misconfigured pod that shares HolderID) take
+	// the lease and send the same rotating refresh token again.
+	holder := m.cfg.HolderID + "/" + randSuffix()
 	for {
-		rec, err := m.cfg.Store.AcquireLease(ctx, key, m.cfg.HolderID, m.cfg.LeaseTTL)
+		rec, err := m.cfg.Store.AcquireLease(ctx, key, holder, m.cfg.LeaseTTL)
 		if errors.Is(err, ErrLeaseHeld) {
 			// Another replica is refreshing. Wait for its result instead of
 			// refreshing in parallel.
@@ -329,20 +353,20 @@ func (m *Manager) refreshOnce(ctx context.Context, key Key, seen int64, force bo
 		if serr := stateErr(rec); serr != nil {
 			return AccessToken{}, serr
 		}
-		return m.refreshHolding(ctx, key, rec, seen, force)
+		return m.refreshHolding(ctx, key, holder, rec, seen, force)
 	}
 }
 
 // refreshHolding runs with the lease held.
-func (m *Manager) refreshHolding(ctx context.Context, key Key, rec Record, seen int64, force bool) (AccessToken, error) {
+func (m *Manager) refreshHolding(ctx context.Context, key Key, holder string, rec Record, seen int64, force bool) (AccessToken, error) {
 	// Double-check under the lease: another replica may have refreshed
 	// between our read and our acquire. The generation moving is the proof.
 	if rec.Generation > seen && m.fresh(rec.Tokens) {
-		_ = m.cfg.Store.Release(ctx, key, m.cfg.HolderID, true)
+		_ = m.cfg.Store.Release(ctx, key, holder, true)
 		return tokenOf(rec), nil
 	}
 	if !force && rec.Generation == seen && m.fresh(rec.Tokens) {
-		_ = m.cfg.Store.Release(ctx, key, m.cfg.HolderID, true)
+		_ = m.cfg.Store.Release(ctx, key, holder, true)
 		return tokenOf(rec), nil
 	}
 	if rec.Tokens.Refresh == "" {
@@ -369,25 +393,25 @@ func (m *Manager) refreshHolding(ctx context.Context, key Key, rec Record, seen 
 		m.audit("refresh_rejected", key, rec.Generation, reason)
 		return AccessToken{}, &ReloginError{Reason: reason}
 	case errors.Is(err, ErrRefreshNotSent):
-		_ = m.cfg.Store.Release(ctx, key, m.cfg.HolderID, true)
+		_ = m.cfg.Store.Release(ctx, key, holder, true)
 		return AccessToken{}, fmt.Errorf("%w: refresh not sent", ErrUnavailable)
 	case err != nil:
 		// Unknown outcome: keep the intent so the next holder knows.
-		_ = m.cfg.Store.Release(ctx, key, m.cfg.HolderID, false)
+		_ = m.cfg.Store.Release(ctx, key, holder, false)
 		m.audit("refresh_unknown", key, rec.Generation, "outcome_unknown")
 		return AccessToken{}, fmt.Errorf("%w: refresh outcome unknown", ErrUnavailable)
 	}
 	if nt.Access == "" || nt.AccessExpiresAt.IsZero() {
 		// A malformed response may still have rotated the token and we have
 		// nothing to persist: unknown outcome, never an empty token.
-		_ = m.cfg.Store.Release(ctx, key, m.cfg.HolderID, false)
+		_ = m.cfg.Store.Release(ctx, key, holder, false)
 		m.audit("refresh_unknown", key, rec.Generation, "malformed_response")
 		return AccessToken{}, fmt.Errorf("%w: refresh response malformed", ErrUnavailable)
 	}
 	if nt.Refresh == "" {
 		nt.Refresh = rec.Tokens.Refresh // the provider did not rotate it
 	}
-	committed, err := m.persist(ctx, key, rec.Generation, nt)
+	committed, err := m.persist(ctx, key, holder, rec.Generation, nt)
 	if err != nil {
 		m.audit("rotated_not_persisted", key, rec.Generation, "persist_failed")
 		return AccessToken{}, err
@@ -402,15 +426,24 @@ func (m *Manager) refreshHolding(ctx context.Context, key Key, rec Record, seen 
 // ErrStale and ErrLeaseLost are not retried: a newer lineage won, and the
 // rotated pair is discarded on purpose (the owner's later load, or another
 // replica's commit, is authoritative).
-func (m *Manager) persist(ctx context.Context, key Key, expected int64, nt Tokens) (Record, error) {
+func (m *Manager) persist(ctx context.Context, key Key, holder string, expected int64, nt Tokens) (Record, error) {
 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), m.cfg.PersistTimeout)
 	defer cancel()
 	for i := 0; i < m.cfg.PersistAttempts; i++ {
-		rec, err := m.cfg.Store.Commit(pctx, key, m.cfg.HolderID, expected, nt)
+		rec, err := m.cfg.Store.Commit(pctx, key, holder, expected, nt)
 		if err == nil {
 			return rec, nil
 		}
-		if errors.Is(err, ErrStale) || errors.Is(err, ErrLeaseLost) {
+		if errors.Is(err, ErrStale) {
+			// An earlier attempt may have committed while its reply was lost:
+			// the row then holds exactly our pair one generation up.
+			if cur, gerr := m.cfg.Store.Get(pctx, key); gerr == nil && cur.State == StateActive &&
+				cur.Generation == expected+1 && cur.FromRefresh && cur.Tokens.Refresh == nt.Refresh {
+				return cur, nil
+			}
+			return Record{}, err
+		}
+		if errors.Is(err, ErrLeaseLost) {
 			return Record{}, err
 		}
 		select {

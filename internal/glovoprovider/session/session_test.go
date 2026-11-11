@@ -598,3 +598,100 @@ func TestKeyringFromEnv(t *testing.T) {
 		t.Fatal("short key accepted")
 	}
 }
+
+// AccessToken (expired token) and Rejected (a 401 on the same generation) run
+// at the same time in ONE process. They share a holder id, and the lease is
+// re-entrant for the same holder, so without one flight per connection both
+// send the same rotating refresh token.
+func TestAccessTokenAndRejectedNeverSendTheSameRefreshTokenTwice(t *testing.T) {
+	stores(t, func(t *testing.T, s Store) {
+		ctx := context.Background()
+		ref := newStrict("SYNTH-REFRESH-0")
+		ref.delay = 200 * time.Millisecond
+		m := mgr(s, ref, "replica-a", &recAudit{})
+		_, _ = m.Load(ctx, testKey, expired())
+
+		var wg sync.WaitGroup
+		errs := make(chan error, 8)
+		toks := make(chan AccessToken, 8)
+		for i := 0; i < 4; i++ {
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				tok, err := m.AccessToken(ctx, testKey)
+				errs <- err
+				toks <- tok
+			}()
+			go func() {
+				defer wg.Done()
+				tok, err := m.Rejected(ctx, testKey, 1)
+				errs <- err
+				toks <- tok
+			}()
+		}
+		wg.Wait()
+		close(errs)
+		close(toks)
+		for err := range errs {
+			if err != nil {
+				t.Errorf("caller error: %v", err)
+			}
+		}
+		for tok := range toks {
+			if tok.Generation < 2 {
+				t.Errorf("a caller was handed the rejected generation: %+v", tok)
+			}
+		}
+		if n := ref.calls.Load(); n != 1 {
+			t.Fatalf("provider refresh calls = %d, want exactly 1 per refresh-token generation", n)
+		}
+		if st, _ := m.Status(ctx, testKey); st.State != StateActive || st.Generation != 2 {
+			t.Fatalf("status = %+v, want active gen 2", st)
+		}
+	})
+}
+
+// The same holder id used by two flights must not re-enter the lease: a
+// second flight for the same connection waits like a remote replica.
+func TestLeaseIsNotReentrantAcrossFlights(t *testing.T) {
+	pool := pgPool(t)
+	ring := testRing(t)
+	ref := newStrict("SYNTH-REFRESH-0")
+	ref.delay = 200 * time.Millisecond
+	ctx := context.Background()
+	// Two managers with the SAME HolderID model two flights of one pod.
+	a1 := mgr(NewPostgres(pool, ring), ref, "same-pod", nil)
+	a2 := mgr(NewPostgres(pool, ring), ref, "same-pod", nil)
+	_, _ = a1.Load(ctx, testKey, expired())
+	var wg sync.WaitGroup
+	for _, m := range []*Manager{a1, a2} {
+		wg.Add(1)
+		go func(m *Manager) {
+			defer wg.Done()
+			if _, err := m.AccessToken(ctx, testKey); err != nil {
+				t.Errorf("%v", err)
+			}
+		}(m)
+	}
+	wg.Wait()
+	if n := ref.calls.Load(); n != 1 {
+		t.Fatalf("provider refresh calls = %d, want 1", n)
+	}
+}
+
+func TestPutCannotOverwriteAnotherOwnersRowInTheUpsert(t *testing.T) {
+	pool := pgPool(t)
+	st := NewPostgres(pool, testRing(t))
+	ctx := context.Background()
+	_, _ = st.Put(ctx, testKey, expired())
+	// Model the lost race: the owner check saw no row, the insert then hits the conflict.
+	tx, _ := pool.Begin(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
+	err := st.upsert(ctx, tx, Key{"ten_b", "prn_b", testKey.ConnectionID}, 9, expired())
+	mustIs(t, err, ErrNotFound)
+	_ = tx.Rollback(ctx)
+	rec, err := st.Get(ctx, testKey)
+	if err != nil || rec.Generation != 1 {
+		t.Fatalf("row changed: %+v %v", rec, err)
+	}
+}

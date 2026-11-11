@@ -156,25 +156,40 @@ func (p *Postgres) Put(ctx context.Context, key Key, t Tokens) (Record, error) {
 		return Record{}, ErrNotFound
 	}
 	gen++
-	keyID, blob, err := p.ring.seal(key, gen, t)
-	if err != nil {
-		return Record{}, fmt.Errorf("%w: seal", ErrUnavailable)
-	}
-	_, err = tx.Exec(ctx, `INSERT INTO glovo.glovo_provider_sessions
-	  (connection_id, tenant_id, principal_id, state, key_id, ciphertext, generation, access_expires_at)
-	  VALUES ($1,$2,$3,'active',$4,$5,$6,$7)
-	  ON CONFLICT (connection_id) DO UPDATE SET state='active', key_id=EXCLUDED.key_id,
-	    ciphertext=EXCLUDED.ciphertext, generation=EXCLUDED.generation,
-	    access_expires_at=EXCLUDED.access_expires_at, from_refresh=FALSE, refresh_intent=FALSE,
-	    relogin_reason='', lease_holder=NULL, lease_until=NULL, updated_at=clock_timestamp()`,
-		key.ConnectionID, key.TenantID, key.PrincipalID, keyID, blob, gen, t.AccessExpiresAt)
-	if err != nil {
-		return Record{}, fmt.Errorf("%w: write", ErrUnavailable)
+	if err := p.upsert(ctx, tx, key, gen, t); err != nil {
+		return Record{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Record{}, fmt.Errorf("%w: commit", ErrUnavailable)
 	}
 	return p.Get(ctx, key)
+}
+
+// upsert writes the owner load. The DO UPDATE is guarded by the owner columns:
+// the FOR UPDATE above locks nothing when the row does not exist yet, so two
+// racing first loads for one connection id from different owners meet here,
+// and the loser must not overwrite the winner's ciphertext.
+func (p *Postgres) upsert(ctx context.Context, tx pgx.Tx, key Key, gen int64, t Tokens) error {
+	keyID, blob, err := p.ring.seal(key, gen, t)
+	if err != nil {
+		return fmt.Errorf("%w: seal", ErrUnavailable)
+	}
+	tag, err := tx.Exec(ctx, `INSERT INTO glovo.glovo_provider_sessions AS s
+	  (connection_id, tenant_id, principal_id, state, key_id, ciphertext, generation, access_expires_at)
+	  VALUES ($1,$2,$3,'active',$4,$5,$6,$7)
+	  ON CONFLICT (connection_id) DO UPDATE SET state='active', key_id=EXCLUDED.key_id,
+	    ciphertext=EXCLUDED.ciphertext, generation=EXCLUDED.generation,
+	    access_expires_at=EXCLUDED.access_expires_at, from_refresh=FALSE, refresh_intent=FALSE,
+	    relogin_reason='', lease_holder=NULL, lease_until=NULL, updated_at=clock_timestamp()
+	  WHERE s.tenant_id = EXCLUDED.tenant_id AND s.principal_id = EXCLUDED.principal_id`,
+		key.ConnectionID, key.TenantID, key.PrincipalID, keyID, blob, gen, t.AccessExpiresAt)
+	if err != nil {
+		return fmt.Errorf("%w: write", ErrUnavailable)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound // the connection id belongs to another owner
+	}
+	return nil
 }
 
 func (p *Postgres) Get(ctx context.Context, key Key) (Record, error) {
@@ -230,15 +245,21 @@ func (p *Postgres) Commit(ctx context.Context, key Key, holder string, expected 
 	if err != nil {
 		return Record{}, fmt.Errorf("%w: seal", ErrUnavailable)
 	}
-	var gen int64
-	err = p.pool.QueryRow(ctx, `UPDATE glovo.glovo_provider_sessions
+	row := p.pool.QueryRow(ctx, `UPDATE glovo.glovo_provider_sessions
 	  SET key_id=$6, ciphertext=$7, generation=generation+1, access_expires_at=$8, from_refresh=TRUE,
 	      refresh_intent=FALSE, lease_holder=NULL, lease_until=NULL, updated_at=clock_timestamp()
 	  WHERE connection_id=$1 AND tenant_id=$2 AND principal_id=$3 AND state='active'
 	    AND generation=$4 AND lease_holder=$5
-	  RETURNING generation`,
-		key.ConnectionID, key.TenantID, key.PrincipalID, expected, holder, keyID, blob, t.AccessExpiresAt).Scan(&gen)
-	if errors.Is(err, pgx.ErrNoRows) {
+	  RETURNING `+cols,
+		key.ConnectionID, key.TenantID, key.PrincipalID, expected, holder, keyID, blob, t.AccessExpiresAt)
+	// The committed row is read back by the UPDATE itself: a follow-up SELECT
+	// that failed would report a committed rotation as an error, and the
+	// retry would then see generation expected+1 and answer ErrStale.
+	rec, err := p.scan(row, key)
+	if err == nil {
+		return rec, nil
+	}
+	if errors.Is(err, ErrNotFound) {
 		cur, gerr := p.Get(ctx, key)
 		if gerr != nil {
 			return Record{}, gerr
@@ -248,10 +269,7 @@ func (p *Postgres) Commit(ctx context.Context, key Key, holder string, expected 
 		}
 		return Record{}, ErrStale
 	}
-	if err != nil {
-		return Record{}, fmt.Errorf("%w: write", ErrUnavailable)
-	}
-	return p.Get(ctx, key)
+	return Record{}, err
 }
 
 func (p *Postgres) Release(ctx context.Context, key Key, holder string, outcomeKnown bool) error {
