@@ -1,0 +1,3 @@
+{"id": 990001, "storeId": 700001, "storeAddressId": 710001, "storeName": "Synthetic Burger Bar",
+ "creationTime": "2026-09-01T10:00:00Z", "total": {"formatted": "3.50 EUR"},
+ "boughtProducts": [{"ids": {"id": 800003}, "name": "Fries", "quantity": {"increments": 1}, "price": "3.50 EUR"}]}

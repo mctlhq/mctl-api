@@ -11,7 +11,9 @@ The provider-neutral core of the Glovo real-provider direction. Packages:
   past order into a read-only `BasketIntent`.
 
 Nothing here performs network I/O or is wired into a route, an MCP tool or
-startup. No live adapter exists yet. Release holds (mctl-api#934,
+startup. The live adapter (`internal/glovoprovider/live`, see "Live adapter"
+below) is the only package that does network I/O, and nothing imports it
+outside its own tests. Release holds (mctl-api#934,
 mctl-gitops#2528) and the G3 provider-access gate are unaffected.
 
 ## Synthetic fixture vs live provider
@@ -181,3 +183,73 @@ write. `CanTransition` encodes this, and a test pins it.
   the past order id, the plan's reason codes, and the digests.
 - Error text carries only fixed operation and kind strings, never provider
   response text.
+
+## Live adapter (`internal/glovoprovider/live`)
+
+A port of a small subset of `denya/glovo-skill` (commit
+`42f25483bf305f8c3c26d1212080e05849c1e563`, `api.mjs`) onto the `Provider`
+interface, for the owner's own Glovo account (mctl-api#1006, owner decision
+2026-11-11). Not wired into any route or MCP tool; `TestLiveAdapterIsNotWired`
+fails if a non-test file outside the package imports it.
+
+- `Reader` implements `glovoprovider.Provider` and has no write method.
+- `Writer` embeds a `Reader` and adds `ApplyCart` through the separate
+  `CartMutator` interface (add with options, set quantity, remove).
+- The bearer comes from an injected `TokenSource` (`Token`, `Refresh`); the
+  adapter never stores or logs it.
+- Store ids are `"<storeId>:<storeAddressId>"`, the pair every Glovo store
+  endpoint needs.
+
+| Upstream tool | Outcome |
+| --- | --- |
+| `glovo_get_saved_locations` | ported as `Location`: only country and city codes are read, to prove the account has an address in the configured city; every other field is never decoded |
+| `glovo_browse_stores` | ported as `Stores` (restaurant and grocery walls, limit 1..50) |
+| `glovo_search_store_items` | ported as `Search` |
+| `glovo_get_product` | ported as `Product` (modifier groups, price, availability) |
+| `glovo_get_purchase_history` | ported as `OrderHistory` (cursor pages of 15, then each order detail) |
+| `glovo_get_order_items` | ported as `Order` (404 is `ErrAbsent`) |
+| `glovo_get_basket` | ported as `Cart` and `Reader.CartForStore` (basket id and `basketVersion` kept internally; the version is `CartSnapshot.Version`) |
+| `glovo_add_to_basket`, `glovo_set_quantity`, `glovo_remove_from_basket` | ported as `Writer.ApplyCart`, not reachable from any tool |
+| `glovo_get_store_menu`, `glovo_browse_store_catalog` | `Catalog` returns `ErrNotSupported`: the menu is a lazily fetched tree and a partial menu would break "whole menu or unobserved" |
+| `glovo_get_shopping_guide`, `glovo_auth_status`, `glovo_get_location`, `glovo_get_store`, `glovo_get_store_recommendations`, `glovo_get_store_order_options`, `glovo_get_suggestions`, `glovo_preview_reorder`, `glovo_plan_reorder`, `glovo_get_order_stats`, `glovo_analyze_order_history` | not ported: not needed by the `Provider` model (planning is `internal/glovoprovider/reorder`) |
+| `glovo_search_locations`, `glovo_select_location`, `glovo_set_location` | excluded: location change |
+| `glovo_login` | excluded: session custody is a separate component |
+| checkout, payment, order placement | not in upstream and not implemented |
+| `Glovo-Perseus-Consent: essential_functional_marketing` header | not sent: the adapter never asserts marketing consent |
+
+Safety properties, each with a test that fails when the property is removed
+(mutation-verified):
+
+- Host allowlist: only the configured API host; a redirect is never followed
+  (3xx is `ErrUnavailable`) and the transport refuses any other host.
+- Every request has a deadline (`RequestTimeout`, or the caller's if shorter)
+  and a body size cap (`MaxResponseBytes`).
+- A 401 triggers one `TokenSource.Refresh` and one replay, then `ErrAuth`.
+  There is no other retry (429 is `ErrRateLimited`, not retried).
+- Non-2xx, truncated, malformed or drifted bodies are `ErrUnobserved` with
+  cause `ErrUnavailable`, `ErrSchemaDrift`, `ErrAuth`, `ErrRateLimited` or
+  `ErrResponseTooLarge`, never an empty list. A clean `[]` is an empty list.
+- Unknown is not available: a product or option with no availability signal
+  is reported unavailable.
+- Personal fields are not declared in the wire structs, so they are never
+  decoded; errors carry no URL, header, token or response text.
+
+`ApplyCart` follows the order: read the live basket, compare the live
+`basketVersion` with the caller's `ExpectedVersion` (`NoBasketVersion` when
+no basket should exist) and write nothing on a mismatch
+(`precondition_failed`, `ErrPrecondition`), validate the selected options
+against the live product view, write once, reread, and compare the reread
+content with the requested change (`reconciled`, or `reconcile_mismatch`).
+The write is never retried and never replayed after a 401. A 4xx is
+`rejected` (`ErrWriteRejected`); a timeout, 5xx or dropped connection is
+`reconcile_unknown` (`ErrWriteUnknown`), and the caller must read the cart
+back. Approval-grant verification stays outside the adapter, as in
+`CartWriter`.
+
+Unverified, because no real Glovo call can be made in this change: every wire
+shape (field names come from upstream code and tests, not from recorded real
+responses), whether the raw token (no `Bearer` prefix, as upstream) is what
+the API expects, whether option payloads carry an availability flag, whether
+line prices are line totals, the `/baskets` list shape, and whether a PUT
+echoing the basket is accepted. The fixtures in `live/testdata` are
+synthetic.

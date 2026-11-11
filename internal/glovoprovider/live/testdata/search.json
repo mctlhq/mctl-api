@@ -1,0 +1,5 @@
+{"totalProducts": 3, "results": [{"products": [
+  {"id": 800001, "name": "Classic Burger", "priceInfo": {"amount": 9.5, "displayText": "9.50 EUR"}, "available": true, "categoryId": 600001},
+  {"id": 800002, "name": "Classic Burger Deluxe", "priceInfo": {"amount": "11,00 EUR"}, "outOfStock": true},
+  {"id": 800004, "name": "Mystery Burger", "priceInfo": {"amount": 5}}
+]}]}

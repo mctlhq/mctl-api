@@ -1,0 +1,8 @@
+{"id": 990003, "storeId": 700001, "storeAddressId": 710001, "storeName": "Synthetic Burger Bar",
+ "creationTime": 1790000300000, "currentStatus": {"type": "DELIVERED"}, "total": {"formatted": "20,60 EUR"},
+ "reorderData": {"allowed": true}, "courier": {"name": "PIISENTINEL Rider"}, "deliveryAddress": {"addressLine": "PIISENTINEL Street 0"},
+ "customer": {"phone": "+000PIISENTINEL", "email": "piisentinel@example.invalid"},
+ "boughtProducts": [
+  {"id": 800001, "name": "Classic Burger", "quantity": "2", "price": "20.60 EUR", "customizationsDescription": "Medium, Cheese",
+   "customizations": [{"ids": {"groupLegacyId": 701, "legacyId": 801}, "name": "Medium"}, {"ids": {"groupLegacyId": 702, "legacyId": 811}, "name": "Cheese"}]}
+ ]}

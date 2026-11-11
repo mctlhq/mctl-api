@@ -1,0 +1,7 @@
+{"basketId": "bsk-synth-1", "basketVersion": 7, "storeId": 700001, "storeAddressId": 710001, "handlingStrategy": "DELIVERY",
+ "basketPrice": {"final": {"formatted": "10.30 EUR"}},
+ "products": [
+  {"ids": {"basketProductId": "bp-synth-1", "id": 800001, "externalId": "ext-burger-1", "storeProductId": "sp-burger-1"},
+   "name": "Classic Burger", "quantity": {"increments": 1}, "price": {"final": {"major": 10.3}},
+   "customizations": [{"ids": {"groupLegacyId": 701, "legacyId": 801}, "name": "Medium", "quantity": {"increments": 1}}]}
+ ]}
