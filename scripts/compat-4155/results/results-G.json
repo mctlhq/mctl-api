@@ -1,0 +1,217 @@
+[
+ {
+  "id": "G0",
+  "title": "1.117.0 sweep submit sends service and slug (no execution_id)",
+  "verdict": "PASS",
+  "evidence": {
+   "worker_request": [
+    {
+     "method": "POST",
+     "path": "/api/v1/operations/mctl-agents-implement/execute",
+     "status": 202,
+     "replica": "127.0.0.1:18301",
+     "req": "{\"service\":\"mctl-web\",\"slug\":\"issue-133809-compat\"}",
+     "resp": "{\"message\":\"Operation submitted. Track progress: GET /api/v1/workflows/mctl-agents-implement-74cdb6bc\",\"operation\":\"mctl-agents-implement\",\"trace_id\":\"0c97e38328df5f25f0622be36761eb8a\",\"workflow\":{\"workflowName\":\"mctl-agents-implement-74cdb6bc\",\"namespace\":\"ar"
+    }
+   ],
+   "argo_workflow_arguments": [
+    [
+     "service",
+     "mctl-web"
+    ],
+    [
+     "slug",
+     "issue-133809-compat"
+    ],
+    [
+     "max_proposals",
+     "1"
+    ]
+   ],
+   "temporal_workflow": "swept-63808-133810"
+  },
+  "notes": ""
+ },
+ {
+  "id": "G1",
+  "title": "exchange with no grant -> fail closed 403 agent_run_grant_not_found",
+  "verdict": "PASS",
+  "evidence": {
+   "mode": "enforce",
+   "exchange": "refused",
+   "error": "run token exchange refused: HTTP 403 agent_run_grant_not_found"
+  },
+  "notes": ""
+ },
+ {
+  "id": "G2",
+  "title": "exchange with a requested but undecided grant -> 403",
+  "verdict": "PASS",
+  "evidence": {
+   "create": {
+    "status": "pending",
+    "reason": "",
+    "id": "aar_06fced2bd9f3483a9da4c96c33b77b7e",
+    "state": "pending",
+    "intent_hash_matches": true,
+    "digest": "sha256:d0ad7875cd72f9332d0419615de5195aede7afa72787b2411b876030e67cf2d4"
+   },
+   "exchange": {
+    "mode": "enforce",
+    "exchange": "refused",
+    "error": "run token exchange refused: HTTP 403 agent_run_grant_not_found"
+   }
+  },
+  "notes": ""
+ },
+ {
+  "id": "G3",
+  "title": "exchange with a decided but unspent grant -> 403",
+  "verdict": "PASS",
+  "evidence": {
+   "decision_status": 200,
+   "exchange": {
+    "mode": "enforce",
+    "exchange": "refused",
+    "error": "run token exchange refused: HTTP 403 agent_run_grant_not_found"
+   }
+  },
+  "notes": ""
+ },
+ {
+  "id": "G4",
+  "title": "exchange after a spent, human-decided grant -> 201 scope implement-grant, scope probe refused, self-revoke",
+  "verdict": "PASS",
+  "evidence": {
+   "spend": {
+    "workflow": "mctl-agents-approve-676cf6cd"
+   },
+   "exchange": {
+    "mode": "enforce",
+    "exchange": "ok",
+    "scope": "implement-grant",
+    "execution_id": "",
+    "token_id": "art_e0c38eb0-0561-4c84-88f2-488265086d4a",
+    "expires_at": "2026-11-11T04:23:37.273703Z",
+    "probe_enforced": true,
+    "revoked": true
+   },
+   "http_trail": [
+    {
+     "method": "POST",
+     "path": "/api/v1/agent-run-tokens/exchange",
+     "status": 403,
+     "replica": "127.0.0.1:18301",
+     "req": "",
+     "resp": "{\"code\":\"agent_run_grant_not_found\",\"error\":\"no decided grant has been spent for mctl-web/issue-133809-compat\"}\n"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/agent-run-tokens/exchange",
+     "status": 403,
+     "replica": "127.0.0.1:18301",
+     "req": "",
+     "resp": "{\"code\":\"agent_run_grant_not_found\",\"error\":\"no decided grant has been spent for mctl-web/issue-133809-compat\"}\n"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/agent-run-tokens/exchange",
+     "status": 403,
+     "replica": "127.0.0.1:18301",
+     "req": "",
+     "resp": "{\"code\":\"agent_run_grant_not_found\",\"error\":\"no decided grant has been spent for mctl-web/issue-133809-compat\"}\n"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/agent-run-tokens",
+     "status": 201,
+     "replica": "127.0.0.1:18301",
+     "req": "{\"agent\":\"issue-investigator\",\"execution_id\":\"we_ce862b65-e206-4e7a-9def-774061ce93ce\",\"ttl_seconds\":900,\"permissions\":[]}",
+     "resp": "{\"agent\":\"issue-investigator\",\"execution_id\":\"we_ce862b65-e206-4e7a-9def-774061ce93ce\",\"expires_at\":\"2026-11-11T02:38:48.524204Z\",\"permissions\":[],\"scope\":\"\",\"token\":\"art_s9PRcAwNSv0qLNhzcgd9wlKTrOOp0u2lAZ3tyngS9Aw\",\"token_id\":\"art_43e8a5a8-a416-468f-94c7-064e"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/agent-run-tokens/exchange",
+     "status": 201,
+     "replica": "127.0.0.1:18301",
+     "req": "",
+     "resp": "{\"agent\":\"implementer\",\"execution_id\":\"\",\"expires_at\":\"2026-11-11T04:23:37.273703Z\",\"grant_id\":\"aar_06fced2bd9f3483a9da4c96c33b77b7e\",\"permissions\":[],\"scope\":\"implement-grant\",\"token\":\"art_7KIThNPuezzn3kwXaqCsVPmn-0B5lGwjLYd1wJBpo0k\",\"token_id\":\"art_e0c38eb0-"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/agent-run-tokens/self/revoke",
+     "status": 204,
+     "replica": "127.0.0.1:18301",
+     "req": "",
+     "resp": ""
+    }
+   ]
+  },
+  "notes": "decider is oidc:dev-user: the API ran with AUTH_REQUIRED=false, so the 'human' is the local dev admin, not a real IdP user"
+ },
+ {
+  "id": "G5",
+  "title": "second pod of the same run exchanges again against the same spent grant",
+  "verdict": "PASS",
+  "evidence": {
+   "mode": "enforce",
+   "exchange": "ok",
+   "scope": "implement-grant",
+   "execution_id": "",
+   "token_id": "art_79770cab-2960-46f0-88c4-86cefdee7f47",
+   "expires_at": "2026-11-11T04:23:37.85989Z",
+   "probe_enforced": true,
+   "revoked": true
+  },
+  "notes": ""
+ },
+ {
+  "id": "G6",
+  "title": "exchange for an implement run with slug missing -> fail closed",
+  "verdict": "PASS",
+  "evidence": {
+   "submit_status": 202,
+   "exchange": {
+    "mode": "enforce",
+    "exchange": "refused",
+    "error": "run token exchange refused: HTTP 403 agent_run_exchange_refused"
+   }
+  },
+  "notes": ""
+ },
+ {
+  "id": "G7",
+  "title": "exchange for an implement run with slug with a separator",
+  "verdict": "PASS",
+  "evidence": {
+   "submit_status": 400,
+   "body": {
+    "code": "validation_failed",
+    "error": "validation failed: slug: must match pattern ^[a-z0-9][a-z0-9.-]{0,120}$",
+    "validationErrors": [
+     "slug: must match pattern ^[a-z0-9][a-z0-9.-]{0,120}$"
+    ]
+   }
+  },
+  "notes": "refused already at submit by the API validation, so no run to exchange for"
+ },
+ {
+  "id": "G8",
+  "title": "execution-bound implement run (DevLoop submit shape) -> scope implement, bound to its execution",
+  "verdict": "PASS",
+  "evidence": {
+   "submit_status": 202,
+   "exchange": {
+    "mode": "enforce",
+    "exchange": "ok",
+    "scope": "implement",
+    "execution_id": "we_ce862b65-e206-4e7a-9def-774061ce93ce",
+    "token_id": "art_7e869cf7-1fa3-4c0f-9884-761c536cb2cd",
+    "expires_at": "2026-11-11T04:23:52.21562Z",
+    "probe_enforced": true,
+    "revoked": true
+   }
+  },
+  "notes": "submitted by the driver: the DevLoop's own submit cannot progress locally (needs GitHub), so this is the API half only"
+ }
+]
