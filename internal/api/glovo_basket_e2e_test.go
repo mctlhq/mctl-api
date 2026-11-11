@@ -57,7 +57,10 @@ type mcpBasketEnv struct {
 	priv ed25519.PrivateKey
 }
 
-func newMCPBasketEnv(t *testing.T) *mcpBasketEnv {
+// newMCPBasketEnv builds the harness; extra runs last in the router's
+// configure step, with the basket store, to mount more on top (the approval
+// page of the integration test).
+func newMCPBasketEnv(t *testing.T, extra ...func(e *e2eEnv, o *Options, store *glovobasket.PGStore)) *mcpBasketEnv {
 	t.Helper()
 	be := &mcpBasketEnv{}
 	e := newE2E(t, e2eOpts{configure: func(e *e2eEnv, o *Options) {
@@ -114,6 +117,9 @@ func newMCPBasketEnv(t *testing.T) *mcpBasketEnv {
 			Decisions: &workitems.GlovoBasketDecisions{Reader: e.pool, Begin: e.pool.Begin,
 				ReadyFn: func(ctx context.Context) error { return glovobasket.VerifySchema(ctx, e.pool) }}}
 		o.ApprovalBindingMode = ApprovalBindingEnforce
+		for _, f := range extra {
+			f(e, o, store)
+		}
 	}})
 	be.e2eEnv = e
 
