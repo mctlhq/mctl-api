@@ -1,0 +1,1 @@
+{"expected_version":2,"trigger":{"kind":"schedule","cron":"0 9 * * *","zone":"UTC"}}

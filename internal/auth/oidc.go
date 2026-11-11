@@ -79,6 +79,10 @@ type User struct {
 	// reason as service: it is how the caller authenticated, not a claim.
 	securityProvider string
 
+	// bridgeProvider is the configured ref of a bridge-provider principal
+	// (mctl-api#962). Unexported for the same reason as service.
+	bridgeProvider string
+
 	// registryPublisher is set only on the registry-publisher principal,
 	// authenticated by MCTL_REGISTRY_PUBLISHER_TOKEN (mctlhq/mctl-agents#470).
 	// Unexported for the same reason as service.
@@ -88,6 +92,11 @@ type User struct {
 	// principal, authenticated by MCTL_SUPPORT_INCIDENT_PRODUCER_TOKEN
 	// (mctl-api#830). Unexported for the same reason as service.
 	supportIncidentProducer bool
+
+	// orchestratorDevLoop is set only on the orchestrator DevLoop principal,
+	// a configured federated machine identity (mctl-api#963). Unexported for
+	// the same reason as service.
+	orchestratorDevLoop bool
 
 	// ci is set only on a GitHub Actions OIDC principal (mctl-api#530):
 	// one CI job of ciRepository, whose immutable repository id is
@@ -169,6 +178,22 @@ type User struct {
 	// routes mctl-support relays (mctl-api#849).
 	tokenAudience   []string
 	supportAudience bool
+	// glovoAudience records that it is exactly the Glovo resource.
+	glovoAudience bool
+	// teamGrantID and selectedTenant are the signed tgr and stn claims of a
+	// Glovo-audience token; empty for every other credential.
+	teamGrantID    string
+	selectedTenant string
+	// glovoControlWorker is set only on the Glovo control-worker principal
+	// (mctl-api#985). Unexported for the same reason as service.
+	glovoControlWorker bool
+
+	// glovoWorker is set only on the Glovo worker principal, built by
+	// NewGlovoWorkerUser from the test-only worker credential.
+	glovoWorker bool
+	// glovoFacade is set only on the Glovo join facade principal, built by
+	// NewGlovoFacadeUser from a matched MCTL_GLOVO_FACADE_TOKEN.
+	glovoFacade bool
 
 	// oauthClientID is the verified client_id claim of a local OAuth access
 	// token. Provenance only: never read for authorization.
@@ -208,6 +233,8 @@ type User struct {
 	// limited to and the principal that minted the token.
 	boundTenant    string
 	runRequestedBy string
+	// pinnedGrantID is the DevLoop grant a PinnedGrant scope is pinned to.
+	pinnedGrantID string
 }
 
 // NewGitHubUser builds a principal whose ID is a GitHub-verified login.
@@ -621,6 +648,12 @@ func (u *User) HasPermission(permission string) bool {
 		return u.evidenceWriter || u.IsAdmin()
 	case PermissionSecurityIngest:
 		return u.securityProvider != "" || u.IsAdmin()
+	case PermissionBridgeProvider:
+		// Only the bridge provider itself: not an admin, not a service.
+		return u.bridgeProvider != ""
+	case PermissionGlovoControlDispatch:
+		// Only the control worker itself: not an admin, not a service.
+		return u.glovoControlWorker
 	case PermissionSecurityRemediate:
 		// Held by the direct service principal and, through the agent
 		// branch above, by an agent run minted with it. Not by a
@@ -1034,6 +1067,8 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 	registryPublisher := registryPublisherToken()
 	supportProducer := supportIncidentProducerToken()
 	securityProviders := securityProviderTokens()
+	glovoWorker := glovoWorkerToken()
+	glovoFacade := glovoFacadeToken()
 	var cfg middlewareConfig
 	for _, o := range opts {
 		o(&cfg)
@@ -1042,7 +1077,7 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 	federationDisabled := federationKillSwitchOn(os.Getenv("MCTL_FEDERATION_DISABLED"))
 	registry := cfg.federationRegistry
 	if !federationDisabled && registry == nil {
-		registry = defaultFederationRegistry(validator, resolver, dex, oauth, surfaces, usageWriter, evidenceWriter, registryPublisher, supportProducer, securityProviders)
+		registry = defaultFederationRegistry(validator, resolver, dex, oauth, surfaces, usageWriter, evidenceWriter, registryPublisher, supportProducer, securityProviders, glovoWorker, glovoFacade)
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -1127,6 +1162,10 @@ func Middleware(validator *GitHubValidator, resolver TenantResolver, dex *DexVer
 					user = sip
 				} else if sp := securityProviderUserFor(securityProviders, token); sp != nil {
 					user = sp
+				} else if gw := glovoWorkerUserFor(glovoWorker, token); gw != nil {
+					user = gw
+				} else if gf := glovoFacadeUserFor(glovoFacade, token); gf != nil {
+					user = gf
 				} else if isJWT(token) {
 					// Peek at the JWT issuer to route to the correct verifier.
 					if oauth != nil && jwtIssuer(token) == oauth.BaseURL {
@@ -1257,7 +1296,8 @@ func federationKillSwitchOn(v string) bool {
 // federation_config.go, with audience enforcement); this default is what
 // every existing caller of Middleware -- including every test in this
 // package -- exercises unchanged.
-func defaultFederationRegistry(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier, oauth *OAuthServer, surfaces map[string]string, usageWriter, evidenceWriter, registryPublisher, supportProducer string, securityProviders map[string]string) *Registry {
+func defaultFederationRegistry(validator *GitHubValidator, resolver TenantResolver, dex *DexVerifier, oauth *OAuthServer, surfaces map[string]string, usageWriter, evidenceWriter, registryPublisher, supportProducer string, securityProviders map[string]string, glovoWorker, glovoFacade string) *Registry {
+	bridgeProviders := bridgeProviderTokens()
 	static := []Provider{
 		newServiceTokenProvider(func() string { return strings.TrimSpace(os.Getenv("MCTL_AGENT_SERVICE_TOKEN")) }),
 		newSurfaceProvider(func() map[string]string { return surfaces }),
@@ -1266,6 +1306,9 @@ func defaultFederationRegistry(validator *GitHubValidator, resolver TenantResolv
 		newRegistryPublisherProvider(func() string { return registryPublisher }),
 		newSupportIncidentProducerProvider(func() string { return supportProducer }),
 		newSecurityProviderProvider(func() map[string]string { return securityProviders }),
+		newBridgeProviderProvider(func() map[string]string { return bridgeProviders }),
+		newGlovoWorkerProvider(func() string { return glovoWorker }),
+		newGlovoFacadeProvider(func() string { return glovoFacade }),
 	}
 	var jwtProviders []Provider
 	if oauth != nil && oauth.BaseURL != "" {
@@ -1337,12 +1380,18 @@ func userFromVerified(v *Verified) *User {
 		return NewUsageWriterUser()
 	case v.Identity.Provider == ProviderService && v.Identity.Subject == EvidenceWriterUserID:
 		return NewEvidenceWriterUser()
+	case v.Identity.Provider == ProviderService && v.Identity.Subject == GlovoWorkerUserID:
+		return NewGlovoWorkerUser()
+	case v.Identity.Provider == ProviderService && v.Identity.Subject == GlovoFacadeUserID:
+		return NewGlovoFacadeUser()
 	case v.Identity.Provider == ProviderService && v.Identity.Subject == RegistryPublisherUserID:
 		return NewRegistryPublisherUser()
 	case v.Identity.Provider == ProviderService && v.Identity.Subject == SupportIncidentProducerUserID:
 		return NewSupportIncidentProducerUser()
 	case v.Identity.Provider == ProviderService && strings.HasPrefix(v.Identity.Subject, SecurityProviderUserPrefix):
 		return NewSecurityProviderUser(strings.TrimPrefix(v.Identity.Subject, SecurityProviderUserPrefix))
+	case v.Identity.Provider == ProviderService && strings.HasPrefix(v.Identity.Subject, BridgeProviderUserPrefix):
+		return NewBridgeProviderUser(strings.TrimPrefix(v.Identity.Subject, BridgeProviderUserPrefix))
 	case v.Identity.Provider == ProviderGitHub:
 		u := NewGitHubUser(v.Identity.Display, v.Claims.Groups)
 		if v.Identity.Subject != "" {
@@ -1355,14 +1404,22 @@ func userFromVerified(v *Verified) *User {
 		}
 		u.tokenPID = v.Claims.TokenPID
 		u.tokenAudience, u.supportAudience = v.Claims.TokenAudience, v.Claims.SupportAudience
+		u.glovoAudience = v.Claims.GlovoAudience
+		if u.glovoAudience {
+			u.teamGrantID, u.selectedTenant = v.Claims.TeamGrant, v.Claims.SelectedTenant
+		}
 		u.oauthClientID = v.Claims.OAuthClientID
 		return u
 	case v.Identity.Provider == ProviderPrincipal:
 		// Reserved: only the local-OAuth provider yields it, for a token
 		// minted for this principal. No groups: principal mode decides them.
-		return &User{ID: v.Identity.Display, principalID: v.Identity.Subject, tokenPrincipal: true,
+		u := &User{ID: v.Identity.Display, principalID: v.Identity.Subject, tokenPrincipal: true,
 			tokenAudience: v.Claims.TokenAudience, supportAudience: v.Claims.SupportAudience,
-			oauthClientID: v.Claims.OAuthClientID}
+			glovoAudience: v.Claims.GlovoAudience, oauthClientID: v.Claims.OAuthClientID}
+		if v.Claims.GlovoAudience {
+			u.teamGrantID, u.selectedTenant = v.Claims.TeamGrant, v.Claims.SelectedTenant
+		}
+		return u
 	case v.Identity.Provider == ProviderGitHubActions:
 		// No groups, whatever the token held: a CI job is not a tenant
 		// member. Marked ci even if a claim were somehow empty, so the
@@ -1373,6 +1430,10 @@ func userFromVerified(v *Verified) *User {
 		return u
 	case v.Identity.Provider == ProviderDex:
 		return &User{ID: v.Identity.Display, Groups: v.Claims.Groups, dexIssuer: v.Identity.Issuer, dexSubject: v.Identity.Subject}
+	case IsOrchestratorDevLoopIdentity(v.Identity):
+		// Ahead of the generic OIDC user, and with none of its claims: the
+		// machine user's groups never reach this principal (mctl-api#963).
+		return NewOrchestratorDevLoopUser(v.Identity)
 	default:
 		return &User{
 			ID: v.Identity.Display, Groups: v.Claims.Groups,
@@ -1500,3 +1561,21 @@ func (u *User) OAuthClientID() string {
 // for the support resource, which may reach only the routes mctl-support
 // relays.
 func (u *User) IsSupportAudience() bool { return u != nil && u.supportAudience }
+
+// IsGlovoAudience reports whether the caller holds an access token whose aud
+// is exactly the Glovo resource.
+func (u *User) IsGlovoAudience() bool { return u != nil && u.glovoAudience }
+
+// TeamGrant returns the team grant id and selected tenant a Glovo-audience
+// token was minted under. ok is false for every other caller and for a Glovo
+// token without both claims. The claims are only a pointer to the server-held
+// grant: the resolver loads and checks it, and trusts nothing else.
+func (u *User) TeamGrant() (grantID, tenant string, ok bool) {
+	if u == nil || !u.glovoAudience || u.teamGrantID == "" || u.selectedTenant == "" {
+		return "", "", false
+	}
+	return u.teamGrantID, u.selectedTenant, true
+}
+
+// IsGlovoWorker reports whether the caller is the Glovo worker (glovo_worker.go).
+func (u *User) IsGlovoWorker() bool { return u != nil && u.glovoWorker }

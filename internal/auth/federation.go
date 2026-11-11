@@ -88,6 +88,12 @@ type Claims struct {
 	// localOAuthProvider sets them.
 	TokenAudience   []string
 	SupportAudience bool
+	// GlovoAudience: the aud is exactly the Glovo resource.
+	GlovoAudience bool
+	// TeamGrant and SelectedTenant are the tgr and stn claims of a
+	// Glovo-audience token; set only with GlovoAudience.
+	TeamGrant      string
+	SelectedTenant string
 	// OAuthClientID is the verified client_id claim (provenance only).
 	OAuthClientID string
 }

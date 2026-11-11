@@ -215,6 +215,13 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// The team of a Glovo flow is chosen by the human at consent and nowhere
+	// else: no authorize parameter may carry one.
+	if o.IsGlovoFlow(resource) && (q.Has("tenant") || q.Has("selected_tenant")) {
+		oauthError(w, redirectURI, state, "invalid_request", "a team is chosen at consent, not in the request")
+		return
+	}
+
 	upstream, customer, ok := h.pickOAuthUpstream(w, r)
 	if !ok {
 		return
@@ -413,6 +420,12 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		refreshToken string
 		err          error
 	)
+	// A Glovo session's team never changes at the token endpoint; switching
+	// takes a new authorization and consent.
+	if o.GlovoReady() && (r.Form.Has("tenant") || r.Form.Has("selected_tenant") || r.Form.Has("team")) {
+		tokenError(w, "invalid_request", "a team cannot be chosen at the token endpoint")
+		return
+	}
 
 	switch grantType {
 	case "authorization_code":
@@ -575,7 +588,18 @@ func (h *Handlers) handleOAuthRevoke(w http.ResponseWriter, r *http.Request) {
 		tokenError(w, "invalid_request", "token parameter is required")
 		return
 	}
-	o.RevokeRefreshToken(token, r.FormValue("client_id"))
+	if err := o.RevokeRefreshToken(token, r.FormValue("client_id")); err != nil {
+		// Not revoked (the family and its team grant revoke together): never
+		// reported as revoked. RFC 7009 section 2.2.1 allows a 503.
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "temporarily_unavailable",
+			"error_description": "the revocation could not be completed; try again",
+		})
+		return
+	}
 	// Per RFC 7009, a successful revocation always returns 200.
 	w.WriteHeader(http.StatusOK)
 }

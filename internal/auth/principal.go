@@ -149,11 +149,21 @@ func (u *User) Identity() (Identity, bool) {
 		return Identity{Provider: ProviderService, Subject: UsageWriterUserID, Display: UsageWriterUserID, Kind: KindService}, true
 	case u.evidenceWriter:
 		return Identity{Provider: ProviderService, Subject: EvidenceWriterUserID, Display: EvidenceWriterUserID, Kind: KindService}, true
+	case u.glovoWorker:
+		return Identity{Provider: ProviderService, Subject: GlovoWorkerUserID, Display: GlovoWorkerUserID, Kind: KindService}, true
+	case u.glovoFacade:
+		return Identity{Provider: ProviderService, Subject: GlovoFacadeUserID, Display: GlovoFacadeUserID, Kind: KindService}, true
+	case u.glovoControlWorker:
+		return Identity{Provider: ProviderService, Subject: GlovoControlWorkerUserID, Display: GlovoControlWorkerUserID, Kind: KindService}, true
 	case u.registryPublisher:
 		return Identity{Provider: ProviderService, Subject: RegistryPublisherUserID, Display: RegistryPublisherUserID, Kind: KindService}, true
 	case u.supportIncidentProducer:
 		return Identity{Provider: ProviderService, Subject: SupportIncidentProducerUserID, Display: SupportIncidentProducerUserID, Kind: KindService}, true
 	case u.securityProvider != "":
+		return Identity{Provider: ProviderService, Subject: u.ID, Display: u.ID, Kind: KindService}, true
+	case u.orchestratorDevLoop:
+		return Identity{Provider: u.oidcProviderName, Issuer: u.oidcIssuer, Subject: u.oidcSubject, Display: OrchestratorDevLoopUserID, Kind: KindService}, true
+	case u.bridgeProvider != "":
 		return Identity{Provider: ProviderService, Subject: u.ID, Display: u.ID, Kind: KindService}, true
 	case u.ci:
 		return Identity{Provider: ProviderGitHubActions, Issuer: GitHubActionsIssuer, Subject: u.ciRepositoryID, Display: u.ID, Kind: KindService}, true

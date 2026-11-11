@@ -164,7 +164,7 @@ spec:
           - name: team_name
           - name: component_name
       script:
-        image: python:3.12-alpine
+        image: python:3.12-alpine@sha256:e064671ca452259bab50e8e2c7bd896e39e9a343bb06ca25234adf6fe18d0fc7 # python:3.12-alpine
         command: [python3]
         envFrom:
           - configMapRef:
@@ -333,10 +333,6 @@ spec:
         envFrom:
           - configMapRef:
               name: mctl-platform-config
-        volumeMounts:
-          - name: deploy-key
-            mountPath: /secrets/deploy-key
-            readOnly: true
         source: |
           set -euo pipefail
 
@@ -344,8 +340,8 @@ spec:
           # script's text. An Argo placeholder is substituted BEFORE sh
           # parses the line (this comment cannot show one literally —
           # Argo would substitute it here too), so a value containing a
-          # quote and a semicolon runs as a command, in a pod that is
-          # root with the gitops deploy key mounted. gitops#992.
+          # quote and a semicolon runs as a command, in a tenant pod.
+          # gitops#992.
           # The whole block is bound, not just the parameters the
           # operations registry happens to constrain: a reader should not
           # have to cross-check the registry to know which line is safe.
@@ -404,29 +400,8 @@ spec:
           echo "${PREVIEW_ID}" > /tmp/preview_id
           echo "https://${HOST}" > /tmp/preview_url
 
-          mkdir -p ~/.ssh
-          cp /secrets/deploy-key/ssh-privatekey ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          # GitHub's published SSH host keys, PINNED rather than trusted on
-          # first use. Source: https://api.github.com/meta (.ssh_keys),
-          # fetched 2026-09-02. This replaces an `ssh-keyscan` of
-          # ssh.github.com, which is trust-on-first-use: it accepted
-          # whatever key answered, on a connection carrying a
-          # WRITE-capable deploy key. A MITM or DNS-poison was recorded
-          # as the truth and then honoured.
-          #
-          # Keyed on [ssh.github.com]:443 — ssh looks up the host and
-          # port it actually connects to, which the Host block rewrites.
-          #
-          # If GitHub rotates a host key these lines must be updated; it
-          # last happened in March 2023, when the RSA key was replaced.
-          cat > ~/.ssh/known_hosts <<'GITHUB_HOST_KEYS'
-          [ssh.github.com]:443 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
-          [ssh.github.com]:443 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
-          [ssh.github.com]:443 ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
-          GITHUB_HOST_KEYS
-          chmod 600 ~/.ssh/known_hosts
-          git config --global url."ssh://git@ssh.github.com:443/".insteadOf "https://github.com/"
+          # Read only, and the repository is public, so no credential: this step
+          # also runs a Helm release of tenant-chosen values in a tenant namespace.
           git clone --depth=1 "https://github.com/${GITOPS_ORG}/${GITOPS_REPO}.git" /tmp/mctl-gitops
 
           CHART_PATH="/tmp/mctl-gitops/platform-gitops/helm-charts/base-service"
@@ -483,7 +458,3 @@ spec:
           requests:
             memory: 256Mi
             cpu: 100m
-      volumes:
-        - name: deploy-key
-          secret:
-            secretName: mctl-gitops-deploy-key

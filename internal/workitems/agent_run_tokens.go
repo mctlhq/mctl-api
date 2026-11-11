@@ -73,6 +73,8 @@ ALTER TABLE agent_run_tokens ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAUL
 -- minted the token on its behalf.
 ALTER TABLE agent_run_tokens ADD COLUMN IF NOT EXISTS tenant TEXT NOT NULL DEFAULT '';
 ALTER TABLE agent_run_tokens ADD COLUMN IF NOT EXISTS via_principal_id TEXT NOT NULL DEFAULT '';
+-- The one DevLoop grant a grant-pinned token may read and mark executed.
+ALTER TABLE agent_run_tokens ADD COLUMN IF NOT EXISTS grant_id TEXT NOT NULL DEFAULT '';
 `
 
 // AgentRunToken is one minted run token's durable row. The plaintext secret
@@ -88,6 +90,7 @@ type AgentRunToken struct {
 	IssuedByPrincipalID string
 	Tenant              string
 	ViaPrincipalID      string
+	GrantID             string
 	CreatedAt           time.Time
 	ExpiresAt           time.Time
 	RevokedAt           *time.Time
@@ -112,6 +115,9 @@ type MintAgentRunTokenInput struct {
 	// one). ExecutionID must then be empty. Such a token ends only by
 	// expiry or revocation, so the caller bounds its TTL by the run.
 	WithoutExecution bool
+	// GrantID pins the token to one DevLoop grant. Only a token bound to no
+	// execution carries one; the caller resolves and checks the grant.
+	GrantID string
 }
 
 // MintAgentRunToken validates that ExecutionID names a non-terminal
@@ -131,6 +137,8 @@ func (s *Store) MintAgentRunToken(ctx context.Context, in MintAgentRunTokenInput
 	var workItemID string
 	switch {
 	case in.WithoutExecution && in.ExecutionID != "":
+		return nil, "", ErrAgentRunTokenBinding
+	case in.GrantID != "" && !in.WithoutExecution:
 		return nil, "", ErrAgentRunTokenBinding
 	case in.WithoutExecution:
 		// Bound to nothing: execution_id and work_item_id stay "".
@@ -161,7 +169,7 @@ func (s *Store) MintAgentRunToken(ctx context.Context, in MintAgentRunTokenInput
 		ID: AgentRunTokenIDPrefix + uuid.NewString(), Agent: in.Agent, AgentPrincipalID: in.AgentPrincipalID,
 		ExecutionID: in.ExecutionID, WorkItemID: workItemID, Permissions: append([]string(nil), in.Permissions...),
 		Scope: in.Scope, IssuedByPrincipalID: in.IssuedByPrincipalID,
-		Tenant: in.Tenant, ViaPrincipalID: in.ViaPrincipalID, CreatedAt: now, ExpiresAt: now.Add(ttl),
+		Tenant: in.Tenant, ViaPrincipalID: in.ViaPrincipalID, GrantID: in.GrantID, CreatedAt: now, ExpiresAt: now.Add(ttl),
 	}
 	if row.Permissions == nil {
 		row.Permissions = []string{}
@@ -169,10 +177,10 @@ func (s *Store) MintAgentRunToken(ctx context.Context, in MintAgentRunTokenInput
 	_, err = s.pool.Exec(ctx,
 		`INSERT INTO agent_run_tokens
 			(id, token_hash, agent, agent_principal_id, execution_id, work_item_id, permissions,
-			 issued_by_principal_id, created_at, expires_at, scope, tenant, via_principal_id)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+			 issued_by_principal_id, created_at, expires_at, scope, tenant, via_principal_id, grant_id)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
 		row.ID, hash[:], row.Agent, row.AgentPrincipalID, row.ExecutionID, row.WorkItemID, row.Permissions,
-		row.IssuedByPrincipalID, row.CreatedAt, row.ExpiresAt, row.Scope, row.Tenant, row.ViaPrincipalID)
+		row.IssuedByPrincipalID, row.CreatedAt, row.ExpiresAt, row.Scope, row.Tenant, row.ViaPrincipalID, row.GrantID)
 	if err != nil {
 		return nil, "", fmt.Errorf("workitems: mint agent run token: insert: %w", err)
 	}
@@ -202,7 +210,7 @@ func (s *Store) ResolveAgentRunToken(ctx context.Context, token string) (*auth.A
 	hash := sha256.Sum256([]byte(token))
 	var (
 		id, agent, executionID, workItemID, scope string
-		tenant, viaPrincipalID                    string
+		tenant, viaPrincipalID, grantID           string
 		permissions                               []string
 		expiresAt                                 time.Time
 		revokedAt                                 *time.Time
@@ -210,12 +218,12 @@ func (s *Store) ResolveAgentRunToken(ctx context.Context, token string) (*auth.A
 	)
 	err := s.pool.QueryRow(ctx,
 		`SELECT t.id, t.agent, t.execution_id, t.work_item_id, t.permissions, t.expires_at, t.revoked_at,
-		        COALESCE(e.phase, ''), t.scope, t.tenant, t.via_principal_id
+		        COALESCE(e.phase, ''), t.scope, t.tenant, t.via_principal_id, t.grant_id
 		 FROM agent_run_tokens t
 		 LEFT JOIN work_item_executions e ON e.id = t.execution_id
 		 WHERE t.token_hash = $1`,
 		hash[:],
-	).Scan(&id, &agent, &executionID, &workItemID, &permissions, &expiresAt, &revokedAt, &phase, &scope, &tenant, &viaPrincipalID)
+	).Scan(&id, &agent, &executionID, &workItemID, &permissions, &expiresAt, &revokedAt, &phase, &scope, &tenant, &viaPrincipalID, &grantID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, auth.ErrAgentRunNotFound
 	}
@@ -238,7 +246,7 @@ func (s *Store) ResolveAgentRunToken(ctx context.Context, token string) (*auth.A
 	return &auth.AgentRun{
 		Agent: agent, ExecutionID: executionID, WorkItemID: workItemID, RunID: id,
 		Permissions: append([]string(nil), permissions...),
-		Scope:       scope, Tenant: tenant, RequestedBy: viaPrincipalID,
+		Scope:       scope, Tenant: tenant, RequestedBy: viaPrincipalID, GrantID: grantID,
 	}, nil
 }
 

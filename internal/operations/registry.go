@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strings"
 )
 
 // Registry holds all available platform operations mapped to Argo WorkflowTemplates.
@@ -110,10 +111,10 @@ func agentPinParams(agent string) []ParameterDef {
 	return []ParameterDef{
 		{Name: "agent_image", Type: "string", Required: false, OmitWhenEmpty: true,
 			Description: "Optional. Released image to run, from the agent registry (ghcr.io/mctlhq/mctl-agents:<version> or @sha256:<digest>). Omit to run the ClusterWorkflowTemplate's default image.",
-			Pattern:     agentImagePattern},
+			Pattern:     agentImagePattern, MaxLength: 256},
 		{Name: "agent_version", Type: "string", Required: false, OmitWhenEmpty: true,
 			Description: "Optional. Registry release being run, " + agent + "@<version>; recorded only. Omit when agent_image is omitted.",
-			Pattern:     `^` + regexp.QuoteMeta(agent) + `@[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]{1,64})?$`},
+			Pattern:     `^` + regexp.QuoteMeta(agent) + `@[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]{1,64})?$`, MaxLength: 128},
 	}
 }
 
@@ -277,6 +278,15 @@ func (r *Registry) ValidateInput(op Operation, input map[string]string) []string
 	if createsTenant(op) && IsReservedTenantName(input["tenant_name"]) {
 		errors = append(errors, reservedTenantNameMessage(input["tenant_name"]))
 	}
+	// preview-deploy: RE2 cannot say "no segment ends in .lock".
+	if op.Name == "preview-deploy" {
+		for _, seg := range strings.Split(input["git_ref"], "/") {
+			if strings.HasSuffix(seg, ".lock") {
+				errors = append(errors, "git_ref: must not have a component ending in .lock")
+				break
+			}
+		}
+	}
 	// A service whose Argo CD Application name (<team>-<component>) is
 	// platform-owned is refused for every operation that addresses one,
 	// except teardown (see teardownOperations).
@@ -368,20 +378,31 @@ const (
 	GitTagPattern = `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`
 	// githubRepoPattern: tpl-git-commit and preview-deploy repo check.
 	githubRepoPattern = `^[A-Za-z0-9][A-Za-z0-9._-]{0,99}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`
-	// repoPathPattern: deploy-service and preview-deploy dockerfile_path
-	// check. Every segment starts with a letter, digit or underscore, so
-	// "." and ".." segments, empty segments, absolute paths and a leading
-	// "-" are all refused, matching ciRelativePath in the CI deploy path.
-	// Length is bounded by the parameters' MaxLength.
-	repoPathPattern = `^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$`
+	// RepoPathPattern: deploy-service and preview-deploy dockerfile_path
+	// check, shared with ciDockerfilePathRe in the CI deploy path. Every
+	// segment starts with one optional dot and then a letter, digit or
+	// underscore, so ".docker/Dockerfile" is accepted while "." and ".."
+	// segments, empty segments, absolute paths and a leading "-" are refused.
+	// Length is bounded by RepoPathMaxLength.
+	RepoPathPattern = `^\.?[A-Za-z0-9_][A-Za-z0-9._-]*(/\.?[A-Za-z0-9_][A-Za-z0-9._-]*)*$`
+	// RepoPathMaxLength bounds a repository-relative path in bytes.
+	RepoPathMaxLength = 256
+	// CreatorUserIDPattern mirrors the guard in mctl-gitops
+	// wft-create-tenant.yaml, which splices the value into YAML unquoted.
+	// Widen both together.
+	CreatorUserIDPattern = `^[A-Za-z0-9._@-]{1,256}$`
+	// gitRefPattern: each segment starts with an alphanumeric or underscore,
+	// has no consecutive or trailing dots; segments joined by single slashes.
+	// A segment ending in ".lock" is refused in ValidateInput.
+	gitRefPattern = `^[A-Za-z0-9_](\.?[A-Za-z0-9_-])*(/[A-Za-z0-9_](\.?[A-Za-z0-9_-])*)*$`
 	// hostnameLabel and hostnameCore: add/remove-custom-domain and
 	// deploy-service host check. Label for label the same rule as
 	// validateHostname in internal/api, which gates what the domains store
 	// holds, so a stored domain (punycode TLDs such as xn--p1ai included) is
 	// never refused on its own teardown path. Length is bounded by MaxLength.
-	hostnameLabel   = `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?`
-	hostnameCore    = hostnameLabel + `(\.` + hostnameLabel + `)+`
-	hostnamePattern = `^` + hostnameCore + `$`
+	HostnameLabelPattern = `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?`
+	hostnameCore         = HostnameLabelPattern + `(\.` + HostnameLabelPattern + `)+`
+	hostnamePattern      = `^` + hostnameCore + `$`
 	// envBlockPattern: newline-separated KEY=value lines; no CR, NUL or other
 	// control characters (tab allowed in values).
 	envBlockPattern = `^(__CLEAR__|(([A-Za-z_][A-Za-z0-9_]*=[^\x00-\x08\x0a-\x1f\x7f]*)?\n)*([A-Za-z_][A-Za-z0-9_]*=[^\x00-\x08\x0a-\x1f\x7f]*)?)$`
@@ -458,7 +479,7 @@ var builtinOperations = []Operation{
 			{Name: "provision_database", Type: "string", Default: "false", Description: "Also provision a PostgreSQL database", Enum: []string{"true", "false"}},
 			{Name: "skip_health_check", Type: "string", Default: "false", Description: "Skip post-deploy health check", Enum: []string{"true", "false"}},
 			{Name: "health_check_path", Type: "string", Default: "", Description: "Override the liveness/readiness probe HTTP path (default: chart default /healthz + /readyz). Empty = unchanged.", Pattern: `^/[A-Za-z0-9._~/-]{0,255}$`},
-			{Name: "dockerfile_path", Type: "string", Default: "Dockerfile", Description: "Path to Dockerfile in the repo", Pattern: repoPathPattern, MaxLength: 256},
+			{Name: "dockerfile_path", Type: "string", Default: "Dockerfile", Description: "Path to Dockerfile in the repo", Pattern: RepoPathPattern, MaxLength: RepoPathMaxLength},
 			{Name: "image_tag", Type: "string", Description: "Explicit image tag override (default: derived from git_tag)", Pattern: ociTagPattern},
 			{Name: "autoscaling_enabled", Type: "string", Default: "false", Description: "Enable HPA autoscaling", Enum: []string{"true", "false"}},
 			{Name: "min_replicas", Type: "string", Default: "1", Description: "Minimum replica count (autoscaling)", Pattern: `^[0-9]{1,3}$`},
@@ -500,7 +521,7 @@ var builtinOperations = []Operation{
 			// closed.
 			{Name: "allow_internet_egress", Type: "string", Default: "true", Description: "Allow outbound internet egress from tenant pods (default: true)", Enum: []string{"true", "false"}},
 			{Name: "contact_email", Type: "string", Description: "Team contact email", Pattern: emailPattern, MaxLength: 254},
-			{Name: "creator_user_id", Type: "string", Description: "GitHub user ID of the workspace creator", Pattern: `^[A-Za-z0-9._@-]{1,256}$`},
+			{Name: "creator_user_id", Type: "string", Description: "Authenticated user ID of the workspace creator (set by the server from the session; never caller-supplied)", Pattern: CreatorUserIDPattern},
 			{Name: "creator_principal_id", Type: "string", Description: "Canonical principal of the workspace creator; set by the server from the session", Pattern: `^prn_[0-9A-HJKMNP-TV-Z]{26}$`},
 		},
 	},
@@ -588,9 +609,9 @@ var builtinOperations = []Operation{
 			{Name: "component_name", Type: "string", Required: true, Description: "Service name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 			{Name: "image_tag", Type: "string", Description: "Image tag to deploy. Required unless git_ref is set — PreparePreviewDeployInput then auto-generates it.", Pattern: ociTagPattern},
 			{Name: "ttl_hours", Type: "string", Default: "24", Description: "Preview lifetime in hours (default: 24)", Pattern: `^[0-9]{1,4}$`},
-			{Name: "git_ref", Type: "string", Default: "", Pattern: `^[A-Za-z0-9._/-]{1,255}$`, Description: "Branch, SHA, or tag to build from. Leave empty to deploy an existing image_tag."},
+			{Name: "git_ref", Type: "string", Default: "", Pattern: gitRefPattern, MaxLength: 255, Description: "Branch, SHA, or tag to build from. Leave empty to deploy an existing image_tag."},
 			{Name: "dockerfile_repo", Type: "string", Default: "", Pattern: githubRepoPattern, Description: "Source repo in org/repo format. Required when git_ref is set."},
-			{Name: "dockerfile_path", Type: "string", Default: "Dockerfile", Pattern: repoPathPattern, Description: "Path to Dockerfile inside dockerfile_repo (default: Dockerfile)", MaxLength: 256},
+			{Name: "dockerfile_path", Type: "string", Default: "Dockerfile", Pattern: RepoPathPattern, Description: "Path to Dockerfile inside dockerfile_repo (default: Dockerfile)", MaxLength: RepoPathMaxLength},
 		},
 	},
 	{
@@ -891,7 +912,7 @@ var builtinOperations = []Operation{
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/"},
 		Parameters: append([]ParameterDef{
-			{Name: "issue_url", Type: "string", Required: true, Description: "Full GitHub issue URL under the mctlhq org, e.g. https://github.com/mctlhq/mctl-telegram/issues/123", Pattern: `^https://github\.com/mctlhq/[A-Za-z0-9_.-]+/issues/[0-9]+$`},
+			{Name: "issue_url", Type: "string", Required: true, Description: "Full GitHub issue URL under the mctlhq org, e.g. https://github.com/mctlhq/mctl-telegram/issues/123", Pattern: `^https://github\.com/mctlhq/[A-Za-z0-9_.-]+/issues/[0-9]+$`, MaxLength: 256},
 			// Resume identifiers (mctlhq/mctl-agents#267). Optional. With
 			// MCTL_SUBMIT_CREATES_EXECUTION=on (off by default, mctl-agents#717
 			// S3) the execute handler resolves or mints them for a submit that
@@ -919,7 +940,7 @@ var builtinOperations = []Operation{
 			// OmitWhenEmpty so a run without answers keeps its exact argv.
 			{Name: "human_input_responses", Type: "string", Required: false, OmitWhenEmpty: true,
 				Description: "Optional. JSON array of accepted human-input answers for a DevLoop continuation (mctl-agents#473). Set only by the DevLoop; omit otherwise.",
-				Pattern:     `(?s)^\[.*\]$`},
+				Pattern:     `(?s)^\[.*\]$`, MaxLength: 65536},
 			// Owner principal for later-round questions (mctlhq/mctl-agents#684):
 			// a continuation pops work_item_id, so dev_loop.py carries the owner's
 			// prn_ from its round-1 request and the investigator names it as

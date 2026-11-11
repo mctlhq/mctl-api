@@ -1,0 +1,16 @@
+{
+  "name": "dispatch refused invalid_request",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/internal/glovo/orders/ordr_ABCDEFGHIJKLMNOP0123/dispatch",
+    "body": {
+      "approval_ref": "aar_ABCDEFGHIJKLMNOP0123",
+      "fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+    }
+  },
+  "status": 400,
+  "response": {
+    "error": "invalid_request",
+    "error_description": "the request is invalid"
+  }
+}

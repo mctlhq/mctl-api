@@ -145,6 +145,11 @@
       "reason": "Liveness of one DevLoop workflow by id: status and phase only, no code, no secrets; the upstream refuses ids outside the caller's tenants."
     },
     {
+      "name": "mctl_get_dev_loop_approval",
+      "enabled": false,
+      "reason": "Reads a DevLoop's approval grant and decision context by workflow id (mctl-api#936). Off the shared portal until the owner decides: the portal switch is user-blind, and reviewers can use the direct MCP endpoint meanwhile."
+    },
+    {
       "name": "mctl_get_incident",
       "enabled": true,
       "reason": "Incident record with collected evidence (log excerpts, analysis, PR links); tenant-scoped by the upstream. Excerpts can carry application log text, acceptable on a private admin-only aggregate."
@@ -551,8 +556,8 @@
     },
     {
       "name": "mctl_submit_review_assertion",
-      "enabled": false,
-      "reason": "A write: a human administrator records a manual advisory review receipt against an open manual-mode request. Refused for service, relayed and surface callers by the API. Not enabled on the shared portal: a human-admin write is a separate owner decision (mctl-api#897)."
+      "enabled": true,
+      "reason": "Enabled on the shared portal by owner decision 2026-11-06 (mctl-api#897). A write: a human administrator records a manual advisory review receipt against an open manual-mode request. Refused for service, relayed and surface callers by the API, so non-admins see it and get a refusal. It cannot tell an admin from an AI session on that admin's token, which is acceptable because a manual receipt is advisory and never satisfies independent assurance."
     },
     {
       "name": "mctl_ask_support",

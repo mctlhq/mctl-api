@@ -25,6 +25,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -44,6 +45,8 @@ var legacyRelayTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "mctl_agents_approve_legacy_relay_total",
 	Help: "Free-text approver relays on mctl-agents-approve by a service principal, by outcome (relayed, refused).",
 }, []string{"outcome"})
+
+var creatorUserIDRe = regexp.MustCompile(operations.CreatorUserIDPattern)
 
 func init() { prometheus.MustRegister(legacyRelayTotal) }
 
@@ -216,7 +219,22 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		// Force creator_user_id from the authenticated session (prevent spoofing).
+		// creator_user_id is always forced from the authenticated session, never
+		// taken from the caller. The workflow splices it into YAML unquoted, so
+		// an identity outside its charset is refused here with a clear cause
+		// instead of a pattern error on a field the caller never sent.
+		if !creatorUserIDRe.MatchString(user.ID) {
+			h.logAudit(r, audit.Entry{
+				UserID:    user.ID,
+				Operation: opName,
+				Status:    "denied",
+				RiskLevel: string(op.RiskLevel),
+				Message:   fmt.Sprintf("create-tenant refused: sign-in identity %q does not match the creator_user_id format", user.ID),
+			})
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("your sign-in identity %q cannot be recorded as a workspace owner (allowed characters: A-Z a-z 0-9 . _ @ -)", user.ID))
+			return
+		}
 		input["creator_user_id"] = user.ID
 		// The owner entry is keyed by the creator's canonical principal too:
 		// principal-mode authorization grants by members[].principalId alone
@@ -369,15 +387,14 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		// point never carries a digest (refused above), so without a grant
 		// it cannot approve at all: only a grant holds a human's decision.
 		if code, msg := directApproveDigestRefusal(input[expectedContentDigestParam]); code != "" {
-			params := legacyRelayParams(user, opName, input)
-			params["code"] = code
 			h.logAudit(r, audit.Entry{
-				UserID:     user.ID,
-				Operation:  opName,
-				Status:     "denied",
-				RiskLevel:  string(op.RiskLevel),
-				Message:    code + ": " + msg,
-				Parameters: params,
+				UserID:      user.ID,
+				Operation:   opName,
+				Status:      "denied",
+				RiskLevel:   string(op.RiskLevel),
+				Message:     code + ": " + msg,
+				Parameters:  legacyRelayParams(user, opName, input),
+				RefusalCode: code,
 			})
 			// A relay attempt refused here is still an attempt: counted as
 			// refused, like legacy_approver_disabled, so the counter keeps
@@ -422,9 +439,27 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		// that read only "error" (the MCP tools' doRequest, shell clients)
 		// would otherwise report a bare "validation failed". The prefix is
 		// unchanged for anything that matches on it.
+		//
+		// Audited like the other refusals in this handler (mctl-api#760). This
+		// runs before the grant is bound or spent and before Submit, so an
+		// invalid request consumes nothing and reaches no executor.
+		auditParams := redactSecrets(op, input)
+		// redactSecrets keys on the parameter name; a non-secret field that
+		// carries a secret's value would still record it, so match on value too.
+		redactSecretFragments(op, input, auditParams)
+		h.logAudit(r, audit.Entry{
+			UserID:      user.ID,
+			Operation:   opName,
+			Parameters:  auditParams,
+			RefusalCode: codeValidationFailed,
+			Status:      "denied",
+			RiskLevel:   string(op.RiskLevel),
+			Message:     codeValidationFailed + ": " + strings.Join(scrubSecretValues(op, input, errs), "; "),
+		})
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 			"error":            "validation failed: " + strings.Join(errs, "; "),
 			"validationErrors": errs,
+			"code":             codeValidationFailed,
 		})
 		return
 	}
@@ -719,6 +754,98 @@ func extractTenantParam(op operations.Operation, input map[string]string) string
 		}
 	}
 	return ""
+}
+
+// codeValidationFailed is the stable machine-readable code of an
+// ExecuteOperation request refused by Registry.ValidateInput (mctl-api#760).
+const codeValidationFailed = "validation_failed"
+
+// reasonWithheld replaces a validation reason that would echo a secret
+// fragment in the audit row.
+const reasonWithheld = "[REDACTED: reason withheld, it echoes a secret value]"
+
+// secretFragments lists every piece of the operation's Secret parameters that
+// must not reach the validation-denied audit row: the whole value, each
+// non-empty line, and the value after the first "=" of each line (the usual
+// KEY=value form, any length, including "=" itself). Nothing is exempted for
+// being short or for its characters, but a
+// whitespace-only fragment is skipped: it carries no secret and would match
+// ordinary reasons and unrelated parameters.
+func secretFragments(op operations.Operation, input map[string]string) []string {
+	var out []string
+	add := func(s string) {
+		if strings.TrimSpace(s) != "" {
+			out = append(out, s)
+		}
+	}
+	for i := range op.Parameters {
+		p := &op.Parameters[i]
+		if !p.Secret {
+			continue
+		}
+		v := input[p.Name]
+		add(v)
+		add(strings.TrimSpace(v))
+		for _, line := range strings.Split(v, "\n") {
+			line = strings.TrimSpace(line)
+			add(line)
+			// secret_env_vars is newline-separated KEY=value; the value is
+			// everything after the first "=". No character heuristic reliably
+			// separates a bare token such as "YWJjZA==" (Cut gives key "YWJjZA",
+			// value "=") from a genuine assignment such as "K==", so no value is
+			// exempted for its shape (only whitespace-only ones, in add). A value
+			// of "=" therefore withholds any reason and blanks any audit
+			// parameter containing "=": conservative on purpose, like a
+			// one-character value. KEY=<padded base64> protects the whole padded
+			// value; arbitrary transformed or unpadded forms of a secret are not
+			// promised.
+			if _, val, ok := strings.Cut(line, "="); ok {
+				add(strings.TrimSpace(val))
+			}
+		}
+	}
+	return out
+}
+
+func containsAny(s string, fragments []string) bool {
+	for _, f := range fragments {
+		if strings.Contains(s, f) {
+			return true
+		}
+	}
+	return false
+}
+
+// scrubSecretValues returns reasons where any reason containing a secret
+// fragment is replaced whole by a generic text. A validation reason may echo a
+// submitted value (the reserved-service message does); a short fragment cannot
+// be cut out of prose reliably, so the reason is withheld instead. Reasons
+// without a match are kept verbatim.
+func scrubSecretValues(op operations.Operation, input map[string]string, reasons []string) []string {
+	fragments := secretFragments(op, input)
+	if len(fragments) == 0 {
+		return reasons
+	}
+	out := make([]string, len(reasons))
+	for i, reason := range reasons {
+		if containsAny(reason, fragments) {
+			reason = reasonWithheld
+		}
+		out[i] = reason
+	}
+	return out
+}
+
+// redactSecretFragments blanks every audit parameter value that contains a
+// fragment of a Secret parameter; redactSecrets already blanked the secret
+// fields themselves by name.
+func redactSecretFragments(op operations.Operation, input, params map[string]string) {
+	fragments := secretFragments(op, input)
+	for k, v := range params {
+		if containsAny(v, fragments) {
+			params[k] = "[REDACTED]"
+		}
+	}
 }
 
 func redactSecrets(op operations.Operation, input map[string]string) map[string]string {

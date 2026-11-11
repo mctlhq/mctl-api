@@ -47,6 +47,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth/clientstore"
 	"github.com/mctlhq/mctl-api/internal/auth/flowstore"
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
+	"github.com/mctlhq/mctl-api/internal/bridge"
 	"github.com/mctlhq/mctl-api/internal/commerce"
 	"github.com/mctlhq/mctl-api/internal/dburl"
 	"github.com/mctlhq/mctl-api/internal/decisions"
@@ -60,6 +61,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/ghactions"
 	"github.com/mctlhq/mctl-api/internal/ghtoken"
 	"github.com/mctlhq/mctl-api/internal/gitops"
+	"github.com/mctlhq/mctl-api/internal/glovo"
 	"github.com/mctlhq/mctl-api/internal/governance"
 	"github.com/mctlhq/mctl-api/internal/humaninput"
 	"github.com/mctlhq/mctl-api/internal/k8s"
@@ -214,6 +216,11 @@ func main() {
 			stopSignals()
 			os.Exit(1)
 		}
+		if err := configureGlovoResource(oauthServer, os.LookupEnv); err != nil {
+			slog.Error("invalid configuration", "error", err)
+			stopSignals()
+			os.Exit(1)
+		}
 		// Unset/0 = strict mode off: a stale checkout is used and alerted on
 		// via the gauge above, not failed (mctl-api#411, README.md
 		// "Authorization group freshness"). GroupsDegradedGrace is
@@ -323,6 +330,50 @@ func main() {
 				}()
 			}
 		}
+	}
+
+	// Glovo pilot (GLOVO_ENABLED, default false): team grants, the live
+	// membership-and-allowlist eligibility and the kill switch. Unset, nothing
+	// here runs and every OAuth flow is unchanged; set without its
+	// dependencies, the boot is refused.
+	var glovoStore *glovo.Store
+	var glovoRoutes *mctlapi.GlovoRoutes
+	{
+		var pgRefresh *refreshstore.PostgresStore
+		if oauthServer != nil {
+			pgRefresh, _ = oauthServer.RefreshStore.(*refreshstore.PostgresStore)
+		}
+		var err error
+		glovoStore, glovoRoutes, err = configureGlovoTeamGrants(initCtx, glovoTeamGrantDeps{
+			OAuth: oauthServer, RefreshStore: pgRefresh, Membership: gitReader,
+			ExplicitOAuthDB: os.Getenv("OAUTH_DB_URL") != "",
+		}, os.LookupEnv)
+		if err != nil {
+			slog.Error("invalid configuration", "error", err)
+			stopSignals()
+			os.Exit(1)
+		}
+	}
+
+	// Cleanup of the handoff, counter and idempotency tables; it exists only
+	// while GLOVO_ENABLED=true (the store is nil otherwise).
+	if glovoStore != nil {
+		go func() {
+			t := time.NewTicker(5 * time.Minute)
+			defer t.Stop()
+			for {
+				select {
+				case <-rootCtx.Done():
+					return
+				case <-t.C:
+					ctx, cancel := context.WithTimeout(rootCtx, 30*time.Second)
+					if _, err := glovoStore.Sweep(ctx, 500); err != nil {
+						slog.Warn("glovo sweep failed", "error", err)
+					}
+					cancel()
+				}
+			}
+		}()
 	}
 
 	// Canonical principals, phase 1 (mctl-api#373). The store shares the
@@ -617,6 +668,8 @@ func main() {
 	// AUDIT_DB_URL other stores depend on. Nil makes every /api/v1/work-items
 	// route answer 503.
 	var workItemsStore *workitems.Store
+	// validate has already refused an unparsable value.
+	queueWhileActive, _ := workitems.ParseQueueWhileActive(cfg.ExecutionRequestQueueWhileActiveRaw)
 	workItemsDBURL, workItemsDisabled := workItemsStoreSource()
 	switch {
 	case workItemsDisabled:
@@ -625,7 +678,7 @@ func main() {
 		slog.Warn("no WORK_ITEMS_DB_URL or AUDIT_DB_URL; /api/v1/work-items and /api/v1/action-approvals routes will return 503")
 	default:
 		ws, wsErr := initStore(initCtx, storeFailures, "work items", func(ctx context.Context) (*workitems.Store, error) {
-			return workitems.NewStore(ctx, workItemsDBURL, workitems.WithClock(approvalClock))
+			return workitems.NewStore(ctx, workItemsDBURL, workitems.WithClock(approvalClock), workitems.WithQueueWhileActive(queueWhileActive))
 		})
 		if wsErr != nil {
 			slog.Error("work-items store init failed; /api/v1/work-items and /api/v1/action-approvals routes will return 503", "error", wsErr)
@@ -1001,6 +1054,144 @@ func main() {
 		temporalReconnecting = rc
 		defer rc.Close()
 	}
+	// Command bridge (mctl-api#962). Dark by default: nothing below runs
+	// unless MCTL_BRIDGE_ENABLED=true, and no provider credential is issued
+	// by this change. The bridge shares the platform Postgres like the
+	// commerce ledger.
+	var bridgeStore *bridge.Store
+	bridgeEnabled := os.Getenv("MCTL_BRIDGE_ENABLED") == "true"
+	if bridgeEnabled {
+		bridgeDBURL := bridgeStoreDSN()
+		if bridgeDBURL == "" && glovoStore == nil {
+			slog.Error("MCTL_BRIDGE_ENABLED is set but COMMERCE_DB_URL is not; /api/v1/bridge routes will return 503 (AUDIT_DB_URL is deliberately not a fallback)")
+		} else {
+			// The mode is decided once: the runtime-role store on the shared
+			// GLOVO_DB_URL pool when bridge_schema_version exists, the legacy
+			// store otherwise (mctl-api#985 task 4).
+			bs, bsErr := initStore(initCtx, storeFailures, "command bridge", func(ctx context.Context) (*bridge.Store, error) {
+				st, _, err := openBridgeStore(ctx, bridgeOpenDeps{GlovoPool: glovoPoolOf(glovoStore), LegacyDSN: bridgeDBURL})
+				return st, err
+			})
+			if bsErr != nil {
+				slog.Error("command bridge store init failed; /api/v1/bridge routes will return 503", "error", bsErr)
+			} else {
+				bridgeStore = bs
+				defer bs.Close()
+				if v := os.Getenv("MCTL_BRIDGE_READ_RESULT_TTL"); v != "" {
+					if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+						bs.SetReadResultTTL(d) // clamped to 1..300 s
+					} else {
+						slog.Warn("ignoring invalid MCTL_BRIDGE_READ_RESULT_TTL; using default")
+					}
+				}
+				// A read result is served only while the owner's #959 connection is
+				// live. Without the Glovo store the default checker denies.
+				if glovoStore != nil {
+					bs.SetConnectionChecker(bridge.GlovoConnectionChecker{Store: glovoStore})
+				}
+				expiryInterval := time.Duration(0)
+				if v := os.Getenv("MCTL_BRIDGE_EXPIRY_SWEEP_INTERVAL"); v != "" {
+					if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+						expiryInterval = d
+					} else {
+						slog.Warn("ignoring invalid MCTL_BRIDGE_EXPIRY_SWEEP_INTERVAL; using default")
+					}
+				}
+				expirer := &bridge.Expirer{Store: bs, Interval: expiryInterval}
+				// Expose scrape-time expiry progress to the already mounted /metrics
+				// endpoint. No command details, token values or tenant IDs are labels.
+				prometheus.MustRegister(
+					prometheus.NewCounterFunc(prometheus.CounterOpts{
+						Name: "mctl_api_bridge_expiry_processed_total",
+						Help: "Number of bridge commands expired by the background sweep since process start.",
+					}, func() float64 { return float64(expirer.Stats().Processed) }),
+					prometheus.NewCounterFunc(prometheus.CounterOpts{
+						Name: "mctl_api_bridge_read_results_erased_total",
+						Help: "Number of stored bridge read result payloads erased at expiry since process start.",
+					}, func() float64 { return float64(bs.ReadResultsErased()) }),
+					prometheus.NewCounterFunc(prometheus.CounterOpts{
+						Name: "mctl_api_bridge_expiry_sweep_errors_total",
+						Help: "Number of failed bridge expiry sweep operations since process start, excluding shutdown cancellation.",
+					}, func() float64 { return float64(expirer.Stats().Errors) }),
+					prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+						Name: "mctl_api_bridge_expiry_consecutive_errors",
+						Help: "Consecutive bridge expiry sweep errors since last fully successful sweep.",
+					}, func() float64 { return float64(expirer.Stats().ConsecutiveErrors) }),
+					prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+						Name: "mctl_api_bridge_expiry_backlog",
+						Help: "Open bridge commands past expires_at, measured by the last successful backlog query.",
+					}, func() float64 { return float64(expirer.Stats().Backlog) }),
+					prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+						Name: "mctl_api_bridge_expiry_oldest_overdue_seconds",
+						Help: "Age in seconds of the oldest overdue bridge command at the last successful backlog query.",
+					}, func() float64 { return float64(expirer.Stats().OldestOverdueSecs) }),
+					prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+						Name: "mctl_api_bridge_expiry_last_success_timestamp_seconds",
+						Help: "Unix timestamp of last fully successful bridge expiry sweep, zero before the first success.",
+					}, func() float64 {
+						if ts := expirer.Stats().LastSuccess; !ts.IsZero() {
+							return float64(ts.Unix())
+						}
+						return 0
+					}),
+				)
+				go expirer.Run(rootCtx)
+				if temporalReconnecting != nil {
+					d := &bridge.Dispatcher{Outbox: bs, Signaler: temporalReconnecting}
+					go d.Run(rootCtx)
+				} else {
+					slog.Warn("command bridge enabled without TEMPORAL_ADDRESS; the result-signal dispatcher is not started")
+				}
+			}
+		}
+	}
+	// A Glovo join facade token that equals another machine token (or is too
+	// short) is a misconfiguration the process refuses to boot with
+	// (mctl-api#957): the credential would authenticate as two principals.
+	if problem := auth.GlovoFacadeTokenProblem(); problem != "" {
+		slog.Error("invalid configuration", "error", "MCTL_GLOVO_FACADE_TOKEN refused: "+problem)
+		stopSignals()
+		os.Exit(1)
+	}
+	// Glovo join facade routes (mctl-api#957): dark. GLOVO_JOIN_ENABLED mounts
+	// them, and with no dependency wired every route answers 503 not_ready.
+	glovoJoinRoutes, gjErr := configureGlovoJoin(os.LookupEnv, auth.GlovoFacadeConfigured())
+	if gjErr != nil {
+		slog.Error("invalid configuration", "error", gjErr)
+		stopSignals()
+		os.Exit(1)
+	}
+
+	// Glovo control routes (mctl-api#985): dark, see configureGlovoControl.
+	glovoControlRoutes, gcErr := configureGlovoControl(os.LookupEnv, auth.LoadGlovoControlWorker())
+	if gcErr != nil {
+		slog.Error("invalid configuration", "error", gcErr)
+		stopSignals()
+		os.Exit(1)
+	}
+	// The one place the write fence is installed: only when all six
+	// preconditions hold. The hold flag is a const false and the receipt
+	// collaborators are not constructed here, so this never installs it.
+	if bridgeStore != nil {
+		installed, pre := installWriteFence(rootCtx, fenceInstall{
+			Gate: glovo.ControlDefault.Open, HoldLifted: glovoWriteFenceHoldLifted,
+			Proof: func(ctx context.Context) error {
+				return controlProof(ctx, os.LookupEnv, bridgeStore, glovoStore, nil)
+			},
+			Glovo: glovoStore,
+			Build: func(context.Context) (bridge.WriteFence, error) {
+				return nil, errors.New("the receipt fence collaborators are not constructed in this build")
+			},
+			Set: bridgeStore.SetFence,
+		})
+		slog.Info("glovo write fence", "installed", installed, "gate_open", pre.GateOpen, "hold_lifted", pre.HoldLifted,
+			"one_database_proof", pre.OneDatabaseProof, "revocation_hook", pre.RevocationHookReady,
+			"membership_revocation", pre.MembershipRevocation, "receipt_ready", pre.ReceiptReady)
+	}
+	var bridgeService mctlapi.BridgeService
+	if bridgeStore != nil {
+		bridgeService = bridgeStore
+	}
 	temporalState := func() string {
 		if temporalReconnecting == nil {
 			return "not_configured"
@@ -1009,6 +1200,25 @@ func main() {
 			return "connecting"
 		}
 		return "ok"
+	}
+
+	// Orphan sweeper: with the queue-while-active switch on, an execution
+	// whose Temporal run already closed must not block queued requests.
+	if queueWhileActive && workItemsStore != nil && devLoopClient != nil {
+		go func() {
+			ticker := time.NewTicker(mctlapi.OrphanReconcileInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-rootCtx.Done():
+					return
+				case <-ticker.C:
+					sctx, cancel := context.WithTimeout(rootCtx, time.Minute)
+					mctlapi.ReconcileOrphanedExecutions(sctx, workItemsStore, devLoopClient, time.Now())
+					cancel()
+				}
+			}
+		}()
 	}
 
 	executor := operations.NewExecutor()
@@ -1084,10 +1294,20 @@ func main() {
 				// straight to Argo; those get a token bound to no work item.
 				// Drop it once mctl-agents stops accepting such runs.
 				"mctl-agents-investigate": {Agent: "issue-investigator", Scope: auth.AgentScopeInvestigate, AllowWithoutExecution: true},
-				// An implement run is execution-bound: its approvals are one
-				// execution's (mctl-agents#717 S4), so a run submitted
-				// without an execution_id is refused at the exchange.
-				"mctl-agents-implement": {Agent: "implementer", Scope: auth.AgentScopeImplement},
+				// An implement run with an execution is bound to it: its
+				// approvals are that execution's (mctl-agents#717 S4). One
+				// without an execution (the sweep, a manual trigger) must name
+				// one proposal by service and slug, and its token is pinned to
+				// that proposal's human-decided grant; naming less is refused
+				// at the exchange (mctl-gitops#1980).
+				"mctl-agents-implement": {
+					Agent: "implementer", Scope: auth.AgentScopeImplement,
+					GrantPinnedScope: auth.AgentScopeImplementGrant,
+				},
+				// A shepherd run belongs to no execution, permanently: the
+				// sweep drives many proposals. Its scope is one read, so a
+				// token bound to no work item is all it needs.
+				"mctl-agents-shepherd": {Agent: "shepherd", Scope: auth.AgentScopeShepherd, AllowWithoutExecution: true},
 			})
 		if bErr != nil {
 			slog.Warn("agent run token exchange unavailable", "error", bErr)
@@ -1223,6 +1443,7 @@ func main() {
 		AllowedOrigins:                 cfg.AllowedOrigins,
 		OAuthServer:                    oauthServer,
 		IdentityLink:                   identityLinkOptions(cfg, principalStore, principalCache, oauthServer, ghValidator),
+		DevLoopDecide:                  devLoopDecideOptions(cfg, principalResolver, principalAuthz),
 		OAuthUpstream:                  cfg.oauthUpstreamMode(),
 		OAuthZitadel:                   oauthZitadelOptions(cfg, principalStore, oauthServer),
 		SurfaceZitadel:                 surfaceZitadelOptions(cfg),
@@ -1238,6 +1459,9 @@ func main() {
 		Evidence:                       evidenceStore,
 		SecurityFindings:               securityFindingsStore,
 		SecurityProviders:              securityProviders,
+		BridgeEnabled:                  bridgeEnabled,
+		Bridge:                         bridgeService,
+		BridgeProviders:                auth.LoadBridgeProviders(),
 		CodeScanningWebhookSecret:      codeScanningSecret,
 		CodeScanningConfig:             codeScanningConfig,
 		CodeScanningIngester:           codeScanningIngester,
@@ -1263,6 +1487,10 @@ func main() {
 		AgentReceiptMaxAge:             cfg.agentReceiptMaxAge(),
 		LegacyApproverDisabled:         cfg.legacyApproverDisabled(),
 		PrincipalMembership:            gitReader,
+		GlovoAllowlist:                 glovoAllowlist(glovoStore),
+		Glovo:                          glovoRoutes,
+		GlovoControl:                   glovoControlRoutes,
+		GlovoJoin:                      glovoJoinRoutes,
 		AdminPrincipals:                cfg.adminPrincipals(),
 		RequireRegisteredPolicy:        cfg.requireRegisteredPolicy(),
 		Clock:                          approvalClock,
@@ -1541,6 +1769,12 @@ type config struct {
 	ZitadelLinkClientID     string
 	ZitadelLinkClientSecret string
 	ZitadelLinkProvider     string
+	// ZITADEL client of the DevLoop decide page (mctl-api#964): a
+	// confidential web app whose ID token proves the person deciding. Both
+	// empty keeps the page off; it resolves the person under
+	// ZitadelLinkProvider, the entry their ZITADEL bearer is verified by.
+	DevLoopDecideClientID     string
+	DevLoopDecideClientSecret string
 	// The ZITADEL clients whose ID tokens the portal may present to
 	// surface-principals/zitadel: the mctl-web site's (MCTL_WEB_CLIENT_ID,
 	// creating a workspace) and the portal's (ZITADEL_PORTAL_CLIENT_ID,
@@ -1604,6 +1838,9 @@ type config struct {
 	// SubmitCreatesExecutionRaw is MCTL_SUBMIT_CREATES_EXECUTION (mctl-agents#717
 	// S3): on or off, empty is off; validated at startup.
 	SubmitCreatesExecutionRaw string
+	// ExecutionRequestQueueWhileActiveRaw is
+	// MCTL_EXECUTION_REQUEST_QUEUE_WHILE_ACTIVE: "" or "off" (default) or "on".
+	ExecutionRequestQueueWhileActiveRaw string
 	// ApprovalMaxDecisionAgeRaw is ACTION_APPROVAL_MAX_DECISION_AGE
 	// (mctl-api#700): a Go duration; empty is 24h.
 	ApprovalMaxDecisionAgeRaw string
@@ -1687,90 +1924,102 @@ func loadConfig() config {
 	}
 
 	return config{
-		Port:                           envOr("PORT", "8080"),
-		GitOpsRepoURL:                  envOr("GITOPS_REPO_URL", "https://github.com/mctlhq/mctl-gitops.git"),
-		GitOpsBranch:                   envOr("GITOPS_BRANCH", "main"),
-		GitOpsLocalPath:                envOr("GITOPS_LOCAL_PATH", "/tmp/mctl-gitops"),
-		GitOpsToken:                    gitOpsTokenSource(),
-		GitOpsActionsToken:             actionsTokenSource(),
-		GitOpsSSHKeyPath:               os.Getenv("GITOPS_SSH_KEY_PATH"),
-		GitOpsSSHKnownHostsPath:        os.Getenv("GITOPS_SSH_KNOWN_HOSTS_PATH"),
-		ArgoCDURL:                      envOr("ARGOCD_URL", "https://ops.mctl.ai"),
-		ErpactDeployerURL:              envOr("ERPACT_DEPLOYER_URL", "http://erpact-deployer.erpact.svc.cluster.local:8000"),
-		ArgoCDToken:                    os.Getenv("ARGOCD_TOKEN"),
-		GitHubOrg:                      envOr("GITHUB_ORG", "mctlhq"),
-		AdminUsers:                     adminList,
-		BackstageInternalURL:           envOr("BACKSTAGE_INTERNAL_URL", "http://backstage.backstage.svc.cluster.local:7007"),
-		PlatformDomain:                 envOr("PLATFORM_DOMAIN", "mctl.ai"),
-		DNSResolverAddr:                envOr("DNS_RESOLVER_ADDR", "1.1.1.1:53"),
-		BackstageGithubAppConnectToken: os.Getenv("BACKSTAGE_GITHUB_APP_CONNECT_TOKEN"),
-		DexIssuerURL:                   os.Getenv("DEX_ISSUER_URL"),
-		DexClientID:                    os.Getenv("DEX_CLIENT_ID"),
-		OIDCProvidersRaw:               os.Getenv("MCTL_OIDC_PROVIDERS"),
-		GitHubActionsOIDCRaw:           os.Getenv("MCTL_GITHUB_ACTIONS_OIDC"),
-		FederationDisabled:             killSwitchOn(os.Getenv("MCTL_FEDERATION_DISABLED")),
-		SelfURL:                        envOr("SELF_URL", "https://api.mctl.ai"),
-		AllowedOrigins:                 origins,
-		OAuthGitHubClientID:            os.Getenv("OAUTH_GITHUB_CLIENT_ID"),
-		OAuthGitHubClientSecret:        os.Getenv("OAUTH_GITHUB_CLIENT_SECRET"),
-		OAuthUpstreamRaw:               os.Getenv("OAUTH_UPSTREAM"),
-		OAuthZitadelClientID:           os.Getenv("OAUTH_ZITADEL_CLIENT_ID"),
-		OAuthZitadelClientSecret:       os.Getenv("OAUTH_ZITADEL_CLIENT_SECRET"),
-		OAuthZitadelProvider:           envOr("OAUTH_ZITADEL_PROVIDER", "zitadel"),
-		OAuthZitadelRedirectBaseURL:    os.Getenv("OAUTH_ZITADEL_REDIRECT_BASE_URL"),
-		ZitadelLinkClientID:            os.Getenv("ZITADEL_LINK_CLIENT_ID"),
-		ZitadelLinkClientSecret:        os.Getenv("ZITADEL_LINK_CLIENT_SECRET"),
-		ZitadelLinkProvider:            envOr("ZITADEL_LINK_PROVIDER", "zitadel"),
-		OAuthJWTSecret:                 os.Getenv("OAUTH_JWT_SECRET"),
-		OAuthAllowedRedirectURIs:       oauthRedirectURIs,
-		OAuthPreregisteredClientsRaw:   os.Getenv("OAUTH_PREREGISTERED_CLIENTS"),
-		OAuthCIMDAcceptRaw:             os.Getenv("OAUTH_CIMD_ACCEPT"),
-		OAuthCIMDAdvertiseRaw:          os.Getenv("OAUTH_CIMD_ADVERTISE"),
-		OAuthCIMDEnabledRaw:            os.Getenv("OAUTH_CIMD_ENABLED"),
-		OAuthCIMDAllowedHostsRaw:       os.Getenv("OAUTH_CIMD_ALLOWED_HOSTS"),
-		OAuthTokenTTL:                  parseDuration(os.Getenv("OAUTH_TOKEN_TTL"), time.Hour),
-		OAuthRefreshTokenTTL:           parseDuration(os.Getenv("OAUTH_REFRESH_TOKEN_TTL"), 30*24*time.Hour),
-		OAuthAccessTokenAudience:       os.Getenv("OAUTH_ACCESS_TOKEN_AUDIENCE"),
-		OAuthJWTSigningAlg:             os.Getenv("OAUTH_JWT_SIGNING_ALG"),
-		OAuthJWTSigningKeys:            os.Getenv("OAUTH_JWT_SIGNING_KEYS"),
-		OAuthJWTKeyRetention:           parseDuration(os.Getenv("OAUTH_JWT_KEY_RETENTION"), 0),
-		OAuthJWTRejectHS256:            os.Getenv("OAUTH_JWT_ACCEPT_HS256") == "false",
-		OAuthJWTRequireAud:             os.Getenv("OAUTH_JWT_REQUIRE_AUD") == "true",
-		VaultAddr:                      os.Getenv("VAULT_ADDR"),
-		VaultToken:                     os.Getenv("VAULT_TOKEN"),
-		VaultKubernetesRole:            os.Getenv("VAULT_KUBERNETES_ROLE"),
-		VaultKubernetesAuthPath:        os.Getenv("VAULT_KUBERNETES_AUTH_PATH"),
-		ArgoWebhookSecret:              os.Getenv("ARGO_WEBHOOK_SECRET"),
-		GitHubWebhookSecret:            os.Getenv("GITHUB_WEBHOOK_SECRET"),
-		GitHubWebhookOwners:            splitCSV(envOr("GITHUB_WEBHOOK_OWNERS", "mctlhq")),
-		ZitadelHook:                    loadZitadelHookConfig(),
-		MctlWebClientID:                os.Getenv("MCTL_WEB_CLIENT_ID"),
-		ZitadelPortalClientID:          os.Getenv("ZITADEL_PORTAL_CLIENT_ID"),
-		EventsValkeyURL:                os.Getenv("EVENTS_VALKEY_URL"),
-		EventsValkeyPassword:           os.Getenv("EVENTS_VALKEY_PASSWORD"),
-		OAuthRegistrationToken:         os.Getenv("OAUTH_REGISTRATION_TOKEN"),
-		TrustedProxyCIDRs:              os.Getenv("TRUSTED_PROXY_CIDRS"),
-		CommerceDispatchKeyID:          os.Getenv("COMMERCE_DISPATCH_KEY_ID"),
-		CommerceDispatchSigningKey:     os.Getenv("COMMERCE_DISPATCH_SIGNING_KEY"),
-		CommerceDisabled:               killSwitchOn(os.Getenv("COMMERCE_DISABLED")),
-		CommerceAcceptDisabled:         killSwitchOn(os.Getenv("COMMERCE_ACCEPT_DISABLED")),
-		TenantAuthzModeRaw:             os.Getenv("TENANT_AUTHZ_MODE"),
-		AgentReceiptGateRaw:            os.Getenv("MCTL_AGENT_RECEIPT_GATE"),
-		ApprovalBindingRaw:             os.Getenv("MCTL_APPROVAL_BINDING"),
-		AgentReceiptMaxAgeRaw:          os.Getenv("MCTL_AGENT_RECEIPT_MAX_AGE"),
-		WorkItemsConfigured:            workItemsStoreConfigured(),
-		LegacyApproverRaw:              os.Getenv("MCTL_AGENTS_APPROVE_LEGACY_APPROVER"),
-		SubmitCreatesExecutionRaw:      os.Getenv(operations.SubmitCreatesExecutionEnv),
-		ApprovalMaxDecisionAgeRaw:      os.Getenv("ACTION_APPROVAL_MAX_DECISION_AGE"),
-		ApprovalStrictPolicyRaw:        os.Getenv("ACTION_APPROVAL_REQUIRE_REGISTERED_POLICY"),
-		AdminPrincipalsRaw:             os.Getenv("ADMIN_PRINCIPALS"),
-		PrincipalsDisabled:             killSwitchOn(os.Getenv("PRINCIPALS_DISABLED")),
-		PrincipalDBConfigured:          postgresURL(os.Getenv("SURFACE_IDENTITY_DB_URL")) != "" || postgresURL(os.Getenv("AUDIT_DB_URL")) != "",
+		Port:                                envOr("PORT", "8080"),
+		GitOpsRepoURL:                       envOr("GITOPS_REPO_URL", "https://github.com/mctlhq/mctl-gitops.git"),
+		GitOpsBranch:                        envOr("GITOPS_BRANCH", "main"),
+		GitOpsLocalPath:                     envOr("GITOPS_LOCAL_PATH", "/tmp/mctl-gitops"),
+		GitOpsToken:                         gitOpsTokenSource(),
+		GitOpsActionsToken:                  actionsTokenSource(),
+		GitOpsSSHKeyPath:                    os.Getenv("GITOPS_SSH_KEY_PATH"),
+		GitOpsSSHKnownHostsPath:             os.Getenv("GITOPS_SSH_KNOWN_HOSTS_PATH"),
+		ArgoCDURL:                           envOr("ARGOCD_URL", "https://ops.mctl.ai"),
+		ErpactDeployerURL:                   envOr("ERPACT_DEPLOYER_URL", "http://erpact-deployer.erpact.svc.cluster.local:8000"),
+		ArgoCDToken:                         os.Getenv("ARGOCD_TOKEN"),
+		GitHubOrg:                           envOr("GITHUB_ORG", "mctlhq"),
+		AdminUsers:                          adminList,
+		BackstageInternalURL:                envOr("BACKSTAGE_INTERNAL_URL", "http://backstage.backstage.svc.cluster.local:7007"),
+		PlatformDomain:                      envOr("PLATFORM_DOMAIN", "mctl.ai"),
+		DNSResolverAddr:                     envOr("DNS_RESOLVER_ADDR", "1.1.1.1:53"),
+		BackstageGithubAppConnectToken:      os.Getenv("BACKSTAGE_GITHUB_APP_CONNECT_TOKEN"),
+		DexIssuerURL:                        os.Getenv("DEX_ISSUER_URL"),
+		DexClientID:                         os.Getenv("DEX_CLIENT_ID"),
+		OIDCProvidersRaw:                    os.Getenv("MCTL_OIDC_PROVIDERS"),
+		GitHubActionsOIDCRaw:                os.Getenv("MCTL_GITHUB_ACTIONS_OIDC"),
+		FederationDisabled:                  killSwitchOn(os.Getenv("MCTL_FEDERATION_DISABLED")),
+		SelfURL:                             envOr("SELF_URL", "https://api.mctl.ai"),
+		AllowedOrigins:                      origins,
+		OAuthGitHubClientID:                 os.Getenv("OAUTH_GITHUB_CLIENT_ID"),
+		OAuthGitHubClientSecret:             os.Getenv("OAUTH_GITHUB_CLIENT_SECRET"),
+		OAuthUpstreamRaw:                    os.Getenv("OAUTH_UPSTREAM"),
+		OAuthZitadelClientID:                os.Getenv("OAUTH_ZITADEL_CLIENT_ID"),
+		OAuthZitadelClientSecret:            os.Getenv("OAUTH_ZITADEL_CLIENT_SECRET"),
+		OAuthZitadelProvider:                envOr("OAUTH_ZITADEL_PROVIDER", "zitadel"),
+		OAuthZitadelRedirectBaseURL:         os.Getenv("OAUTH_ZITADEL_REDIRECT_BASE_URL"),
+		ZitadelLinkClientID:                 os.Getenv("ZITADEL_LINK_CLIENT_ID"),
+		ZitadelLinkClientSecret:             os.Getenv("ZITADEL_LINK_CLIENT_SECRET"),
+		ZitadelLinkProvider:                 envOr("ZITADEL_LINK_PROVIDER", "zitadel"),
+		DevLoopDecideClientID:               os.Getenv("DEVLOOP_DECIDE_CLIENT_ID"),
+		DevLoopDecideClientSecret:           os.Getenv("DEVLOOP_DECIDE_CLIENT_SECRET"),
+		OAuthJWTSecret:                      os.Getenv("OAUTH_JWT_SECRET"),
+		OAuthAllowedRedirectURIs:            oauthRedirectURIs,
+		OAuthPreregisteredClientsRaw:        os.Getenv("OAUTH_PREREGISTERED_CLIENTS"),
+		OAuthCIMDAcceptRaw:                  os.Getenv("OAUTH_CIMD_ACCEPT"),
+		OAuthCIMDAdvertiseRaw:               os.Getenv("OAUTH_CIMD_ADVERTISE"),
+		OAuthCIMDEnabledRaw:                 os.Getenv("OAUTH_CIMD_ENABLED"),
+		OAuthCIMDAllowedHostsRaw:            os.Getenv("OAUTH_CIMD_ALLOWED_HOSTS"),
+		OAuthTokenTTL:                       parseDuration(os.Getenv("OAUTH_TOKEN_TTL"), time.Hour),
+		OAuthRefreshTokenTTL:                parseDuration(os.Getenv("OAUTH_REFRESH_TOKEN_TTL"), 30*24*time.Hour),
+		OAuthAccessTokenAudience:            os.Getenv("OAUTH_ACCESS_TOKEN_AUDIENCE"),
+		OAuthJWTSigningAlg:                  os.Getenv("OAUTH_JWT_SIGNING_ALG"),
+		OAuthJWTSigningKeys:                 os.Getenv("OAUTH_JWT_SIGNING_KEYS"),
+		OAuthJWTKeyRetention:                parseDuration(os.Getenv("OAUTH_JWT_KEY_RETENTION"), 0),
+		OAuthJWTRejectHS256:                 os.Getenv("OAUTH_JWT_ACCEPT_HS256") == "false",
+		OAuthJWTRequireAud:                  os.Getenv("OAUTH_JWT_REQUIRE_AUD") == "true",
+		VaultAddr:                           os.Getenv("VAULT_ADDR"),
+		VaultToken:                          os.Getenv("VAULT_TOKEN"),
+		VaultKubernetesRole:                 os.Getenv("VAULT_KUBERNETES_ROLE"),
+		VaultKubernetesAuthPath:             os.Getenv("VAULT_KUBERNETES_AUTH_PATH"),
+		ArgoWebhookSecret:                   os.Getenv("ARGO_WEBHOOK_SECRET"),
+		GitHubWebhookSecret:                 os.Getenv("GITHUB_WEBHOOK_SECRET"),
+		GitHubWebhookOwners:                 splitCSV(envOr("GITHUB_WEBHOOK_OWNERS", "mctlhq")),
+		ZitadelHook:                         loadZitadelHookConfig(),
+		MctlWebClientID:                     os.Getenv("MCTL_WEB_CLIENT_ID"),
+		ZitadelPortalClientID:               os.Getenv("ZITADEL_PORTAL_CLIENT_ID"),
+		EventsValkeyURL:                     os.Getenv("EVENTS_VALKEY_URL"),
+		EventsValkeyPassword:                os.Getenv("EVENTS_VALKEY_PASSWORD"),
+		OAuthRegistrationToken:              os.Getenv("OAUTH_REGISTRATION_TOKEN"),
+		TrustedProxyCIDRs:                   os.Getenv("TRUSTED_PROXY_CIDRS"),
+		CommerceDispatchKeyID:               os.Getenv("COMMERCE_DISPATCH_KEY_ID"),
+		CommerceDispatchSigningKey:          os.Getenv("COMMERCE_DISPATCH_SIGNING_KEY"),
+		CommerceDisabled:                    killSwitchOn(os.Getenv("COMMERCE_DISABLED")),
+		CommerceAcceptDisabled:              killSwitchOn(os.Getenv("COMMERCE_ACCEPT_DISABLED")),
+		TenantAuthzModeRaw:                  os.Getenv("TENANT_AUTHZ_MODE"),
+		AgentReceiptGateRaw:                 os.Getenv("MCTL_AGENT_RECEIPT_GATE"),
+		ApprovalBindingRaw:                  os.Getenv("MCTL_APPROVAL_BINDING"),
+		AgentReceiptMaxAgeRaw:               os.Getenv("MCTL_AGENT_RECEIPT_MAX_AGE"),
+		WorkItemsConfigured:                 workItemsStoreConfigured(),
+		LegacyApproverRaw:                   os.Getenv("MCTL_AGENTS_APPROVE_LEGACY_APPROVER"),
+		SubmitCreatesExecutionRaw:           os.Getenv(operations.SubmitCreatesExecutionEnv),
+		ExecutionRequestQueueWhileActiveRaw: os.Getenv(workitems.QueueWhileActiveEnv),
+		ApprovalMaxDecisionAgeRaw:           os.Getenv("ACTION_APPROVAL_MAX_DECISION_AGE"),
+		ApprovalStrictPolicyRaw:             os.Getenv("ACTION_APPROVAL_REQUIRE_REGISTERED_POLICY"),
+		AdminPrincipalsRaw:                  os.Getenv("ADMIN_PRINCIPALS"),
+		PrincipalsDisabled:                  killSwitchOn(os.Getenv("PRINCIPALS_DISABLED")),
+		PrincipalDBConfigured:               postgresURL(os.Getenv("SURFACE_IDENTITY_DB_URL")) != "" || postgresURL(os.Getenv("AUDIT_DB_URL")) != "",
 	}
 }
 
 // postgresURL requires TLS to CNPG unless ALLOW_INSECURE_DB is set.
 // The returned string is never logged — it may contain credentials.
+// bridgeStoreDSN is the connection string of the command bridge store. It
+// reads COMMERCE_DB_URL only: the order transaction and the bridge Enqueue
+// must provably share one pgx.Tx, and an implicit AUDIT_DB_URL fallback could
+// quietly put them on different databases (mctl-api#987). An empty result
+// means the bridge stays not_ready and no store is opened.
+func bridgeStoreDSN() string {
+	return postgresURL(os.Getenv("COMMERCE_DB_URL"))
+}
+
 func postgresURL(raw string) string {
 	if raw == "" {
 		return ""
@@ -2015,6 +2264,9 @@ func (c config) validate() error {
 		return err
 	}
 	if _, err := operations.ParseSubmitCreatesExecution(c.SubmitCreatesExecutionRaw); err != nil {
+		return err
+	}
+	if _, err := workitems.ParseQueueWhileActive(c.ExecutionRequestQueueWhileActiveRaw); err != nil {
 		return err
 	}
 	if _, err := parseApprovalMaxDecisionAge(c.ApprovalMaxDecisionAgeRaw); err != nil {
@@ -2846,6 +3098,53 @@ func identityLinkOptions(cfg config, store *principals.Store, cache *principals.
 	return opts
 }
 
+// devLoopDecideOptions configures the DevLoop decide page (mctl-api#964),
+// or returns nil (page off, 503) with one log line saying what is missing.
+// Both client variables empty is the page deliberately off, and silent.
+func devLoopDecideOptions(cfg config, pr auth.PrincipalResolver, authz *auth.PrincipalAuthz) *mctlapi.DevLoopDecideOptions {
+	if cfg.DevLoopDecideClientID == "" && cfg.DevLoopDecideClientSecret == "" {
+		return nil
+	}
+	opts := &mctlapi.DevLoopDecideOptions{
+		ClientID: cfg.DevLoopDecideClientID, ClientSecret: cfg.DevLoopDecideClientSecret,
+		BaseURL: cfg.SelfURL, Principals: pr, Authz: authz,
+	}
+	var missing []string
+	if cfg.DevLoopDecideClientID == "" || cfg.DevLoopDecideClientSecret == "" {
+		missing = append(missing, "DEVLOOP_DECIDE_CLIENT_ID and DEVLOOP_DECIDE_CLIENT_SECRET (both)")
+	}
+	if cfg.SelfURL == "" {
+		missing = append(missing, "SELF_URL")
+	}
+	if pr == nil {
+		missing = append(missing, "the principal store")
+	}
+	if authz == nil {
+		// Outside principal mode a federated user has no admin bit at all,
+		// so nobody could decide: say so instead of serving a page that
+		// refuses everyone.
+		missing = append(missing, "TENANT_AUTHZ_MODE=principal")
+	}
+	if cfg.FederationDisabled {
+		missing = append(missing, "the federation registry (MCTL_FEDERATION_DISABLED is on)")
+	} else if entries, err := auth.ParseOIDCProviders(cfg.OIDCProvidersRaw); err == nil {
+		for i := range entries {
+			if entries[i].Name == cfg.ZitadelLinkProvider {
+				opts.ProviderName, opts.Issuer = entries[i].Name, entries[i].Issuer
+			}
+		}
+	}
+	if opts.Issuer == "" && !cfg.FederationDisabled {
+		missing = append(missing, "an MCTL_OIDC_PROVIDERS entry named "+cfg.ZitadelLinkProvider)
+	}
+	if len(missing) > 0 {
+		slog.Error("devloop decide page disabled", "missing", strings.Join(missing, "; "))
+		return nil
+	}
+	slog.Info("devloop decide page enabled", "provider", opts.ProviderName, "issuer", opts.Issuer)
+	return opts
+}
+
 // erpactVaultReadTimeout bounds the one startup read of the deployer token.
 const erpactVaultReadTimeout = 10 * time.Second
 
@@ -3007,6 +3306,17 @@ func configureSupportResource(o *auth.OAuthServer, lookup func(string) (string, 
 		o.SupportResource = strings.TrimSpace(v)
 	}
 	return o.ValidateSupportResource()
+}
+
+// configureGlovoResource sets the Glovo facade's RFC 8707 resource from
+// GLOVO_MCP_RESOURCE (unset or empty: disabled) and refuses an invalid one.
+// Call it after configureSupportResource.
+func configureGlovoResource(o *auth.OAuthServer, lookup func(string) (string, bool)) error {
+	o.GlovoResource = ""
+	if v, ok := lookup("GLOVO_MCP_RESOURCE"); ok {
+		o.GlovoResource = strings.TrimSpace(v)
+	}
+	return o.ValidateGlovoResource()
 }
 
 // reviewConfigFromEnv reads REVIEW_REQUEST_TTL and REVIEW_POOL_MAX. Empty

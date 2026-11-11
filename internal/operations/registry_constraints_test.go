@@ -2,6 +2,7 @@ package operations
 
 import (
 	"regexp"
+	"regexp/syntax"
 	"strings"
 	"testing"
 )
@@ -12,7 +13,36 @@ func isConstrained(p ParameterDef) bool {
 	if len(p.Enum) > 0 {
 		return true
 	}
-	return p.Pattern != "" && anchoredRe.MatchString(p.Pattern) && strings.HasSuffix(p.Pattern, "$")
+	if p.Pattern == "" || !anchoredRe.MatchString(p.Pattern) || !strings.HasSuffix(p.Pattern, "$") {
+		return false
+	}
+	return p.MaxLength > 0 || !unboundedPattern(p.Pattern)
+}
+
+// unboundedPattern reports whether the pattern contains *, + or {n,}.
+func unboundedPattern(pat string) bool {
+	re, err := syntax.Parse(pat, syntax.Perl)
+	if err != nil {
+		return true
+	}
+	var walk func(*syntax.Regexp) bool
+	walk = func(r *syntax.Regexp) bool {
+		switch r.Op {
+		case syntax.OpStar, syntax.OpPlus:
+			return true
+		case syntax.OpRepeat:
+			if r.Max == -1 {
+				return true
+			}
+		}
+		for _, s := range r.Sub {
+			if walk(s) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(re)
 }
 
 // constraintViolations reports unconstrained parameters and stale map entries.
@@ -94,9 +124,11 @@ func TestConstraintCheckFailsWhenAnyConstraintIsRemoved(t *testing.T) {
 func TestConstraintCheckReportsSyntheticAndUnanchored(t *testing.T) {
 	ops := []Operation{{Name: "x", WorkflowTemplate: "x", Parameters: []ParameterDef{
 		{Name: "bare"}, {Name: "loose", Pattern: `[a-z]+`}, {Name: "ok", Pattern: `(?s)^a$`},
+		{Name: "unbounded", Pattern: `(?s)^\[.*\]$`},
+		{Name: "bounded", Pattern: `(?s)^\[.*\]$`, MaxLength: 10},
 	}}}
 	v := constraintViolations(ops, nil, nil)
-	if len(v) != 2 {
+	if len(v) != 3 {
 		t.Fatalf("got %v", v)
 	}
 }
@@ -231,5 +263,55 @@ func TestEveryParameterDefaultValidates(t *testing.T) {
 				t.Errorf("%s/%s default: %v", op.Name, p.Name, errs)
 			}
 		}
+	}
+}
+
+func TestPreviewGitRefAndRepoPathValidation(t *testing.T) {
+	r := NewRegistry()
+	op, _ := r.Get("preview-deploy")
+	check := func(param, val string) bool {
+		in := map[string]string{"team_name": "labs", "component_name": "web", param: val}
+		for _, e := range r.ValidateInput(op, in) {
+			if strings.HasPrefix(e, param+":") {
+				return false
+			}
+		}
+		return true
+	}
+	good := []string{strings.Repeat("a", 40), "main", "v1.2.3", "feat/x-y", "release/2026.11"}
+	bad := []string{"-x", "a..b", "a//b", "a/", "a.", ".a", "a/.b", "x.lock", "a.lock/b", strings.Repeat("a", 256)}
+	for _, v := range good {
+		if !check("git_ref", v) {
+			t.Errorf("git_ref %q refused", v)
+		}
+	}
+	for _, v := range bad {
+		if check("git_ref", v) {
+			t.Errorf("git_ref %q accepted", v)
+		}
+	}
+	for v, want := range map[string]bool{
+		"Dockerfile": true, ".docker/Dockerfile": true, "docker/prod.Dockerfile": true,
+		".": false, "..": false, "../x": false, "a/../b": false, "/abs": false,
+		"-x": false, "a//b": false, "a/-b": false, strings.Repeat("a", 257): false,
+	} {
+		if got := check("dockerfile_path", v); got != want {
+			t.Errorf("dockerfile_path %q = %v, want %v", v, got, want)
+		}
+	}
+}
+
+func TestHumanInputResponsesBounded(t *testing.T) {
+	r := NewRegistry()
+	op, _ := r.Get("mctl-agents-investigate")
+	in := map[string]string{"human_input_responses": "[" + strings.Repeat("a", 65536) + "]"}
+	found := false
+	for _, e := range r.ValidateInput(op, in) {
+		if strings.HasPrefix(e, "human_input_responses:") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("oversized human_input_responses accepted")
 	}
 }

@@ -1,0 +1,14 @@
+{
+  "name": "cancel cancelled none",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/internal/glovo/orders/ordr_ABCDEFGHIJKLMNOP0123/cancel",
+    "body": {}
+  },
+  "status": 200,
+  "response": {
+    "command_id": "cmd_ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "effect_state": "none",
+    "order_state": "cancelled"
+  }
+}

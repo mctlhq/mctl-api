@@ -61,6 +61,8 @@ const (
 	artCodeExecutionRequired     = "agent_scope_execution_required"
 	artCodePermissionsUnexpected = "agent_scope_permissions_unexpected"
 	artCodeExecutionForeign      = "execution_not_in_tenant"
+	artCodeGrantRequired         = "agent_scope_grant_required"
+	artCodeGrantUnexpected       = "agent_scope_grant_unexpected"
 )
 
 type agentRunTokenBody struct {
@@ -75,6 +77,9 @@ type agentRunTokenBody struct {
 	// WithoutExecution is set only by the exchange, never decoded from a
 	// request: see workitems.MintAgentRunTokenInput.
 	WithoutExecution bool `json:"-"`
+	// GrantID is likewise set only by the exchange, which resolved it from
+	// the verified run: no caller names the grant a token is pinned to.
+	GrantID string `json:"-"`
 }
 
 // auditAgentRunTokenRefusal records a refused mint: the typed code and the
@@ -352,6 +357,18 @@ func (h *Handlers) issueAgentRunToken(w http.ResponseWriter, r *http.Request, is
 				"scope "+strconv.Quote(body.Scope)+" must be bound to an execution", nil)
 			return
 		}
+		if scope.PinnedGrant && body.GrantID == "" {
+			h.auditAgentRunTokenRefusalBy(r, iss, body.Agent, artCodeGrantRequired)
+			writeErrorCode(w, http.StatusBadRequest, artCodeGrantRequired,
+				"scope "+strconv.Quote(body.Scope)+" is only issued by the exchange, pinned to one grant", nil)
+			return
+		}
+	}
+	// Whatever the scope, or none: a pin nothing would enforce is refused.
+	if sc, ok := auth.LookupAgentScope(body.Scope); body.GrantID != "" && (!ok || !sc.PinnedGrant) {
+		h.auditAgentRunTokenRefusalBy(r, iss, body.Agent, artCodeGrantUnexpected)
+		writeErrorCode(w, http.StatusBadRequest, artCodeGrantUnexpected, "a grant is not accepted for this scope", nil)
+		return
 	}
 
 	// The agent's own principal, resolved (and provisioned on first sight)
@@ -381,6 +398,7 @@ func (h *Handlers) issueAgentRunToken(w http.ResponseWriter, r *http.Request, is
 		Agent: body.Agent, AgentPrincipalID: agentUser.PrincipalID(), ExecutionID: body.ExecutionID,
 		Permissions: body.Permissions, Scope: body.Scope, TTL: ttl, IssuedByPrincipalID: iss.PrincipalID,
 		WithoutExecution: body.WithoutExecution, Tenant: body.Tenant, ViaPrincipalID: viaPrincipal,
+		GrantID: body.GrantID,
 	})
 	if err != nil {
 		code, status := agentRunTokenErrorCode(err)
@@ -405,6 +423,9 @@ func (h *Handlers) issueAgentRunToken(w http.ResponseWriter, r *http.Request, is
 		"permissions":            strings.Join(row.Permissions, ","),
 		"scope":                  row.Scope,
 		"issued_by_principal_id": row.IssuedByPrincipalID,
+	}
+	if row.GrantID != "" {
+		params["grant_id"] = row.GrantID
 	}
 	for k, v := range extra {
 		params[k] = v
@@ -435,6 +456,9 @@ func (h *Handlers) issueAgentRunToken(w http.ResponseWriter, r *http.Request, is
 	}
 	if row.Tenant != "" {
 		resp["tenant"] = row.Tenant
+	}
+	if row.GrantID != "" {
+		resp["grant_id"] = row.GrantID
 	}
 	writeJSON(w, http.StatusCreated, resp)
 }

@@ -40,6 +40,7 @@ func TestSpecParses(t *testing.T) {
 		"/api/v1/execution-requests/claim":                                          {"post"},
 		"/api/v1/execution-requests/{request_id}/fulfil":                            {"post"},
 		"/api/v1/execution-requests/{request_id}/reject":                            {"post"},
+		"/api/v1/agents/dev-loop/{workflow_id}/approval":                            {"get"},
 		"/api/v1/agents/dev-loop/{workflow_id}/approve":                             {"post"},
 		"/api/v1/agents/dev-loop/{workflow_id}/abandon":                             {"post"},
 		"/api/v1/commerce/terms":                                                    {"get", "post"},
@@ -62,6 +63,25 @@ func TestSpecParses(t *testing.T) {
 		"/api/v1/security/occurrences/{id}/dismiss":                                 {"post"},
 		"/api/v1/security/remediation-attempts/{id}/fix":                            {"post"},
 		"/api/v1/security/remediation-attempts/{id}/verifications":                  {"post"},
+		"/api/v1/glovo/facade/context":                                              {"get"},
+		"/api/v1/glovo/facade/connections":                                          {"post"},
+		"/api/v1/glovo/facade/connections/{id}":                                     {"get"},
+		"/api/v1/glovo/facade/connections/{id}/handoff":                             {"post"},
+		"/api/v1/glovo/facade/connections/{id}/revoke":                              {"post"},
+		"/api/v1/glovo/facade/connections/{id}/reconnect":                           {"post"},
+		"/api/v1/glovo/tenants/{tenant}/installation":                               {"put", "delete"},
+		"/api/v1/glovo/worker/check":                                                {"post"},
+		"/api/v1/glovo/worker/connections/{id}/activate":                            {"post"},
+		"/api/v1/glovo/worker/connections/{id}/expire":                              {"post"},
+		"/api/v1/assistants/glovo/v1alpha1/resolve":                                 {"post"},
+		"/api/v1/assistants/glovo/v1alpha1/connection":                              {"get"},
+		"/api/v1/assistants/glovo/v1alpha1/connections":                             {"post"},
+		"/api/v1/assistants/glovo/v1alpha1/orders:list":                             {"post"},
+		"/api/v1/assistants/glovo/v1alpha1/previews":                                {"post"},
+		"/api/v1/assistants/glovo/v1alpha1/basket":                                  {"get"},
+		"/api/v1/assistants/glovo/v1alpha1/orders:prepare":                          {"post"},
+		"/api/v1/assistants/glovo/v1alpha1/orders/{order_id}":                       {"get"},
+		"/api/v1/assistants/glovo/v1alpha1/compatibility":                           {"get"},
 		"/api/v1/assistant-catalog":                                                 {"get"},
 		"/api/v1/assistant-catalog/{name}/versions/{version}":                       {"get"},
 		"/api/v1/assistant-catalog/{name}/versions/{version}/definition":            {"get"},
@@ -112,6 +132,35 @@ func TestNoRequestBodyComposesAClosedSchema(t *testing.T) {
 					}
 				}
 			}
+		}
+	}
+}
+
+// AuditEntry documents refusalCode as an optional string: rows that are not
+// refusals, and rows written before the field existed, omit it.
+func TestAuditEntryDocumentsOptionalRefusalCode(t *testing.T) {
+	var doc struct {
+		Components struct {
+			Schemas map[string]struct {
+				Required   []string       `yaml:"required"`
+				Properties map[string]any `yaml:"properties"`
+			} `yaml:"schemas"`
+		} `yaml:"components"`
+	}
+	if err := yaml.Unmarshal(Spec, &doc); err != nil {
+		t.Fatal(err)
+	}
+	s := doc.Components.Schemas["AuditEntry"]
+	p, ok := s.Properties["refusalCode"].(map[string]any)
+	if !ok {
+		t.Fatalf("AuditEntry lacks refusalCode: %+v", s.Properties)
+	}
+	if p["type"] != "string" {
+		t.Errorf("refusalCode type = %v, want string", p["type"])
+	}
+	for _, r := range s.Required {
+		if r == "refusalCode" {
+			t.Errorf("refusalCode must be optional, but is required")
 		}
 	}
 }

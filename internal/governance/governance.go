@@ -52,9 +52,12 @@ var (
 )
 
 // AuthorityBasisPlatformAdmin is the basis recorded for a decision made by a
-// human platform admin. Legacy rows read as AuthorityBasisUnrecorded.
+// human platform admin. AuthorityBasisResourceOwner is the basis of a Glovo
+// order approval decided by the order's owner (mctl-api#989). Legacy rows read
+// as AuthorityBasisUnrecorded.
 const (
 	AuthorityBasisPlatformAdmin = "platform_admin"
+	AuthorityBasisResourceOwner = workitems.GlovoAuthorityBasis
 	AuthorityBasisUnrecorded    = "unrecorded"
 )
 
@@ -83,6 +86,12 @@ var Policies = PolicySet{
 		Version:    "v1",
 		Decision:   "require_approval",
 		Reasons:    []string{"dev-loop.proposal-acceptance"},
+		SideEffect: "write",
+	},
+	workitems.GlovoPolicyRuleID: {
+		Version:    workitems.GlovoPolicyVersion,
+		Decision:   "require_approval",
+		Reasons:    []string{workitems.GlovoPolicyRuleID},
 		SideEffect: "write",
 	},
 }

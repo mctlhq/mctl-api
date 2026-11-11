@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "glovo-connection/v1alpha1.Connection",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "connection_id", "state", "install_revision", "created_at", "updated_at"],
+  "properties": {
+    "schema": {"const": "glovo-connection/v1alpha1.Connection"},
+    "connection_id": {"type": "string", "pattern": "^gcn_[0-9A-Z]{26}$"},
+    "state": {"enum": ["pending", "active", "expired", "failed", "revoked"]},
+    "install_revision": {"type": "integer", "minimum": 1},
+    "supersedes_id": {"type": "string", "pattern": "^gcn_[0-9A-Z]{26}$"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "replayed": {"type": "boolean"}
+  }
+}

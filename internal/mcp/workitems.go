@@ -168,7 +168,7 @@ You are the requester: requested_by is taken from your authentication, never fro
 Fails closed rather than forking work:
 - expected_state_version must equal the item's current state_version (read it with mctl_get_work_item), or the call is refused;
 - only one open request per item: a second one is refused with execution_request_open, naming the open request;
-- a resume while an execution is still running is refused with execution_active.
+- a resume while an execution is still running is, depending on server configuration, either queued (returned pending with queued_behind_execution_id and delivered after the execution ends; a stale expected_state_version is then refused when it is delivered) or refused with execution_active.
 
 intent_id pins the intent the run acts on. An intent whose text is unavailable (redacted) is refused with 409 intent_unavailable, and an intent of another item answers 404 intent_not_found. No other intent is ever substituted: a replacement needs a new request with a new idempotency_key.
 

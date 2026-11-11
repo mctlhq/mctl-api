@@ -48,6 +48,14 @@ const AgentScopeInvestigate = "investigate"
 // execute.
 const AgentScopeImplement = "implement"
 
+// AgentScopeImplementGrant is the scope of an implementer run that has no
+// execution (the sweep, a manual trigger; mctlhq/mctl-gitops#1980): the same
+// reads as implement, and only the read and the execute of the one DevLoop
+// grant its token is pinned to at the exchange. It can neither request nor
+// spend an approval, and it binds no work item. The pin lives in the handlers
+// (isPinnedAgentGrant), so this scope is only as strong as that binding.
+const AgentScopeImplementGrant = "implement-grant"
+
 // AgentScopeSupport is the scope of a tenant support run: reads of exactly
 // one tenant, the one the token was minted for, and nothing else.
 const AgentScopeSupport = "support"
@@ -57,6 +65,13 @@ const AgentScopeSupport = "support"
 // be bound to an execution; the reviewer's identity is derived from that
 // binding, never from a request body.
 const AgentScopeReview = "review"
+
+// AgentScopeShepherd is the scope of a shepherd run (mctlhq/mctl-gitops#1980):
+// one read, the dev-loop liveness check its sweep makes per proposal, so the
+// shepherd container can stop holding a static service token. It has no
+// execution and no work item, no MCP endpoint and no tool, and it writes
+// nothing.
+const AgentScopeShepherd = "shepherd"
 
 // AgentScope is one server-defined run scope.
 type AgentScope struct {
@@ -69,9 +84,13 @@ type AgentScope struct {
 	// work item and execution: the tenant check is not where a scoped run's
 	// writes are stopped. The binding lives either in the route list
 	// (BindWorkItem / BindExecution) or, for the action-approval writes of
-	// the implement scope, in the handlers (boundAgentExecution,
-	// isAgentOwnApproval). A route list alone is not the whole binding.
+	// the implement scopes, in the handlers (boundAgentExecution,
+	// isAgentOwnApproval, isPinnedAgentGrant). A route list alone is not the
+	// whole binding.
 	ReadAllTenants bool
+	// PinnedGrant means a token with this scope is minted for exactly one
+	// DevLoop grant, which only the exchange can name.
+	PinnedGrant bool
 	// BoundTenant means a token with this scope is minted for exactly one
 	// tenant and every check compares against it. Mutually exclusive with
 	// ReadAllTenants.
@@ -287,6 +306,18 @@ var agentScopes = map[string]*AgentScope{
 			}),
 			agentApprovalRoutes...),
 	},
+	AgentScopeImplementGrant: {
+		Name:           AgentScopeImplementGrant,
+		Agents:         []string{"implementer"},
+		ReadAllTenants: true,
+		PinnedGrant:    true,
+		Tool:           IsReadTool,
+		Deny:           agentDeniedRoutes,
+		Routes: append(append(append([]AgentScopeRoute(nil), mcpRoutes...), agentPlatformReads()...),
+			getRoute(`^/api/v1/action-approvals/[^/]+$`),
+			AgentScopeRoute{Method: http.MethodPost, Pattern: regexp.MustCompile(`^/api/v1/action-approvals/[^/]+/execute$`)},
+		),
+	},
 	AgentScopeReview: {
 		Name: AgentScopeReview,
 		// review-worker is the canonical reviewer agent name, decided in
@@ -298,6 +329,16 @@ var agentScopes = map[string]*AgentScope{
 		Routes: []AgentScopeRoute{
 			getRoute(`^/api/v1/whoami$`),
 			{Method: http.MethodPost, Pattern: regexp.MustCompile(`^/api/v1/review-receipts$`)},
+		},
+	},
+	AgentScopeShepherd: {
+		Name:   AgentScopeShepherd,
+		Agents: []string{"shepherd"},
+		Deny:   agentDeniedRoutes,
+		Tool:   func(string) bool { return false },
+		Routes: []AgentScopeRoute{
+			getRoute(`^/api/v1/whoami$`),
+			getRoute(`^/api/v1/agents/dev-loop/[^/]+$`),
 		},
 	},
 	AgentScopeSupport: {

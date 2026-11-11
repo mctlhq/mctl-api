@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mctlhq/mctl-api/internal/bridge"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
@@ -122,6 +123,17 @@ func WorkflowIDForIssueURL(issueURL string) (string, error) {
 	}
 	repo, issueNumber := m[1], m[2]
 	return fmt.Sprintf("dev-loop-mctlhq-%s-%s", repo, issueNumber), nil
+}
+
+// RepoForIssueURL returns the repository name (under mctlhq) of an issue URL
+// WorkflowIDForIssueURL accepts, so a caller can judge the repository the
+// workflow id is derived from.
+func RepoForIssueURL(issueURL string) (string, error) {
+	m := issueURLPattern.FindStringSubmatch(issueURL)
+	if m == nil {
+		return "", fmt.Errorf("%w: %q", ErrInvalidIssueURL, issueURL)
+	}
+	return m[1], nil
 }
 
 // WorkflowIDForProposalRef derives a DevLoopWorkflow id from the
@@ -274,6 +286,27 @@ func (c *Client) SignalAbandon(ctx context.Context, workflowID, runID string, pa
 	return nil
 }
 
+// BridgeResultSignalName is the signal the bridge dispatcher sends to the
+// workflow that enqueued a command, once its result is durably recorded
+// (mctl-api#962). The payload carries only the command id and the result
+// digest, so the workflow can dedupe and then read the outcome back.
+const BridgeResultSignalName = "bridge-result"
+
+// SignalBridgeResult delivers a recorded bridge result to the stored
+// workflow/run only. A Temporal NotFound is returned wrapped in
+// bridge.ErrSignalTargetNotFound so the dispatcher records it as terminal
+// "unknown" rather than success.
+func (c *Client) SignalBridgeResult(ctx context.Context, workflowID, runID, commandID, resultDigest string) error {
+	payload := map[string]string{"command_id": commandID, "result_digest": resultDigest}
+	if err := c.temporal.SignalWorkflow(ctx, workflowID, runID, BridgeResultSignalName, payload); err != nil {
+		if IsNotFound(err) {
+			return fmt.Errorf("temporalclient: signal %s on %s: %w", BridgeResultSignalName, workflowID, bridge.ErrSignalTargetNotFound)
+		}
+		return fmt.Errorf("temporalclient: signal %s on %s: %w", BridgeResultSignalName, workflowID, err)
+	}
+	return nil
+}
+
 // statusName maps a Temporal workflow execution status to the short name
 // DescribeDevLoop has always returned, e.g. "Running", "Completed",
 // "Failed", "TimedOut", "Terminated". Unrecognized values map to "Unknown" —
@@ -317,6 +350,30 @@ func (c *Client) DescribeDevLoopExecution(ctx context.Context, workflowID string
 	resp, err := c.temporal.DescribeWorkflowExecution(ctx, workflowID, "")
 	if err != nil {
 		return nil, fmt.Errorf("temporalclient: describe %s: %w", workflowID, err)
+	}
+	info := resp.GetWorkflowExecutionInfo()
+	return &DevLoopExecution{
+		Status:    statusName(info.GetStatus()),
+		RunID:     info.GetExecution().GetRunId(),
+		StartTime: info.GetStartTime().AsTime(),
+	}, nil
+}
+
+// ErrRunNotFound is DescribeDevLoopRun's answer when Temporal has no such
+// run (a typed, matchable fault, never folded into a status).
+var ErrRunNotFound = errors.New("temporalclient: workflow run not found")
+
+// DescribeDevLoopRun describes one specific run of a workflow (runID "" is
+// the latest). Unlike DescribeDevLoopExecution it can answer for a run that
+// is no longer the latest.
+func (c *Client) DescribeDevLoopRun(ctx context.Context, workflowID, runID string) (*DevLoopExecution, error) {
+	resp, err := c.temporal.DescribeWorkflowExecution(ctx, workflowID, runID)
+	if err != nil {
+		var nf *serviceerror.NotFound
+		if errors.As(err, &nf) {
+			return nil, fmt.Errorf("%w: %s run %q", ErrRunNotFound, workflowID, runID)
+		}
+		return nil, fmt.Errorf("temporalclient: describe %s run %q: %w", workflowID, runID, err)
 	}
 	info := resp.GetWorkflowExecutionInfo()
 	return &DevLoopExecution{

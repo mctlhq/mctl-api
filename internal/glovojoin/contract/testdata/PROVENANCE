@@ -1,0 +1,9 @@
+glovo-mcp-tools.json: byte for byte copy of mctlhq/mctl-telegram
+internal/glovo/contract/glovo-mcp-tools.json at commit 27c671d2.
+sha256 b7df86b017442a890a3f409a0e4fe610b29b8ea94fbdc7c4d1ee57f398dab50c
+
+facade/wire.golden.json: byte for byte copy of mctlhq/mctl-telegram
+internal/glovo/mctlapi/testdata/wire.golden.json at commit 27c671d2.
+sha256 5acdde3ae3fd92bf81b7f91d8f52b4767627de3f1c080058dda6dea2db295f0a
+
+These files must never be edited here; a change starts in mctl-telegram.

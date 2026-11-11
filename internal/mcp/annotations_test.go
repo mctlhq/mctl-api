@@ -46,6 +46,7 @@ var recordedHints = map[string]hints{
 	"mctl_enable_tenant_skill":               {readOnly: false, destructive: false, idempotent: true},
 	"mctl_get_agent":                         {readOnly: true, destructive: false, idempotent: false},
 	"mctl_get_dev_loop":                      {readOnly: true, destructive: false, idempotent: false},
+	"mctl_get_dev_loop_approval":             {readOnly: true, destructive: false, idempotent: false},
 	"mctl_get_epic_status":                   {readOnly: true, destructive: false, idempotent: false},
 	"mctl_get_ready_work_items":              {readOnly: true, destructive: false, idempotent: false},
 	"mctl_plan_epic_wave":                    {readOnly: true, destructive: false, idempotent: false},
@@ -261,7 +262,7 @@ func TestReadOnlyToolsAreTheRecordedSet(t *testing.T) {
 	want := []string{
 		"mctl_deploy_analyze", "mctl_get_repo_binding", "mctl_get_deploy_plan",
 		"mctl_erpact_list_sites", "mctl_erpact_site_status",
-		"mctl_get_agent", "mctl_get_commerce_budget", "mctl_get_commerce_receipt", "mctl_get_support_task", "mctl_get_dev_loop", "mctl_get_epic_status", "mctl_get_incident",
+		"mctl_get_dev_loop_approval", "mctl_get_agent", "mctl_get_commerce_budget", "mctl_get_commerce_receipt", "mctl_get_support_task", "mctl_get_dev_loop", "mctl_get_epic_status", "mctl_get_incident",
 		"mctl_get_lifecycle_ownership", "mctl_get_operation",
 		"mctl_get_ready_work_items", "mctl_get_resource_usage", "mctl_get_service_config", "mctl_get_service_logs", "mctl_get_service_pods", "mctl_list_namespace_events",
 		"mctl_get_review_gate", "mctl_get_service_status", "mctl_get_tenant", "mctl_get_usage_summary", "mctl_get_work_item", "mctl_get_workflow_logs",

@@ -30,6 +30,14 @@ const DefaultSupportResource = "https://support.mctl.ai"
 // grant was issued for.
 var ErrInvalidTarget = errors.New("invalid_target")
 
+// GlovoResourceIntended is the intended RFC 8707 resource of the Glovo MCP
+// facade. Documentation and test data only; never a default.
+const GlovoResourceIntended = "https://glovo.mctl.ai/mcp"
+
+// ErrGlovoNotReady: the configured Glovo resource was requested while the
+// feature gate is closed. It is an invalid_target, so nothing is minted.
+var ErrGlovoNotReady = fmt.Errorf("%w: glovo resource not ready", ErrInvalidTarget)
+
 // ResolveResource maps the RFC 8707 resource values of a request to the
 // audience to mint. No value, or one naming this API (the audience, the base
 // URL or its /mcp endpoint), is the default audience; those match exactly,
@@ -57,6 +65,14 @@ func (s *OAuthServer) ResolveResource(values []string) (string, error) {
 	if s.SupportResource != "" && n == normalizeIssuer(s.SupportResource) {
 		return s.SupportResource, nil
 	}
+	if s.GlovoResource != "" && n == normalizeIssuer(s.GlovoResource) {
+		// Admitted only with the kill switch on and every readiness
+		// dependency present; GLOVO_MCP_RESOURCE alone never opens it.
+		if !s.GlovoReady() {
+			return "", ErrGlovoNotReady
+		}
+		return s.GlovoResource, nil
+	}
 	return "", ErrInvalidTarget
 }
 
@@ -82,6 +98,31 @@ func (s *OAuthServer) ValidateSupportResource() error {
 	}
 	if s.namesThisAPI(normalizeIssuer(r)) {
 		return fmt.Errorf("OAUTH_SUPPORT_RESOURCE %q names this API (its audience, base URL or /mcp endpoint)", r)
+	}
+	if s.GlovoResource != "" && normalizeIssuer(r) == normalizeIssuer(s.GlovoResource) {
+		return fmt.Errorf("OAUTH_SUPPORT_RESOURCE %q equals GLOVO_MCP_RESOURCE", r)
+	}
+	return nil
+}
+
+// ValidateGlovoResource refuses a GlovoResource that is not an absolute
+// https URL without a fragment, or that names this API or the support
+// resource. Empty (disabled) is valid.
+func (s *OAuthServer) ValidateGlovoResource() error {
+	r := s.GlovoResource
+	if r == "" {
+		return nil
+	}
+	u, err := url.Parse(r)
+	if err != nil || !u.IsAbs() || u.Scheme != "https" || u.Host == "" || u.Fragment != "" || strings.Contains(r, "#") {
+		return fmt.Errorf("GLOVO_MCP_RESOURCE %q must be an absolute https URL without a fragment", r)
+	}
+	n := normalizeIssuer(r)
+	if s.namesThisAPI(n) {
+		return fmt.Errorf("GLOVO_MCP_RESOURCE %q names this API (its audience, base URL or /mcp endpoint)", r)
+	}
+	if s.SupportResource != "" && n == normalizeIssuer(s.SupportResource) {
+		return fmt.Errorf("GLOVO_MCP_RESOURCE %q equals OAUTH_SUPPORT_RESOURCE", r)
 	}
 	return nil
 }

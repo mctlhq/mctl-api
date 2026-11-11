@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "glovo-connection/v1alpha1.Installation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "tenant", "installation_id", "install_revision", "state"],
+  "properties": {
+    "schema": {"const": "glovo-connection/v1alpha1.Installation"},
+    "tenant": {"type": "string", "minLength": 1},
+    "installation_id": {"type": "string", "pattern": "^gin_[0-9A-Z]{26}$"},
+    "install_revision": {"type": "integer", "minimum": 1},
+    "state": {"enum": ["installed", "uninstalled"]}
+  }
+}

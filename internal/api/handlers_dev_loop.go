@@ -127,6 +127,22 @@ func startDevLoop(ctx context.Context, c DevLoopClient, issueURL, workflowID str
 	return startDevLoopAfterNotFound(ctx, c, issueURL, workflowID)
 }
 
+// startDevLoopWithoutRestart is startDevLoop without restartIfAbandoned, the
+// composition ExecuteRoadmapWave uses: an abandoned loop reports
+// already_exists instead of starting again. The orchestrator principal
+// (mctl-api#963) starts through it, because an abandon is a person's
+// decision that an automated re-triage must not silently undo; a human admin
+// restarts the loop if it should run again.
+func startDevLoopWithoutRestart(ctx context.Context, c DevLoopClient, issueURL, workflowID string) devLoopStartResult {
+	dctx, cancel := context.WithTimeout(ctx, devLoopDescribeTimeout)
+	result := classifyDevLoop(dctx, c, workflowID)
+	cancel()
+	if result.Outcome != "" {
+		return result
+	}
+	return startDevLoopAfterNotFound(ctx, c, issueURL, workflowID)
+}
+
 // restartIfAbandoned decides what an already_exists classification means
 // for the single-issue route (mctl-api#640). An operator's abandon is not a
 // verdict on the issue: since the legacy approver relay was turned off
@@ -315,6 +331,39 @@ func (h *Handlers) requireTemporalAdmin(w http.ResponseWriter, r *http.Request) 
 	return user, true
 }
 
+// requireDevLoopRead admits what requireTemporalAdmin admits, plus a run token
+// of the shepherd scope, whose sweep reads dev-loop liveness. It guards only
+// the read: every other dev-loop route stays admin-only.
+func (h *Handlers) requireDevLoopRead(w http.ResponseWriter, r *http.Request) bool {
+	// The orchestrator principal reaches this read only for a workflow of an
+	// allowed repository: orchestratorDevLoopGate has judged the path.
+	if user := auth.UserFromContext(r.Context()); user != nil && (user.AgentScopeName() == auth.AgentScopeShepherd || user.IsOrchestratorDevLoop()) {
+		if msg := h.temporalState(); msg != "" {
+			writeError(w, http.StatusServiceUnavailable, msg)
+			return false
+		}
+		return true
+	}
+	_, ok := h.requireTemporalAdmin(w, r)
+	return ok
+}
+
+// requireDevLoopStart admits what requireTemporalAdmin admits, plus the
+// orchestrator DevLoop principal (mctl-api#963), whose repository the
+// handler then checks against its allow-list.
+func (h *Handlers) requireDevLoopStart(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
+	if user := auth.UserFromContext(r.Context()); user.IsOrchestratorDevLoop() {
+		if msg := h.temporalState(); msg != "" {
+			// The gate left this start's record to the handler.
+			h.auditOrchestratorDevLoop(r, user, codeOrchestratorUnavailable, "")
+			writeError(w, http.StatusServiceUnavailable, msg)
+			return nil, false
+		}
+		return user, true
+	}
+	return h.requireTemporalAdmin(w, r)
+}
+
 type startDevLoopRequest struct {
 	IssueURL string `json:"issue_url"`
 }
@@ -332,17 +381,19 @@ type startDevLoopRequest struct {
 // would be a lie (issue #287, portfolio#7): this handler describes before it
 // starts, via the shared startDevLoop, and reports the real outcome.
 func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
-	user, ok := h.requireTemporalAdmin(w, r)
+	user, ok := h.requireDevLoopStart(w, r)
 	if !ok {
 		return
 	}
 
 	var body startDevLoopRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		h.auditOrchestratorDevLoopInvalid(r, user, "")
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
 	if body.IssueURL == "" {
+		h.auditOrchestratorDevLoopInvalid(r, user, "")
 		writeError(w, http.StatusBadRequest, "missing required field: issue_url")
 		return
 	}
@@ -350,14 +401,31 @@ func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) 
 	workflowID, err := temporalclient.WorkflowIDForIssueURL(body.IssueURL)
 	if err != nil {
 		// Caller input (a malformed issue_url) — real 400, not audited, same
-		// as before this change.
+		// as before this change, except for the orchestrator principal,
+		// every one of whose calls is audited (mctl-api#963).
+		h.auditOrchestratorDevLoopInvalid(r, user, body.IssueURL)
 		writeError(w, http.StatusBadRequest, "invalid issue_url: "+err.Error())
 		return
 	}
 
+	if user.IsOrchestratorDevLoop() {
+		// The orchestrator starts loops only for allowed repositories
+		// (mctl-api#963). The URL already parsed above, so this cannot fail.
+		if repo, _ := temporalclient.RepoForIssueURL(body.IssueURL); !orchestratorDevLoopRepoAllowed(repo) {
+			h.auditOrchestratorDevLoop(r, user, codeOrchestratorRepoNotAllowed, body.IssueURL)
+			writeErrorCode(w, http.StatusForbidden, codeOrchestratorRepoNotAllowed,
+				orchestratorDevLoopRefusalText[codeOrchestratorRepoNotAllowed], nil)
+			return
+		}
+	}
+
 	auditParams := map[string]string{"issue_url": body.IssueURL}
 
-	result := startDevLoop(r.Context(), h.opts.TemporalClient, body.IssueURL, workflowID)
+	start := startDevLoop
+	if user.IsOrchestratorDevLoop() {
+		start = startDevLoopWithoutRestart
+	}
+	result := start(r.Context(), h.opts.TemporalClient, body.IssueURL, workflowID)
 	auditParams["outcome"] = result.Outcome
 
 	switch result.Outcome {
@@ -603,6 +671,75 @@ const (
 	devLoopCodeGrantMissing       = "approval_grant_missing"
 	devLoopCodeExecutionAmbiguous = "execution_ambiguous"
 )
+
+// GetDevLoopApproval handles GET /api/v1/agents/dev-loop/{workflow_id}/approval
+// (mctl-api#936): the grant a bound approve of this workflow would decide,
+// with its decision context, so a reviewer can check what they are about to
+// bind to. It resolves the grant as decideDevLoopApproval does and changes
+// nothing.
+//
+// A human admin reads every grant and the requesting service its own; anyone
+// else is refused before the store is asked. 404 is reported only when the
+// store proved there is no open execution or no grant; a store that could not
+// be read is a 503, never "no grant".
+func (h *Handlers) GetDevLoopApproval(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.workItemsUser(w, r)
+	if !ok {
+		return
+	}
+	forbidden := func() {
+		writeErrorCode(w, http.StatusForbidden, aarCodeReaderForbidden, "action approvals are read by admins and their requester", nil)
+	}
+	if !isHumanAdmin(user) && !isDirectService(user) {
+		forbidden()
+		return
+	}
+	workflowID := chi.URLParam(r, "workflow_id")
+	if workflowID == "" {
+		writeError(w, http.StatusBadRequest, "missing workflow_id path parameter")
+		return
+	}
+	unavailable := func(err error) {
+		slog.Error("dev-loop approval read: grant lookup failed", "workflow_id", workflowID, "error", err)
+		writeErrorCode(w, http.StatusServiceUnavailable, wiCodeUnavailable, "could not read the DevLoop's approval grant", nil)
+	}
+	ctx := r.Context()
+	execs, err := h.opts.WorkItems.OpenExecutionsOfEngineRun(ctx, workitems.EngineTemporal, workflowID)
+	switch {
+	case err != nil:
+		unavailable(err)
+		return
+	case len(execs) == 0:
+		writeErrorCode(w, http.StatusNotFound, devLoopCodeGrantMissing, "no open work-item execution is attached for this workflow", nil)
+		return
+	case len(execs) > 1:
+		writeErrorCode(w, http.StatusConflict, devLoopCodeExecutionAmbiguous,
+			fmt.Sprintf("%d open work-item executions are attached for this workflow; resolve them before approving", len(execs)), nil)
+		return
+	}
+	list, err := h.opts.WorkItems.ActionApprovals(ctx, workitems.ActionApprovalFilter{
+		ExecutionID: execs[0].ID, ActionKind: devLoopApprovalKind, Limit: 1,
+	})
+	if err != nil {
+		unavailable(err)
+		return
+	}
+	if len(list) == 0 {
+		writeErrorCode(w, http.StatusNotFound, devLoopCodeGrantMissing, "no "+devLoopApprovalKind+" approval for execution "+execs[0].ID, nil)
+		return
+	}
+	newest := &list[0]
+	if !canSeeActionApproval(user, newest) {
+		forbidden()
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"schema_version":   workitems.ActionApprovalSchemaVersion,
+		"workflow_id":      workflowID,
+		"approval":         newest,
+		"decision_context": h.decisionContext(newest),
+	})
+}
 
 // decideDevLoopApproval resolves workflowID to the run's one open we_
 // execution (engine temporal, engine_ref the workflow id or, for a run
@@ -942,7 +1079,7 @@ func (h *Handlers) AbandonDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 // mctl-agents#213), and this is the only Temporal surface the sweeper —
 // which deliberately holds no Temporal client — can reach.
 func (h *Handlers) GetDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.requireTemporalAdmin(w, r); !ok {
+	if !h.requireDevLoopRead(w, r) {
 		return
 	}
 

@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -75,13 +76,17 @@ type authzCompletion struct {
 	// Resource is the flow resource (OAuthServer.FlowResource): "" for the
 	// default API resource.
 	Resource string
+	// TeamGrantID and SelectedTenant are the pending team grant a Glovo
+	// code is bound to; empty for every other flow.
+	TeamGrantID    string
+	SelectedTenant string
 }
 
 // issueGrant issues the authorization code, writes the oauth.grant_issued
 // audit entry and returns the URL to send the client to.
 func (h *Handlers) issueGrant(r *http.Request, c authzCompletion) (string, error) {
 	o := h.opts.OAuthServer
-	code, err := o.IssueCodeWithAuthMethod(r.Context(), c.Login, c.PrincipalID, c.ClientID, c.RedirectURI, c.CodeChallenge, c.Groups, c.AuthMethod, c.Resource)
+	code, err := o.IssueCodeForTeamGrant(r.Context(), c.Login, c.PrincipalID, c.ClientID, c.RedirectURI, c.CodeChallenge, c.Groups, c.AuthMethod, c.Resource, c.TeamGrantID, c.SelectedTenant)
 	if err != nil {
 		return "", err
 	}
@@ -91,19 +96,24 @@ func (h *Handlers) issueGrant(r *http.Request, c authzCompletion) (string, error
 	}
 	// The principal goes in the principal column; the client only in
 	// parameters, so the two identities are never merged.
+	params := map[string]string{
+		"client_id":     c.ClientID,
+		"client_kind":   o.ClientKind(c.ClientID),
+		"client_name":   truncateEchoedValue(c.ClientName),
+		"redirect_host": target.Host,
+		"upstream":      c.Upstream,
+		"resource":      c.Resource,
+	}
+	if c.TeamGrantID != "" {
+		params["tenant"], params["team_grant_id"] = c.SelectedTenant, c.TeamGrantID
+	}
 	h.logAudit(r, audit.Entry{
 		UserID: c.Login, PrincipalID: c.PrincipalID,
 		Operation: "oauth.grant_issued", Status: "succeeded",
-		RiskLevel: string(operations.RiskLow),
-		Parameters: map[string]string{
-			"client_id":     c.ClientID,
-			"client_kind":   o.ClientKind(c.ClientID),
-			"client_name":   truncateEchoedValue(c.ClientName),
-			"redirect_host": target.Host,
-			"upstream":      c.Upstream,
-			"resource":      c.Resource,
-		},
+		RiskLevel:  string(operations.RiskLow),
+		Parameters: params,
 	})
+
 	cq := target.Query()
 	cq.Set("code", code)
 	if c.ClientState != "" {
@@ -119,6 +129,11 @@ func (h *Handlers) issueGrant(r *http.Request, c authzCompletion) (string, error
 // result.
 func (h *Handlers) finishAuthorization(w http.ResponseWriter, r *http.Request, c authzCompletion) string {
 	o := h.opts.OAuthServer
+	if o.IsGlovoFlow(c.Resource) {
+		// Every client kind: a Glovo code is never issued without the human
+		// choosing a team.
+		return h.requestTeamConsent(w, r, c)
+	}
 	if o.IsCIMDClient(c.ClientID) {
 		return h.requestConsent(w, r, c)
 	}
@@ -295,11 +310,17 @@ func (h *Handlers) takeConsentDecision(w http.ResponseWriter, r *http.Request) s
 		oauthError(w, e.RedirectURI, state, "access_denied", "the user denied the request")
 		return "deny"
 	}
-	loc, err := h.issueGrant(r, authzCompletion{
+	c := authzCompletion{
 		Login: e.Login, PrincipalID: e.PrincipalID, Groups: e.Groups, ClientID: e.ClientID,
 		RedirectURI: e.RedirectURI, CodeChallenge: e.CodeChallenge, ClientState: state,
 		Upstream: e.Upstream, ClientName: e.ClientName, AuthMethod: e.AuthMethod, Resource: e.Resource,
-	})
+	}
+	if e.TeamSelection || o.IsGlovoFlow(e.Resource) {
+		if result, ok := h.selectTeam(w, r, e, &c); !ok {
+			return result
+		}
+	}
+	loc, err := h.issueGrant(r, c)
 	if err != nil {
 		slog.Error("failed to issue auth code", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -307,4 +328,129 @@ func (h *Handlers) takeConsentDecision(w http.ResponseWriter, r *http.Request) s
 	}
 	http.Redirect(w, r, loc, http.StatusFound)
 	return "approve"
+}
+
+// requestTeamConsent is the consent step of a Glovo flow: it lists the teams
+// the principal may act for and asks the human to choose one. Nothing is
+// preselected, even when exactly one team is eligible.
+func (h *Handlers) requestTeamConsent(w http.ResponseWriter, r *http.Request, c authzCompletion) string {
+	o := h.opts.OAuthServer
+	if c.PrincipalID == "" || !o.PrincipalMode {
+		oauthError(w, c.RedirectURI, c.ClientState, "access_denied", "Glovo pilot requires principal sign-in")
+		return "team_denied"
+	}
+	teams, err := o.EligibleTeams(r.Context(), c.PrincipalID)
+	if err != nil {
+		slog.Warn("oauth: team eligibility unavailable at consent", "error", err)
+		renderShellPage(w, http.StatusServiceUnavailable, "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'", teamRetryPage,
+			shellData{Title: "Try again later", Lines: []string{"Your teams could not be checked right now. Start again in a moment."}})
+		return "team_unavailable"
+	}
+	if len(teams) == 0 {
+		oauthError(w, c.RedirectURI, c.ClientState, "access_denied", "no team is available for this account")
+		return "team_denied"
+	}
+	redirect, err := url.Parse(c.RedirectURI)
+	if err != nil {
+		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
+		return "internal_error"
+	}
+	name, authMethod := c.ClientID, c.AuthMethod
+	if o.IsCIMDClient(c.ClientID) {
+		client, err := o.ResolveCIMDClient(r.Context(), c.ClientID)
+		if err != nil {
+			slog.Warn("oauth: client metadata document refused at consent", "client_id", c.ClientID, "error", err)
+			http.Error(w, "the client's metadata document is unavailable", http.StatusBadRequest)
+			return "client_unavailable"
+		}
+		if client.ClientName != "" {
+			name = client.ClientName
+		}
+		authMethod, c.ClientName = client.AuthMethod, client.ClientName
+	} else if rc, ok := o.GetClient(c.ClientID); ok && rc.ClientName != "" {
+		name, c.ClientName = rc.ClientName, rc.ClientName
+	}
+	token, err := auth.NewConsentToken()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return "internal_error"
+	}
+	err = o.StoreConsent(r.Context(), token, auth.ConsentEntry{
+		Login: c.Login, PrincipalID: c.PrincipalID, Groups: c.Groups,
+		ClientID: c.ClientID, ClientName: c.ClientName, RedirectURI: c.RedirectURI,
+		CodeChallenge: c.CodeChallenge, ClientState: []byte(c.ClientState), Upstream: c.Upstream,
+		AuthMethod: authMethod, Resource: c.Resource, BrowserHash: consentHash(token),
+		TeamSelection: true, EligibleTenants: teams,
+	})
+	if err != nil {
+		slog.Error("failed to store consent", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return "internal_error"
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: consentCookieName(consentHash(token)), Value: consentHash(token), Path: "/", MaxAge: 300,
+		HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
+	})
+	account := c.Login
+	if account == "" {
+		account = c.PrincipalID
+	}
+	renderShellPage(w, http.StatusOK, "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'"+consentFormTarget(redirect)+"; frame-ancestors 'none'", teamConsentPage,
+		shellData{Title: "Choose a team", Lines: []string{
+			"An application is asking to use Glovo on your behalf.",
+			"Application: " + name,
+			"Client ID: " + c.ClientID,
+			"Returns to: " + redirect.Host,
+			"You are signed in as " + account + ". Choose the one team this access is for; it cannot be changed without signing in again.",
+		}, Page: teamConsentPageData{Token: token, Teams: teams}})
+	return "consent_required"
+}
+
+// teamRetryPage has no actions: the human starts the sign-in again.
+var teamRetryPage = shellPage("team-retry", ``)
+
+type teamConsentPageData struct {
+	Token string
+	Teams []string
+}
+
+// teamConsentPage lists the eligible teams as radio buttons, none checked.
+var teamConsentPage = shellPage("team-consent", `<form class="actions" method="post" action="/oauth/consent">
+<input type="hidden" name="token" value="{{.Token}}">
+{{range .Teams}}<label><input type="radio" name="tenant" value="{{.}}"> {{.}}</label>
+{{end}}<button type="submit" name="decision" value="approve">Allow</button>
+<button class="secondary" type="submit" name="decision" value="deny">Deny</button>
+</form>`)
+
+// selectTeam turns an approved Glovo consent into a pending team grant bound
+// to the completion. The posted team must be exactly one non-empty value that
+// is in the eligibility recomputed now. It writes the refusal and reports ok
+// false on any failure; the consent token is already spent, so a refusal is
+// final and writes no grant.
+func (h *Handlers) selectTeam(w http.ResponseWriter, r *http.Request, e auth.ConsentEntry, c *authzCompletion) (string, bool) {
+	o := h.opts.OAuthServer
+	state := string(e.ClientState)
+	vals := r.PostForm["tenant"]
+	if !e.TeamSelection || len(vals) != 1 || vals[0] == "" {
+		oauthError(w, e.RedirectURI, state, "access_denied", "exactly one team must be selected")
+		return "team_denied", false
+	}
+	teams, err := o.EligibleTeams(r.Context(), e.PrincipalID)
+	if err != nil {
+		slog.Warn("oauth: team eligibility unavailable at consent decision", "error", err)
+		oauthError(w, e.RedirectURI, state, "temporarily_unavailable", "teams could not be checked; try again")
+		return "team_unavailable", false
+	}
+	if !slices.Contains(teams, vals[0]) {
+		oauthError(w, e.RedirectURI, state, "access_denied", "the selected team is not available")
+		return "team_denied", false
+	}
+	g, err := o.CreateTeamGrant(r.Context(), e.PrincipalID, e.ClientID, vals[0])
+	if err != nil {
+		slog.Error("failed to create team grant", "error", err)
+		oauthError(w, e.RedirectURI, state, "temporarily_unavailable", "the selection could not be recorded; try again")
+		return "team_unavailable", false
+	}
+	c.TeamGrantID, c.SelectedTenant = g.ID, g.Tenant
+	return "", true
 }

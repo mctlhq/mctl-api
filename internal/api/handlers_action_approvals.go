@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/glovo"
 	"github.com/mctlhq/mctl-api/internal/governance"
 	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/workitems"
@@ -59,6 +61,8 @@ const (
 	aarCodeConsumed            = "approval_consumed"
 	aarCodeNotConsumed         = "approval_not_consumed"
 	aarCodeExecuted            = "approval_executed"
+	aarCodeKindNotSpendable    = "approval_kind_not_spendable_here"
+	aarCodeKindNotCreatable    = "approval_kind_not_creatable_here"
 	aarCodeInFlight            = "approval_in_flight"
 	aarCodeTargetMismatch      = "approval_target_mismatch"
 	aarCodeRequesterForbidden  = "approval_requester_forbidden"
@@ -144,17 +148,55 @@ func isAgentExecutionGrant(u *auth.User, a *workitems.ActionApprovalRequest) boo
 		a.RequestedBy == principalOf(auth.NewServiceUser())
 }
 
+// pinnedAgentGrant is the DevLoop grant a directly acting agent run token of
+// a PinnedGrant scope is pinned to (mctlhq/mctl-gitops#1980). Deliberately not
+// part of isApprovalRequester: such a run reads and marks executed that one
+// grant, and never requests or spends anything.
+func pinnedAgentGrant(u *auth.User) (string, bool) {
+	if u == nil || !u.IsAgent() {
+		return "", false
+	}
+	if _, relayed := u.RelaySurface(); relayed {
+		return "", false
+	}
+	scope, scoped := u.AgentScope()
+	if !scoped || !scope.PinnedGrant {
+		return "", false
+	}
+	id := u.PinnedGrantID()
+	return id, id != ""
+}
+
+// isPinnedAgentGrant: a is the DevLoop grant the agent run's token is pinned
+// to, requested by the control worker.
+func isPinnedAgentGrant(u *auth.User, a *workitems.ActionApprovalRequest) bool {
+	id, ok := pinnedAgentGrant(u)
+	return ok && a.ID == id && a.ActionKind == devLoopApprovalKind &&
+		a.RequestedBy == principalOf(auth.NewServiceUser())
+}
+
 // canSeeActionApproval: a human admin sees every request, the requesting
 // service its own, an agent run its own execution's own and that
-// execution's DevLoop grant.
+// execution's DevLoop grant, and a grant-pinned run that one grant.
 func canSeeActionApproval(u *auth.User, a *workitems.ActionApprovalRequest) bool {
 	if isHumanAdmin(u) {
 		return true
 	}
-	if isAgentOwnApproval(u, a) || isAgentExecutionGrant(u, a) {
+	if isAgentOwnApproval(u, a) || isAgentExecutionGrant(u, a) || isPinnedAgentGrant(u, a) {
 		return true
 	}
 	return isDirectService(u) && a.RequestedBy == principalOf(u)
+}
+
+// glovoOwnerSees is the read rule for a Glovo order approval: its bound owner
+// sees it. The binding is read on the Glovo pool; any failure reads as not
+// visible.
+func (h *Handlers) glovoOwnerSees(ctx context.Context, u *auth.User, a *workitems.ActionApprovalRequest) bool {
+	if h.opts.GlovoApprovals == nil || !workitems.IsGlovoKind(a.ActionKind) || !isGlovoOwnerCandidate(u) {
+		return false
+	}
+	_, b, err := h.opts.GlovoApprovals.ForDecision(ctx, a.ID)
+	return err == nil && isGlovoOwnerDecider(u, b)
 }
 
 // actionApprovalRefusals maps each store refusal to its status and typed
@@ -196,6 +238,8 @@ var actionApprovalRefusals = []struct {
 	{workitems.ErrApprovalExecuted, http.StatusConflict, aarCodeExecuted, false},
 	{workitems.ErrApprovalInFlight, http.StatusConflict, aarCodeInFlight, false},
 	{workitems.ErrApprovalTargetMismatch, http.StatusConflict, aarCodeTargetMismatch, false},
+	{workitems.ErrApprovalKindNotSpendable, http.StatusConflict, aarCodeKindNotSpendable, false},
+	{workitems.ErrApprovalKindNotCreatable, http.StatusBadRequest, aarCodeKindNotCreatable, false},
 }
 
 // actionApprovalRefusalCode is the typed code of a store refusal, or "" for
@@ -243,7 +287,7 @@ func writeActionApprovalError(w http.ResponseWriter, err error) {
 // read it.
 func (h *Handlers) visibleActionApproval(w http.ResponseWriter, r *http.Request, user *auth.User) (*workitems.ActionApprovalRequest, bool) {
 	a, err := h.opts.WorkItems.ActionApproval(r.Context(), chi.URLParam(r, "id"))
-	if err == nil && !canSeeActionApproval(user, a) {
+	if err == nil && !canSeeActionApproval(user, a) && !h.glovoOwnerSees(r.Context(), user, a) {
 		err = workitems.ErrApprovalNotFound
 	}
 	if err != nil {
@@ -545,7 +589,14 @@ func (h *Handlers) GetActionApproval(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !isHumanAdmin(user) && !isApprovalRequester(user) {
+	_, pinned := pinnedAgentGrant(user)
+	if !isHumanAdmin(user) && !isApprovalRequester(user) && !pinned {
+		// The one other reader: the bound owner of a Glovo order approval.
+		// Everything else is the 403 it always was.
+		if a, err := h.opts.WorkItems.ActionApproval(r.Context(), chi.URLParam(r, "id")); err == nil && h.glovoOwnerSees(r.Context(), user, a) {
+			h.writeApproval(w, http.StatusOK, a)
+			return
+		}
 		writeErrorCode(w, http.StatusForbidden, aarCodeReaderForbidden, "action approvals are read by admins and their requester", nil)
 		return
 	}
@@ -618,19 +669,150 @@ type actionDecisionBody struct {
 	Binding *decisionBinding `json:"binding,omitempty"`
 }
 
+// GlovoApprovalDecisions is the ledger side of an owner decision
+// (workitems.GlovoDecisions is the production implementation).
+type GlovoApprovalDecisions interface {
+	Ready(ctx context.Context) error
+	ForDecision(ctx context.Context, id string) (*workitems.ActionApprovalRequest, *workitems.GlovoBinding, error)
+	Decide(ctx context.Context, in workitems.ActionDecisionInput) (*workitems.ActionApprovalRequest, error)
+}
+
+// glovoMinDeciderRole is the minimum live tenant role of an order's owner
+// (OPEN-989-3 in the pull request).
+const glovoMinDeciderRole = operations.RoleDeveloper
+
+// isGlovoOwnerCandidate is the part of the owner rule that needs no binding: a
+// human with a resolved principal, acting directly, who is not a Glovo
+// audience token (the facade and the model never decide).
+func isGlovoOwnerCandidate(u *auth.User) bool {
+	if u == nil {
+		return false
+	}
+	id, human := u.Identity()
+	_, relayed := u.RelaySurface()
+	_, surface := u.Surface()
+	prn := u.PrincipalID()
+	return human && id.Kind == auth.KindHuman && prn != "" && auth.ValidPrincipalID(prn) && !u.PrincipalUnresolved() &&
+		!u.IsAgent() && !u.IsService() && !u.IsCI() && !relayed && !surface && !u.IsGlovoAudience() && !u.IsGlovoWorker() && !u.IsGlovoFacade()
+}
+
+// isGlovoOwnerDecider is isGlovoOwnerCandidate plus the binding's owner.
+func isGlovoOwnerDecider(u *auth.User, b *workitems.GlovoBinding) bool {
+	return b != nil && isGlovoOwnerCandidate(u) && b.OwnerPrincipalID == u.PrincipalID()
+}
+
+// deciderForbidden is the one answer for every caller who may not decide:
+// unknown id, non-Glovo, someone else's order, undecidable. No oracle.
+func (h *Handlers) deciderForbidden(w http.ResponseWriter, r *http.Request, user *auth.User, id, msg string) {
+	h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", id, aarCodeDeciderForbidden)
+	writeErrorCode(w, http.StatusForbidden, aarCodeDeciderForbidden, msg, nil)
+}
+
+const deciderForbiddenMsg = "only a human admin acting directly may decide an action approval"
+
+// glovoOwnerCheck runs the checks of design section 5 for a Glovo-kind row,
+// for an admin and a non-admin alike: the caller must be the bound owner with
+// live membership of the binding's tenant, and the Glovo approvals must be
+// ready. It answers the refusal itself and returns false.
+func (h *Handlers) glovoOwnerCheck(w http.ResponseWriter, r *http.Request, user *auth.User, cur *workitems.ActionApprovalRequest) (*workitems.GlovoBinding, bool) {
+	forbid := func() (*workitems.GlovoBinding, bool) {
+		h.deciderForbidden(w, r, user, cur.ID, deciderForbiddenMsg)
+		return nil, false
+	}
+	unavailable := func(detail string) (*workitems.GlovoBinding, bool) {
+		h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", cur.ID, "unavailable", map[string]string{"detail": detail})
+		writeErrorCode(w, http.StatusServiceUnavailable, "unavailable", "cannot decide this approval right now; try again later", nil)
+		return nil, false
+	}
+	d := h.opts.GlovoApprovals
+	if d == nil || !isGlovoOwnerCandidate(user) {
+		return forbid()
+	}
+	_, binding, err := d.ForDecision(r.Context(), cur.ID)
+	switch {
+	case errors.Is(err, workitems.ErrApprovalNotFound):
+		return forbid()
+	case err != nil:
+		var ge *glovo.Error
+		if errors.As(err, &ge) && ge.Code == glovo.CodeNotReady {
+			return h.glovoNotReady(w, r, user, cur.ID)
+		}
+		return unavailable("binding read failed")
+	}
+	if !isGlovoOwnerDecider(user, binding) {
+		return forbid()
+	}
+	var read func() ([][]string, error)
+	if h.opts.TenantAuthzMode == TenantAuthzPrincipal && h.opts.PrincipalMembership != nil {
+		prn := user.PrincipalID()
+		read = func() ([][]string, error) {
+			return h.opts.PrincipalMembership.MemberRolesForPrincipal(binding.Tenant, prn)
+		}
+	}
+	// decideWrittenRole, not roleGate: an admin gets no pass here.
+	if ref := decideWrittenRole(user.PrincipalID(), "principal membership reader", binding.Tenant, glovoMinDeciderRole,
+		"deciding a Glovo order approval", read); ref.refused() {
+		if ref.status == http.StatusForbidden {
+			return forbid()
+		}
+		return unavailable(ref.detail)
+	}
+	if !glovo.Default.Open || d.Ready(r.Context()) != nil {
+		return h.glovoNotReady(w, r, user, cur.ID)
+	}
+	return binding, true
+}
+
+func (h *Handlers) glovoNotReady(w http.ResponseWriter, r *http.Request, user *auth.User, id string) (*workitems.GlovoBinding, bool) {
+	h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", id, string(glovo.CodeNotReady))
+	writeErrorCode(w, http.StatusServiceUnavailable, string(glovo.CodeNotReady), "the glovo facade is not ready", nil)
+	return nil, false
+}
+
+// writeGlovoDecideError answers a refusal of DecideGlovoApprovalTx.
+func writeGlovoDecideError(w http.ResponseWriter, err error) {
+	var ge *glovo.Error
+	switch {
+	case errors.Is(err, workitems.ErrNotGlovoOwner):
+		writeErrorCode(w, http.StatusForbidden, aarCodeDeciderForbidden, deciderForbiddenMsg, nil)
+	case errors.As(err, &ge) && ge.Code == glovo.CodeNotReady:
+		writeErrorCode(w, http.StatusServiceUnavailable, string(glovo.CodeNotReady), "the glovo facade is not ready", nil)
+	case errors.As(err, &ge) && ge.Code == glovo.CodeTenantBusy:
+		writeErrorCode(w, http.StatusConflict, string(glovo.CodeTenantBusy), "the team is busy", nil)
+	case actionApprovalRefusalCode(err) != "":
+		writeActionApprovalError(w, err)
+	default:
+		writeErrorCode(w, http.StatusServiceUnavailable, "unavailable", "cannot decide this approval right now; try again later", nil)
+	}
+}
+
 // DecideActionApproval handles POST /api/v1/action-approvals/{id}/decision.
-// Only a human admin acting directly decides, never the requester, and only
-// a pending, unexpired request.
+// Only a human admin acting directly decides a generic request, never the
+// requester, and only a pending, unexpired one. A Glovo order approval is
+// decided only by the order's owner (mctl-api#989 design section 5), an admin
+// included.
 func (h *Handlers) DecideActionApproval(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.workItemsUser(w, r)
 	if !ok {
 		return
 	}
+	id := chi.URLParam(r, "id")
+	var (
+		cur     *workitems.ActionApprovalRequest
+		binding *workitems.GlovoBinding
+	)
 	if !isHumanAdmin(user) {
-		h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", chi.URLParam(r, "id"), aarCodeDeciderForbidden)
-		writeErrorCode(w, http.StatusForbidden, aarCodeDeciderForbidden,
-			"only a human admin acting directly may decide an action approval", nil)
-		return
+		// Advisory pre-read: kind and state only. Anything but a Glovo row
+		// is the 403 a non-admin always got.
+		a, err := h.opts.WorkItems.ActionApproval(r.Context(), id)
+		if err != nil || !workitems.IsGlovoKind(a.ActionKind) {
+			h.deciderForbidden(w, r, user, id, deciderForbiddenMsg)
+			return
+		}
+		if binding, ok = h.glovoOwnerCheck(w, r, user, a); !ok {
+			return
+		}
+		cur = a
 	}
 	var body actionDecisionBody
 	if !decodeWorkItemBodyLimit(w, r, &body, maxActionApprovalBodyBytes) {
@@ -642,24 +824,32 @@ func (h *Handlers) DecideActionApproval(w http.ResponseWriter, r *http.Request) 
 		writeActionApprovalError(w, err)
 		return
 	}
-	cur, err := h.opts.WorkItems.ActionApproval(r.Context(), chi.URLParam(r, "id"))
-	if err != nil {
-		// The pre-read refuses what the decide itself used to: audit it the
-		// same way, so an unknown id still leaves a decision_refused entry.
-		if code := actionApprovalRefusalCode(err); code != "" {
-			h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", chi.URLParam(r, "id"), code)
+	if cur == nil {
+		var err error
+		cur, err = h.opts.WorkItems.ActionApproval(r.Context(), id)
+		if err != nil {
+			// The pre-read refuses what the decide itself used to: audit it the
+			// same way, so an unknown id still leaves a decision_refused entry.
+			if code := actionApprovalRefusalCode(err); code != "" {
+				h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", id, code)
+			}
+			writeActionApprovalError(w, err)
+			return
 		}
-		writeActionApprovalError(w, err)
-		return
+		if workitems.IsGlovoKind(cur.ActionKind) {
+			if binding, ok = h.glovoOwnerCheck(w, r, user, cur); !ok {
+				return
+			}
+		}
 	}
 	// A decision that is not an approve is never bound.
 	bind := body.Binding
 	if body.Decision != workitems.DecisionApprove {
 		bind = nil
 	} else {
-		if missing := h.bindingGate(r, user, bindingRouteActionApproval, chi.URLParam(r, "id"), bind); missing != nil {
+		if missing := h.bindingGate(r, user, bindingRouteActionApproval, id, bind); missing != nil {
 			err := &bindingMissingError{missing: missing}
-			h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", chi.URLParam(r, "id"), aarCodeBindingMissing)
+			h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", id, aarCodeBindingMissing)
 			writeActionApprovalError(w, err)
 			return
 		}
@@ -684,19 +874,36 @@ func (h *Handlers) DecideActionApproval(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
-	a, err := h.opts.WorkItems.DecideActionApproval(r.Context(), h.decisionCapture(workitems.ActionDecisionInput{
+	in := h.decisionCaptureFor(cur.ActionKind, workitems.ActionDecisionInput{
 		ID: cur.ID, DecidedBy: principalOf(user), Decision: body.Decision, Reason: body.Reason,
 		DecidedByPrincipalID: user.PrincipalID(), DecidedViaPrincipalID: user.ViaPrincipalID(),
-	}, digest))
+	}, digest)
+	var (
+		a   *workitems.ActionApprovalRequest
+		err error
+	)
+	if binding != nil {
+		a, err = h.opts.GlovoApprovals.Decide(r.Context(), in)
+	} else {
+		a, err = h.opts.WorkItems.DecideActionApproval(r.Context(), in)
+	}
 	if err != nil {
 		if code := actionApprovalRefusalCode(err); code != "" {
-			h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", chi.URLParam(r, "id"), code)
+			h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", id, code)
+		}
+		if binding != nil {
+			writeGlovoDecideError(w, err)
+			return
 		}
 		writeActionApprovalError(w, err)
 		return
 	}
-	h.auditActionApproval(r, user, "action_approval.decision", a, operations.RiskMedium,
-		map[string]string{"policy_status": h.policyStatusOf(a)})
+	extra := map[string]string{"policy_status": h.policyStatusOf(a)}
+	if binding != nil {
+		// Ids and enums only: no args_digest, no basket.
+		extra["order_ref"] = binding.OrderRef
+	}
+	h.auditActionApproval(r, user, "action_approval.decision", a, operations.RiskMedium, extra)
 	h.writeApproval(w, http.StatusOK, a)
 }
 
@@ -771,7 +978,8 @@ func (h *Handlers) MarkActionApprovalExecuted(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
-	if !isApprovalRequester(user) {
+	_, pinned := pinnedAgentGrant(user)
+	if !isApprovalRequester(user) && !pinned {
 		h.auditActionApprovalRefusal(r, user, "action_approval.execute_refused", chi.URLParam(r, "id"), aarCodeRequesterForbidden)
 		writeErrorCode(w, http.StatusForbidden, aarCodeRequesterForbidden,
 			"only the requester, or the agent run of the execution a DevLoop grant names, may mark an action approval executed", nil)
@@ -802,7 +1010,7 @@ func (h *Handlers) MarkActionApprovalExecuted(w http.ResponseWriter, r *http.Req
 	// run, so the requester the store checks is the grant's own; the run
 	// is recorded as the executor in the audit row.
 	requester := principalOf(user)
-	if isAgentExecutionGrant(user, cur) && !isAgentOwnApproval(user, cur) {
+	if (isAgentExecutionGrant(user, cur) && !isAgentOwnApproval(user, cur)) || isPinnedAgentGrant(user, cur) {
 		requester = cur.RequestedBy
 	}
 	a, err := h.opts.WorkItems.MarkActionApprovalExecuted(r.Context(), cur.ID, body.Target, body.ArtifactHash, requester)
@@ -816,6 +1024,9 @@ func (h *Handlers) MarkActionApprovalExecuted(w http.ResponseWriter, r *http.Req
 	var extra []map[string]string
 	if exec, agent := boundAgentExecution(user); agent {
 		extra = append(extra, map[string]string{"bound_execution_id": exec, "agent_run_id": user.AgentRunID()})
+	}
+	if id, agent := pinnedAgentGrant(user); agent {
+		extra = append(extra, map[string]string{"pinned_grant_id": id, "agent_run_id": user.AgentRunID()})
 	}
 	h.auditActionApproval(r, user, "action_approval.execute", a, operations.RiskMedium, extra...)
 	h.writeApproval(w, http.StatusOK, a)

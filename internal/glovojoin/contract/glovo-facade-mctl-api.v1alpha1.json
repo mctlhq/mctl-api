@@ -1,0 +1,863 @@
+{
+  "contract": "glovo-facade-mctl-api",
+  "version": "glovo-facade-mctl-api/v1alpha1",
+  "base_path": "/api/v1/assistants/glovo/v1alpha1",
+  "headers": {
+    "authorization": "Authorization: Bearer <MCTL_GLOVO_FACADE_TOKEN>",
+    "subject_token": "X-Mctl-Subject-Token",
+    "selected_tenant": "X-Mctl-Selected-Tenant",
+    "scope_ref": "X-Mctl-Scope-Ref",
+    "idempotency_key": "Idempotency-Key",
+    "request_id": "X-Request-Id",
+    "replayed": "Idempotent-Replayed"
+  },
+  "routes": [
+    {
+      "id": "resolve",
+      "method": "POST",
+      "path": "/resolve",
+      "scope": "any_glovo",
+      "tool": null,
+      "request": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "response": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "scope_ref": {
+            "type": "string",
+            "pattern": "^gsc_[A-Za-z0-9_-]{32}$"
+          },
+          "tenant": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "scope_ref",
+          "tenant",
+          "expires_at"
+        ]
+      },
+      "needs_scope_ref": false,
+      "idempotent": false
+    },
+    {
+      "id": "connection",
+      "method": "GET",
+      "path": "/connection",
+      "scope": "glovo:read",
+      "tool": "glovo_auth_status",
+      "request": null,
+      "response": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "connection_state": {
+            "type": "string",
+            "enum": [
+              "none",
+              "pending_handoff",
+              "pending_provider",
+              "active",
+              "expired",
+              "failed",
+              "revoked"
+            ]
+          },
+          "connection_id": {
+            "type": "string"
+          },
+          "provider_account_label": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "connection_state"
+        ]
+      },
+      "needs_scope_ref": true,
+      "idempotent": false
+    },
+    {
+      "id": "connect",
+      "method": "POST",
+      "path": "/connections",
+      "scope": "glovo:basket:prepare",
+      "tool": "glovo_connect_account",
+      "request": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "idempotency_key"
+        ]
+      },
+      "response": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "connection_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending_handoff"
+            ]
+          },
+          "handoff_url": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "connection_id",
+          "state",
+          "handoff_url",
+          "expires_at"
+        ]
+      },
+      "needs_scope_ref": true,
+      "idempotent": true
+    },
+    {
+      "id": "orders",
+      "method": "POST",
+      "path": "/orders:list",
+      "scope": "glovo:read",
+      "tool": "glovo_get_order_history",
+      "request": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          },
+          "cursor": {
+            "type": "string"
+          }
+        },
+        "required": []
+      },
+      "response": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "orders": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "order_ref": {
+                  "type": "string"
+                },
+                "store_name": {
+                  "type": "string",
+                  "maxLength": 120
+                },
+                "placed_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "total_label": {
+                  "type": "string",
+                  "maxLength": 40
+                },
+                "item_count": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "order_ref",
+                "store_name",
+                "placed_at",
+                "total_label",
+                "item_count"
+              ]
+            }
+          },
+          "next_cursor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "orders"
+        ]
+      },
+      "needs_scope_ref": true,
+      "idempotent": false
+    },
+    {
+      "id": "preview",
+      "method": "POST",
+      "path": "/previews",
+      "scope": "glovo:read",
+      "tool": "glovo_preview_reorder",
+      "request": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "order_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "order_ref"
+        ]
+      },
+      "response": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "preview_id": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "maxLength": 120
+                },
+                "quantity": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "name",
+                "quantity"
+              ]
+            }
+          },
+          "unavailable_items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "maxLength": 120
+                },
+                "quantity": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "name",
+                "quantity"
+              ]
+            }
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "preview_id",
+          "items",
+          "unavailable_items",
+          "fingerprint",
+          "expires_at"
+        ]
+      },
+      "needs_scope_ref": true,
+      "idempotent": false
+    },
+    {
+      "id": "basket",
+      "method": "GET",
+      "path": "/basket",
+      "scope": "glovo:read",
+      "tool": "glovo_get_basket",
+      "request": null,
+      "response": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "store_name": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "maxLength": 120
+                },
+                "quantity": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "name",
+                "quantity"
+              ]
+            }
+          },
+          "totals_label": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "fingerprint": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "items",
+          "totals_label",
+          "fingerprint"
+        ]
+      },
+      "needs_scope_ref": true,
+      "idempotent": false
+    },
+    {
+      "id": "prepare",
+      "method": "POST",
+      "path": "/orders:prepare",
+      "scope": "glovo:basket:prepare",
+      "tool": "glovo_prepare_order",
+      "request": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "preview_id": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "preview_id",
+          "idempotency_key"
+        ]
+      },
+      "response": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "order_id": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "consent_request_id": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "order_id",
+          "fingerprint",
+          "consent_request_id",
+          "expires_at"
+        ]
+      },
+      "needs_scope_ref": true,
+      "idempotent": true
+    },
+    {
+      "id": "order",
+      "method": "GET",
+      "path": "/orders/{order_id}",
+      "scope": "glovo:read",
+      "tool": "glovo_order_status",
+      "request": null,
+      "response": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "state": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "OUTCOME_UNKNOWN",
+              "observed_placed"
+            ]
+          }
+        },
+        "required": [
+          "state",
+          "outcome"
+        ]
+      },
+      "needs_scope_ref": true,
+      "idempotent": false
+    },
+    {
+      "id": "compatibility",
+      "method": "GET",
+      "path": "/compatibility",
+      "scope": "facade_identity",
+      "tool": null,
+      "request": null,
+      "response": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "type": "string"
+          },
+          "contract_digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "api_version": {
+            "type": "string"
+          },
+          "dependencies": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "connection_registry": {
+                "type": "string",
+                "enum": [
+                  "ready",
+                  "not_ready"
+                ]
+              },
+              "provider_orders": {
+                "type": "string",
+                "enum": [
+                  "ready",
+                  "not_ready"
+                ]
+              },
+              "read_bridge": {
+                "type": "string",
+                "enum": [
+                  "ready",
+                  "not_ready"
+                ]
+              },
+              "control_worker": {
+                "type": "string",
+                "enum": [
+                  "ready",
+                  "not_ready"
+                ]
+              },
+              "provider_worker": {
+                "type": "string",
+                "enum": [
+                  "ready",
+                  "not_ready"
+                ]
+              }
+            },
+            "required": [
+              "connection_registry",
+              "provider_orders",
+              "read_bridge",
+              "control_worker",
+              "provider_worker"
+            ]
+          },
+          "deploy_ready": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "contract_version",
+          "contract_digest",
+          "api_version",
+          "dependencies",
+          "deploy_ready"
+        ]
+      },
+      "needs_scope_ref": false,
+      "idempotent": false
+    }
+  ],
+  "errors": {
+    "body": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "enum": [
+            "not_authorized",
+            "no_tenant",
+            "ambiguous_tenant",
+            "scope_unsupported",
+            "not_in_pilot",
+            "no_install",
+            "stale_install",
+            "no_connection",
+            "connection_revoked",
+            "connection_expired",
+            "not_found",
+            "not_ready",
+            "dependency_unavailable",
+            "fingerprint_changed",
+            "idempotency_key_reused",
+            "invalid_arguments",
+            "rate_limited"
+          ]
+        },
+        "error_description": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "error",
+        "error_description"
+      ]
+    },
+    "facade_codes": [
+      "not_authorized",
+      "no_tenant",
+      "ambiguous_tenant",
+      "scope_unsupported",
+      "not_in_pilot",
+      "no_install",
+      "stale_install",
+      "no_connection",
+      "connection_revoked",
+      "connection_expired",
+      "not_found",
+      "not_ready",
+      "dependency_unavailable",
+      "fingerprint_changed",
+      "idempotency_key_reused",
+      "invalid_arguments",
+      "rate_limited"
+    ],
+    "codes": [
+      {
+        "code": "not_authorized",
+        "status": 403,
+        "wire": "not_authorized"
+      },
+      {
+        "code": "no_tenant",
+        "status": 403,
+        "wire": "no_tenant"
+      },
+      {
+        "code": "ambiguous_tenant",
+        "status": 403,
+        "wire": "ambiguous_tenant"
+      },
+      {
+        "code": "not_in_pilot",
+        "status": 403,
+        "wire": "not_in_pilot"
+      },
+      {
+        "code": "scope_unsupported",
+        "status": 403,
+        "wire": "scope_unsupported"
+      },
+      {
+        "code": "no_install",
+        "status": 403,
+        "wire": "no_install"
+      },
+      {
+        "code": "stale_install",
+        "status": 403,
+        "wire": "stale_install"
+      },
+      {
+        "code": "not_found",
+        "status": 404,
+        "wire": "not_found"
+      },
+      {
+        "code": "no_connection",
+        "status": 404,
+        "wire": "no_connection"
+      },
+      {
+        "code": "connection_revoked",
+        "status": 409,
+        "wire": "connection_revoked"
+      },
+      {
+        "code": "connection_expired",
+        "status": 409,
+        "wire": "connection_expired"
+      },
+      {
+        "code": "connection_exists",
+        "status": 503,
+        "wire": "dependency_unavailable"
+      },
+      {
+        "code": "stale_version",
+        "status": 503,
+        "wire": "dependency_unavailable"
+      },
+      {
+        "code": "fingerprint_changed",
+        "status": 409,
+        "wire": "fingerprint_changed"
+      },
+      {
+        "code": "idempotency_key_reused",
+        "status": 409,
+        "wire": "idempotency_key_reused"
+      },
+      {
+        "code": "invalid_transition",
+        "status": 503,
+        "wire": "dependency_unavailable"
+      },
+      {
+        "code": "approval_invalid",
+        "status": 503,
+        "wire": "dependency_unavailable"
+      },
+      {
+        "code": "approval_expired",
+        "status": 503,
+        "wire": "dependency_unavailable"
+      },
+      {
+        "code": "approval_replayed",
+        "status": 503,
+        "wire": "dependency_unavailable"
+      },
+      {
+        "code": "intent_mismatch",
+        "status": 503,
+        "wire": "dependency_unavailable"
+      },
+      {
+        "code": "basket_changed",
+        "status": 503,
+        "wire": "dependency_unavailable"
+      },
+      {
+        "code": "tenant_busy",
+        "status": 503,
+        "wire": "dependency_unavailable"
+      },
+      {
+        "code": "invalid_request",
+        "status": 400,
+        "wire": "invalid_arguments"
+      },
+      {
+        "code": "rate_limited",
+        "status": 429,
+        "wire": "rate_limited"
+      },
+      {
+        "code": "not_ready",
+        "status": 503,
+        "wire": "not_ready"
+      },
+      {
+        "code": "unavailable",
+        "status": 503,
+        "wire": "dependency_unavailable"
+      }
+    ],
+    "conditions": [
+      {
+        "reason": "not_facade_identity",
+        "code": "not_authorized",
+        "status": 401
+      },
+      {
+        "reason": "subject_token_invalid",
+        "code": "not_authorized",
+        "status": 401
+      },
+      {
+        "reason": "scope_ref_invalid",
+        "code": "not_authorized",
+        "status": 403
+      },
+      {
+        "reason": "scope_ref_stale",
+        "code": "stale_install",
+        "status": 403
+      },
+      {
+        "reason": "insufficient_scope",
+        "code": "scope_unsupported",
+        "status": 403
+      },
+      {
+        "reason": "tenant_selection_missing",
+        "code": "ambiguous_tenant",
+        "status": 403
+      },
+      {
+        "reason": "tenant_mismatch",
+        "code": "not_authorized",
+        "status": 403
+      },
+      {
+        "reason": "connection_not_found",
+        "code": "no_connection",
+        "status": 404
+      },
+      {
+        "reason": "connection_not_active",
+        "code": "connection_expired|connection_revoked",
+        "status": 409
+      },
+      {
+        "reason": "preview_not_found",
+        "code": "not_found",
+        "status": 404
+      },
+      {
+        "reason": "order_not_found",
+        "code": "not_found",
+        "status": 404
+      },
+      {
+        "reason": "preview_expired",
+        "code": "not_found",
+        "status": 404
+      },
+      {
+        "reason": "read_ref_not_issued",
+        "code": "not_found",
+        "status": 404
+      },
+      {
+        "reason": "basket_empty",
+        "code": "invalid_request",
+        "status": 400
+      },
+      {
+        "reason": "fingerprint_changed",
+        "code": "fingerprint_changed",
+        "status": 409
+      },
+      {
+        "reason": "preview_consumed",
+        "code": "fingerprint_changed",
+        "status": 409
+      },
+      {
+        "reason": "idempotency_key_reused",
+        "code": "idempotency_key_reused",
+        "status": 409
+      },
+      {
+        "reason": "invalid_request",
+        "code": "invalid_request",
+        "status": 400
+      },
+      {
+        "reason": "rate_limited",
+        "code": "rate_limited",
+        "status": 429
+      },
+      {
+        "reason": "not_ready",
+        "code": "not_ready",
+        "status": 503
+      },
+      {
+        "reason": "dependency_unavailable",
+        "code": "unavailable",
+        "status": 503
+      },
+      {
+        "reason": "invariant",
+        "code": "unavailable",
+        "status": 503
+      },
+      {
+        "reason": "lock_timeout",
+        "code": "tenant_busy",
+        "status": 503
+      }
+    ],
+    "unauthenticated_status": 401
+  },
+  "idempotency": {
+    "key_pattern": "^[\\x21-\\x7e]{1,128}$",
+    "header_and_body_must_match": true,
+    "replay": "same key and body returns the first answer byte for byte with Idempotent-Replayed: true; the same key with another body is 409 idempotency_key_reused; the same key from another owner or tenant is independent",
+    "exception": "POST /connections replays the same connection_id with a freshly minted handoff_url"
+  },
+  "limits": {
+    "per_subject_per_minute": 60,
+    "writes_per_subject_per_minute": 10,
+    "facade_aggregate_per_minute": 600,
+    "retry_after_header": true
+  },
+  "timeouts": {
+    "request_seconds": 5
+  },
+  "oauth_resource_metadata": {
+    "resource": "https://glovo.mctl.ai/mcp",
+    "scopes_supported": [
+      "glovo:read",
+      "glovo:basket:prepare"
+    ],
+    "bearer_methods_supported": [
+      "header"
+    ]
+  },
+  "dependencies": {
+    "bridge_v1alpha1_schemas": {
+      "command.schema.json": "sha256:b857f62b817887f56e5fea785c36f57ede44a5647da7c5cfd7e9d5069656dae1",
+      "result.schema.json": "sha256:c91bb86e973aec1c43b8af1b0743c90d23d389cfdd81e9e5b8ab6042a729354f"
+    },
+    "bridge_v1alpha2_place_order_fake_schema": "sha256:38008bfce9887bfb86c610ee37578b41e33b91cc71f439b13e743c3aa253dc8a",
+    "glovo_schema_versions": {
+      "minimum_m1a": 1,
+      "minimum_m1b_join": 1
+    }
+  }
+}

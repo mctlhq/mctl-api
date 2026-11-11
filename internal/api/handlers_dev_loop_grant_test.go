@@ -403,3 +403,61 @@ func TestDevLoopApprove_FindsTheDispatchedOpenExecution(t *testing.T) {
 		t.Fatalf("approval_ref = %q, want the dispatched run's grant %s", got, id)
 	}
 }
+
+// issue-931 T11: the canonical we_ stays Running after the approve flip
+// (mctl-agents#992), so a second dev-loop grant can be requested on it and
+// POST .../approve decides the newest grant; the first stays unchanged.
+func TestDevLoopApprove_SecondGrantOnOpenExecutionAfterFlip(t *testing.T) {
+	e, fake := newDevLoopGrantEnv(t)
+	run := e.startDevLoopRun("second")
+	first := e.requestDevLoopGrant(run.execID, "gate-first")
+	if res := e.approveDevLoop(rootAdmin, run.workflowID, `{"reason":"first"}`); res.code != http.StatusOK {
+		t.Fatalf("first approve = %d %s", res.code, res.raw)
+	}
+	if fake.lastApprovePayload["approval_ref"] != first {
+		t.Fatalf("first payload = %v", fake.lastApprovePayload)
+	}
+	firstAfter := e.approvalState(first)
+	if firstAfter["state"] != workitems.ApprovalApproved {
+		t.Fatalf("first grant = %v", firstAfter)
+	}
+	// The execution is still open: the flip did not end it.
+	res := e.do(rootAdmin, "GET", "/api/v1/work-items/"+run.itemID+"/executions", nil)
+	if res.code != http.StatusOK {
+		t.Fatalf("list executions = %d %s", res.code, res.raw)
+	}
+	execs, _ := res.body["executions"].([]any)
+	if len(execs) != 1 || execs[0].(map[string]any)["phase"] != "Running" {
+		t.Fatalf("executions = %s", res.raw)
+	}
+
+	second := e.requestDevLoopGrant(run.execID, "gate-second") // 201 on the open we_
+	if second == first {
+		t.Fatal("the second request reused the first grant")
+	}
+	if st := e.approvalState(second)["state"]; st != workitems.ApprovalPending {
+		t.Fatalf("second grant = %v", st)
+	}
+	fake.lastApprovePayload = nil
+	if res := e.approveDevLoop(rootAdmin, run.workflowID, `{"reason":"second"}`); res.code != http.StatusOK {
+		t.Fatalf("second approve = %d %s", res.code, res.raw)
+	}
+	if fake.lastApprovePayload["approval_ref"] != second || fake.lastApprovePayload["reason"] != "second" {
+		t.Fatalf("second payload = %v, want approval_ref %s", fake.lastApprovePayload, second)
+	}
+	if st := e.approvalState(second); st["state"] != workitems.ApprovalApproved || st["decided_by"] != "github:root" {
+		t.Fatalf("second grant after approve = %v", st)
+	}
+	after := e.approvalState(first)
+	for _, k := range []string{"state", "decided_by", "decided_at", "updated_at"} {
+		if after[k] != firstAfter[k] {
+			t.Errorf("first grant %s changed: %v -> %v", k, firstAfter[k], after[k])
+		}
+	}
+	if n := e.auditOps("action_approval.decision", first); n != 1 {
+		t.Errorf("first grant decided %d times", n)
+	}
+	if n := e.auditOps("action_approval.decision", second); n != 1 {
+		t.Errorf("second grant decided %d times", n)
+	}
+}

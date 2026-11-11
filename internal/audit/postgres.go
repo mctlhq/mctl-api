@@ -56,6 +56,10 @@ ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS via_principal_id TEXT NOT NULL
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS via_execution_id TEXT NOT NULL DEFAULT '';
 -- The tenant a support-scope request was bound to (mctl-api#813).
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS tenant TEXT NOT NULL DEFAULT '';
+-- The typed code a refused request was answered with, kept out of params so it
+-- cannot collide with a submitted parameter. '' on every other row and on every
+-- row written before this column existed.
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS refusal_code TEXT NOT NULL DEFAULT '';
 `
 
 // PostgresLogger persists audit entries to PostgreSQL via pgx.
@@ -127,13 +131,14 @@ func (p *PostgresLogger) Log(entry Entry) {
 
 	_, err := p.pool.Exec(ctx,
 		`INSERT INTO audit_events (id, timestamp, user_id, operation, params, workflow, status, risk_level, message, client_ip, user_agent, request_id,
-		                           user_principal_id, via_principal_id, via_execution_id, tenant)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+		                           user_principal_id, via_principal_id, via_execution_id, tenant, refusal_code)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 		 ON CONFLICT (id) DO NOTHING`,
 		entry.ID, entry.Timestamp, entry.UserID, entry.Operation,
 		params, entry.WorkflowName, entry.Status, entry.RiskLevel, entry.Message,
 		entry.ClientIP, entry.UserAgent, entry.RequestID,
 		entry.PrincipalID, entry.ViaPrincipalID, entry.ViaExecutionID, entry.Tenant,
+		entry.RefusalCode,
 	)
 	if err != nil {
 		recordWriteFailure(entry, err)
@@ -160,7 +165,7 @@ func (p *PostgresLogger) List(limit int) []Entry {
 	defer cancel()
 
 	rows, err := p.pool.Query(ctx,
-		`SELECT id, timestamp, user_id, operation, params, workflow, status, risk_level, message, client_ip, user_agent, request_id
+		`SELECT id, timestamp, user_id, operation, params, workflow, status, risk_level, message, client_ip, user_agent, request_id, refusal_code
 		 FROM audit_events WHERE operation <> $2 ORDER BY timestamp DESC LIMIT $1`, limit, OperationSupportRequest)
 	if err != nil {
 		slog.Error("audit postgres: list failed", "error", err)
@@ -188,7 +193,7 @@ func (p *PostgresLogger) LookupByWorkflow(ctx context.Context, workflowName stri
 	defer cancel()
 
 	row := p.pool.QueryRow(ctx,
-		`SELECT id, timestamp, user_id, operation, params, workflow, status, risk_level, message, client_ip, user_agent, request_id
+		`SELECT id, timestamp, user_id, operation, params, workflow, status, risk_level, message, client_ip, user_agent, request_id, refusal_code
 		 FROM audit_events WHERE workflow = $1 ORDER BY timestamp DESC LIMIT 1`, workflowName)
 
 	e, err := scanAuditEntry(row.Scan)
@@ -204,9 +209,9 @@ func (p *PostgresLogger) LookupByWorkflow(ctx context.Context, workflowName stri
 func scanAuditEntry(scan func(dest ...any) error) (Entry, error) {
 	var e Entry
 	var params []byte
-	var workflow, riskLevel, message, clientIP, userAgent, requestID *string
+	var workflow, riskLevel, message, clientIP, userAgent, requestID, refusalCode *string
 	if err := scan(&e.ID, &e.Timestamp, &e.UserID, &e.Operation,
-		&params, &workflow, &e.Status, &riskLevel, &message, &clientIP, &userAgent, &requestID); err != nil {
+		&params, &workflow, &e.Status, &riskLevel, &message, &clientIP, &userAgent, &requestID, &refusalCode); err != nil {
 		return Entry{}, err
 	}
 	if workflow != nil {
@@ -226,6 +231,9 @@ func scanAuditEntry(scan func(dest ...any) error) (Entry, error) {
 	}
 	if requestID != nil {
 		e.RequestID = *requestID
+	}
+	if refusalCode != nil {
+		e.RefusalCode = *refusalCode
 	}
 	if len(params) > 0 {
 		if err := json.Unmarshal(params, &e.Parameters); err != nil {
@@ -307,7 +315,7 @@ func (p *PostgresLogger) ListByStatus(status string, maxAge time.Duration, limit
 	defer cancel()
 
 	rows, err := p.pool.Query(ctx,
-		`SELECT id, timestamp, user_id, operation, params, workflow, status, risk_level, message, client_ip, user_agent, request_id
+		`SELECT id, timestamp, user_id, operation, params, workflow, status, risk_level, message, client_ip, user_agent, request_id, refusal_code
 		   FROM audit_events
 		  WHERE status = $1 AND workflow <> '' AND timestamp > $2 AND timestamp > $4
 		  ORDER BY timestamp ASC
@@ -341,7 +349,7 @@ func (p *PostgresLogger) ListSupport(ctx context.Context, f SupportFilter) ([]En
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	q := `SELECT id, timestamp, user_id, operation, params, workflow, status, risk_level, message, client_ip, user_agent, request_id,
+	q := `SELECT id, timestamp, user_id, operation, params, workflow, status, risk_level, message, client_ip, user_agent, request_id, refusal_code,
 	             user_principal_id, via_principal_id, via_execution_id, tenant
 	        FROM audit_events
 	       WHERE (operation = $1 OR (operation = $2 AND tenant <> ''))

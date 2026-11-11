@@ -1,0 +1,15 @@
+{
+  "name": "dispatch malformed body",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/internal/glovo/orders/ordr_ABCDEFGHIJKLMNOP0123/dispatch",
+    "body": {
+      "approval_ref": "x"
+    }
+  },
+  "status": 400,
+  "response": {
+    "error": "invalid_request",
+    "error_description": "the request is invalid"
+  }
+}

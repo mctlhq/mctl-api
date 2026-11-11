@@ -125,6 +125,9 @@ type Options struct {
 	// IdentityLink configures explicit identity linking (mctl-api#435,
 	// handlers_identity_link.go). Nil disables it (503).
 	IdentityLink *IdentityLinkOptions
+	// DevLoopDecide configures the DevLoop decide page (mctl-api#964,
+	// handlers_devloop_decide.go). Nil disables it (503).
+	DevLoopDecide *DevLoopDecideOptions
 	// OAuthUpstream is where /oauth/authorize signs people in
 	// (OAUTH_UPSTREAM, mctl-api#467); the zero value is GitHub.
 	OAuthUpstream OAuthUpstreamMode
@@ -263,6 +266,10 @@ type Options struct {
 	// WorkItems is the workitem/v1 store (mctl-api#349). Optional — nil makes
 	// every /api/v1/work-items route answer 503.
 	WorkItems *workitems.Store
+	// GlovoApprovals is the Glovo order-approval ledger the owner decision
+	// route uses (mctl-api#989). Nil means no owner can decide: the route
+	// answers the uniform 403 it always gave a non-admin.
+	GlovoApprovals GlovoApprovalDecisions
 	// IssueWorkItemTenant is the tenant whose work item a submitted
 	// issue-investigator run is recorded on when the caller names none. ""
 	// means DefaultIssueWorkItemTenant.
@@ -290,6 +297,31 @@ type Options struct {
 	// strongest allowed verification. A provider's authority comes from
 	// here and from its token, never from a request body.
 	SecurityProviders map[string]auth.SecurityProviderConfig
+	// BridgeEnabled turns on the /api/v1/bridge routes (MCTL_BRIDGE_ENABLED,
+	// mctl-api#962). Off by default: the routes answer 404.
+	BridgeEnabled bool
+	// Bridge is the command-bridge store. With BridgeEnabled and a nil Bridge
+	// the routes answer 503.
+	Bridge BridgeService
+	// BridgeProviders is the server-side bridge-provider configuration
+	// (MCTL_BRIDGE_PROVIDERS), keyed by ref: the tenant upper bound of each.
+	BridgeProviders map[string]auth.BridgeProviderConfig
+	// GlovoAllowlist writes the Glovo pilot allowlist (GLOVO_ENABLED, the
+	// glovo store). Nil makes the allowlist routes answer 503.
+	GlovoAllowlist GlovoAllowlist
+	// GlovoControl configures the internal Glovo control routes (mctl-api#985):
+	// dispatch, cancel and the two reads of the DevLoop control worker. Nil,
+	// a closed build gate or MCTL_GLOVO_CONTROL_ENABLED unset leaves them
+	// unmounted (404).
+	GlovoControl *GlovoControlRoutes
+	// GlovoJoin configures the Glovo join facade routes (mctl-api#957): the
+	// nine routes under /api/v1/assistants/glovo/v1alpha1. Nil, or Enabled
+	// false (GLOVO_JOIN_ENABLED), leaves them unmounted (404).
+	GlovoJoin *GlovoJoinRoutes
+	// Glovo configures the synthetic Glovo connection routes (mctl-api#961):
+	// facade, tenant installation and worker. Nil, or Enabled false, makes
+	// every one of them answer 503 not_ready.
+	Glovo *GlovoRoutes
 	// CodeScanningWebhookSecret is the dedicated HMAC secret of
 	// POST /api/v1/security/webhooks/github-code-scanning (mctl-api#802). It
 	// must be at least CodeScanningMinSecretLen long and differ from
@@ -379,6 +411,7 @@ type Options struct {
 type Handlers struct {
 	opts           Options
 	identityLink   *identityLinker
+	devLoopDecide  *devLoopDecider
 	oauthZitadel   *oauthZitadel
 	surfaceZitadel *surfaceZitadel
 	// principalSets memoizes shadow mode's principal-keyed tenant sets;
@@ -394,6 +427,9 @@ func NewRouter(opts Options) http.Handler {
 	}
 	if opts.IdentityLink != nil {
 		h.identityLink = newIdentityLinker(opts.IdentityLink)
+	}
+	if opts.DevLoopDecide != nil {
+		h.devLoopDecide = newDevLoopDecider(opts.DevLoopDecide)
 	}
 	if opts.OAuthZitadel != nil {
 		h.oauthZitadel = &oauthZitadel{opts: opts.OAuthZitadel, lazyOIDCProvider: lazyOIDCProvider{issuer: opts.OAuthZitadel.Issuer}}
@@ -477,6 +513,12 @@ func NewRouter(opts Options) http.Handler {
 		r.Get(linkStartPath, h.handleIdentityLinkStart)
 		r.Get(linkCallbackPath, h.handleIdentityLinkCallback)
 		r.Post(linkConfirmPath, h.handleIdentityLinkConfirm)
+		// DevLoop decide page (mctl-api#964). Public like linking: the
+		// person signs in inside the flow, and only then may decide.
+		r.Post(decideStartPath, h.handleDevLoopDecideStart)
+		r.Get(decideCallbackPath, h.handleDevLoopDecideCallback)
+		r.Post(decideConfirmPath, h.handleDevLoopDecideConfirm)
+		r.Get(decidePathPrefix+"{workflow_id}", h.handleDevLoopDecidePage)
 	})
 	r.Group(func(r chi.Router) {
 		// Keyed by IP, so every process of one desktop MCP client shares the
@@ -528,10 +570,15 @@ func NewRouter(opts Options) http.Handler {
 		if opts.AuthMiddleware != nil {
 			r.Use(opts.AuthMiddleware)
 		}
-		// A support-audience token reaches only the routes mctl-support
-		// relays. First, so no other gate sees it on a route it may not
+		// A Glovo-audience token reaches no route in this slice. A
+		// support-audience token reaches only the routes mctl-support
+		// relays. Both gates run first, so no other gate sees it on a route it may not
 		// reach; this group also mounts /mcp.
+		r.Use(h.glovoAudienceGate)
 		r.Use(h.supportAudienceGate)
+		// The Glovo join facade reaches only the join prefix, and nothing else
+		// reaches the join prefix (mctl-api#957).
+		r.Use(h.glovoJoinGate)
 		// A surface principal's ceiling counts every call it makes, so it
 		// runs before the gate: the gate turns a relay call into the linked
 		// human, and a refused relay still costs a link lookup.
@@ -574,6 +621,15 @@ func NewRouter(opts Options) http.Handler {
 		// A security provider reaches the observation ingest route and
 		// nothing else (mctl-api#774).
 		r.Use(securityProviderGate)
+		// A bridge provider reaches the bridge routes and nothing else
+		// (mctl-api#962).
+		r.Use(bridgeProviderGate)
+		// The Glovo worker reaches the worker routes and nothing else
+		// (mctl-api#961).
+		r.Use(h.glovoWorkerGate)
+		// The Glovo control worker reaches the four control routes and
+		// nothing else (mctl-api#985).
+		r.Use(h.glovoControlWorkerGate)
 		// The registry publisher reaches the registry publication routes and
 		// nothing else (mctlhq/mctl-agents#470).
 		r.Use(registryPublisherGate)
@@ -583,6 +639,9 @@ func NewRouter(opts Options) http.Handler {
 		// A GitHub Actions principal reaches the deploy route and nothing
 		// else (mctl-api#530).
 		r.Use(ciPrincipalGate)
+		// The orchestrator DevLoop principal starts and reads DevLoops for
+		// allowed repositories and nothing else (mctl-api#963).
+		r.Use(h.orchestratorDevLoopGate)
 
 		// Global rate limit: 300 requests/minute per user (fallback to per-IP).
 		// Loopback is skipped so MCP's in-process REST to localhost:8080 does
@@ -590,12 +649,12 @@ func NewRouter(opts Options) http.Handler {
 		// not used on this group; Traefik cannot spoof RemoteAddr as loopback.
 		// The write 20/min group below does NOT skip loopback — MCP deploys
 		// must still be throttled.
-		r.Use(skipLoopbackRateLimit(httprate.Limit(300, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+		r.Use(skipGlovoFacadeRateLimit(skipLoopbackRateLimit(httprate.Limit(300, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
 			if user := auth.UserFromContext(r.Context()); user != nil {
 				return "user:" + rateLimitSubject(r, user), nil
 			}
 			return keyByTrustedIP(r)
-		}))))
+		})))))
 		// Shadow comparison of tenant authorization (mctl-api#377). After
 		// every gate that substitutes a relayed or delegated human, so the
 		// caller compared is the one the handlers authorize, and after the
@@ -843,6 +902,72 @@ func NewRouter(opts Options) http.Handler {
 				r.Post("/security/observations", h.IngestSecurityObservations)
 			})
 
+			// Command bridge (mctl-api#962): dark unless MCTL_BRIDGE_ENABLED.
+			// Provider principals only, with a per-provider limiter.
+			if opts.BridgeEnabled {
+				r.Route("/bridge", func(r chi.Router) {
+					r.Use(requireBridgeProvider)
+					r.Use(httprate.Limit(bridgeClaimPerMin, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+						if user := auth.UserFromContext(r.Context()); user != nil {
+							return "bridge:" + user.ID, nil
+						}
+						return keyByTrustedIP(r)
+					})))
+					r.Post("/commands/claim", h.BridgeClaim)
+					r.Post("/commands/{command_id}/result", h.BridgeResult)
+					r.Post("/commands/{command_id}/write-permit", h.BridgeWritePermit)
+				})
+			}
+
+			// Glovo control routes (mctl-api#985): dark. Mounted only when the
+			// build gate is open and MCTL_GLOVO_CONTROL_ENABLED is set; the
+			// control-worker principal only.
+			if opts.GlovoControl.mounted() {
+				r.Route("/internal/glovo", func(r chi.Router) {
+					r.Use(requireGlovoControlWorker)
+					r.Post("/orders/{order_ref}/dispatch", h.GlovoControlDispatch)
+					r.Post("/orders/{order_ref}/cancel", h.GlovoControlCancel)
+					r.Get("/commands/{command_id}", h.GlovoControlReadCommand)
+					r.Get("/approvals/{approval_ref}", h.GlovoControlReadApproval)
+				})
+			}
+
+			// Glovo join facade (mctl-api#957): dark. Mounted only when
+			// GLOVO_JOIN_ENABLED is set. The facade principal is confined to
+			// this prefix by glovoJoinGate; the routes carry their own
+			// limiters (60/10 per subject, 600 aggregate), so the global
+			// per-principal limiter above skips the facade.
+			if opts.GlovoJoin.mounted() {
+				r.Mount(glovoJoinMount, opts.GlovoJoin.handler())
+			}
+
+			// Glovo pilot allowlist: per (tenant, principal), human admins only.
+			// No route names a tenant without a principal.
+			r.Put("/glovo/pilot/{tenant}/principals/{principal_id}", h.GlovoAllowlistAdd)
+			r.Delete("/glovo/pilot/{tenant}/principals/{principal_id}", h.GlovoAllowlistRemove)
+
+			// Synthetic Glovo connections (mctl-api#961): every route is
+			// behind the feature gate, which answers 503 not_ready before the
+			// body is read unless GLOVO_ENABLED and every dependency is healthy.
+			r.Group(func(r chi.Router) {
+				r.Use(h.glovoFeatureGate)
+				r.Route("/glovo/facade", func(r chi.Router) {
+					r.Get("/context", h.GlovoFacadeContext)
+					r.Post("/connections", h.GlovoFacadeConnect)
+					r.Get("/connections/{id}", h.GlovoFacadeGetConnection)
+					r.Post("/connections/{id}/handoff", h.GlovoFacadeHandoff)
+					r.Post("/connections/{id}/revoke", h.GlovoFacadeRevoke)
+					r.Post("/connections/{id}/reconnect", h.GlovoFacadeReconnect)
+				})
+				r.Put("/glovo/tenants/{tenant}/installation", h.GlovoInstallationPut)
+				r.Delete("/glovo/tenants/{tenant}/installation", h.GlovoInstallationDelete)
+				r.Route("/glovo/worker", func(r chi.Router) {
+					r.Post("/check", h.GlovoWorkerCheck)
+					r.Post("/connections/{id}/activate", h.GlovoWorkerActivate)
+					r.Post("/connections/{id}/expire", h.GlovoWorkerExpire)
+				})
+			})
+
 			// SecurityFinding v1 reads and lifecycle writes (mctl-api#774).
 			r.Get("/security/findings", h.ListSecurityFindings)
 			r.Get("/security/findings/{id}", h.GetSecurityFinding)
@@ -951,6 +1076,9 @@ func NewRouter(opts Options) http.Handler {
 			// which would eat the 20/min write budget shared with
 			// /operations/{name}/execute and starve real writes.
 			r.Get("/agents/dev-loop/{workflow_id}", h.GetDevLoopWorkflow)
+			// The grant a bound approve would decide (mctl-api#936): a read,
+			// outside the write group for the same reason.
+			r.Get("/agents/dev-loop/{workflow_id}/approval", h.GetDevLoopApproval)
 
 			// Who the API resolved the caller to (mctl-api#376 D3):
 			// side-effect-free, outside the write group like the dev-loop

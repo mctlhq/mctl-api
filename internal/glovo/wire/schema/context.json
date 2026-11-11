@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "glovo-connection/v1alpha1.Context",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "tenant", "principal_id", "installation_id", "install_revision", "connections"],
+  "properties": {
+    "schema": {"const": "glovo-connection/v1alpha1.Context"},
+    "tenant": {"type": "string", "minLength": 1},
+    "principal_id": {"type": "string", "pattern": "^prn_"},
+    "installation_id": {"type": "string", "pattern": "^gin_[0-9A-Z]{26}$"},
+    "install_revision": {"type": "integer", "minimum": 1},
+    "connections": {"type": "array", "items": {"$ref": "connection.json"}}
+  }
+}

@@ -414,8 +414,13 @@ func TestOnlyImplementScopeListsApprovalWrites(t *testing.T) {
 				if name == AgentScopeImplement {
 					continue
 				}
-				if admitted {
-					t.Errorf("scope %s admits %s %s: only implement may list the action-approval routes", name, m, p)
+				// The grant-pinned scope lists the read and the execute of a
+				// grant, and nothing else on these paths.
+				want := name == AgentScopeImplementGrant &&
+					((m == http.MethodGet && p == "/api/v1/action-approvals/aar_1") ||
+						(m == http.MethodPost && p == "/api/v1/action-approvals/aar_1/execute"))
+				if admitted != want {
+					t.Errorf("scope %s admits %s %s = %v, want %v", name, m, p, admitted, want)
 				}
 			}
 		}
@@ -478,5 +483,110 @@ func TestReviewScope_RoutesToolsAndMinting(t *testing.T) {
 	u := NewAgentUser("review-worker", AgentRun{Scope: AgentScopeReview, ExecutionID: "we_1"})
 	if u.HasTenantAccess("acme") || u.IsAdmin() {
 		t.Error("a review run reaches a tenant or is admin")
+	}
+}
+
+// The shepherd scope (mctlhq/mctl-gitops#1980) reaches the dev-loop liveness
+// read and whoami and nothing else: not the dev-loop writes, no MCP endpoint,
+// no tool, and no tenant.
+func TestShepherdScope_RoutesAndTools(t *testing.T) {
+	s, ok := LookupAgentScope(AgentScopeShepherd)
+	if !ok {
+		t.Fatal("shepherd scope not defined")
+	}
+	for _, c := range []struct {
+		method, path string
+		want         bool
+	}{
+		{http.MethodGet, "/api/v1/whoami", true},
+		{http.MethodGet, "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-api-1", true},
+		{http.MethodPost, "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-api-1", false},
+		{http.MethodPost, "/api/v1/agents/dev-loop/start", false},
+		{http.MethodPost, "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-api-1/approve", false},
+		{http.MethodPost, "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-api-1/abandon", false},
+		{http.MethodGet, "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-api-1/approve", false},
+		{http.MethodGet, "/api/v1/agents/dev-loop/", false},
+		{http.MethodGet, "/api/v1/agents/dev-loop", false},
+		{http.MethodGet, "/api/v1/action-approvals/aar_1", false},
+		{http.MethodGet, "/api/v1/tenants", false},
+		{http.MethodGet, "/api/v1/work-items/wi_a", false},
+		{http.MethodGet, "/api/v1/workflows", false},
+		{http.MethodPost, "/api/v1/operations/deploy-service/execute", false},
+		{http.MethodPost, "/api/v1/agent-run-tokens", false},
+		{http.MethodPost, "/mcp", false},
+		{http.MethodGet, "/mcp", false},
+	} {
+		if got := s.AllowsRoute(c.method, c.path, "wi_a", "we_1"); got != c.want {
+			t.Errorf("AllowsRoute(%s %s) = %v, want %v", c.method, c.path, got, c.want)
+		}
+	}
+	for _, tool := range []string{"mctl_whoami", "whoami", "mctl_get_dev_loop", "mctl_list_services", "mctl_deploy_service", ""} {
+		if s.AllowsTool(tool) || s.AllowsToolCall(tool, nil, "acme") {
+			t.Errorf("shepherd scope allows tool %q", tool)
+		}
+	}
+	if !s.AdmitsAgent("shepherd") || s.AdmitsAgent("implementer") || s.AdmitsAgent("") {
+		t.Error("shepherd scope must be minted for the shepherd agent only")
+	}
+	if s.ReadAllTenants || s.BoundTenant || s.MintByTenantMember {
+		t.Error("shepherd scope must read no tenant and be minted by the service principal only")
+	}
+}
+
+// The grant-pinned scope reads what implement reads and acts on a grant only
+// by reading it and marking it executed. It holds no write of its own besides
+// that, and only it is pinned.
+func TestImplementGrantScope_RoutesAndTools(t *testing.T) {
+	s, ok := LookupAgentScope(AgentScopeImplementGrant)
+	if !ok {
+		t.Fatal("implement-grant scope not defined")
+	}
+	impl, _ := LookupAgentScope(AgentScopeImplement)
+	for _, c := range []struct {
+		method, path string
+		want         bool
+	}{
+		{http.MethodGet, "/api/v1/action-approvals/aar_1", true},
+		{http.MethodPost, "/api/v1/action-approvals/aar_1/execute", true},
+		{http.MethodPost, "/api/v1/action-approvals", false},
+		{http.MethodGet, "/api/v1/action-approvals", false},
+		{http.MethodPost, "/api/v1/action-approvals/aar_1/consume", false},
+		{http.MethodPost, "/api/v1/action-approvals/aar_1/decision", false},
+		{http.MethodGet, "/api/v1/work-items/wi_a", false},
+		{http.MethodGet, "/api/v1/work-items/wi_a/intents", false},
+		{http.MethodPost, "/api/v1/work-items/wi_a/executions/we_1/snapshot", false},
+		{http.MethodPost, "/api/v1/agent-run-tokens", false},
+		{http.MethodPost, "/api/v1/operations/deploy-service/execute", false},
+		{http.MethodGet, "/api/v1/whoami", true},
+		{http.MethodPost, "/mcp", true},
+	} {
+		// A token of this scope carries no work item and no execution.
+		if got := s.AllowsRoute(c.method, c.path, "", ""); got != c.want {
+			t.Errorf("AllowsRoute(%s %s) = %v, want %v", c.method, c.path, got, c.want)
+		}
+	}
+	// The platform reads are the implement scope's.
+	for _, path := range []string{
+		"/api/v1/tenants", "/api/v1/services/admins/mctl-api", "/api/v1/workflows/wf-1/logs",
+		"/api/v1/incidents/summary", "/api/v1/roadmap/epics", "/api/v1/lifecycle/ownership/record",
+	} {
+		if !impl.AllowsRoute(http.MethodGet, path, "", "") || !s.AllowsRoute(http.MethodGet, path, "", "") {
+			t.Errorf("%s must be readable by both implement scopes", path)
+		}
+	}
+	if !s.AllowsTool("mctl_list_services") || s.AllowsTool("mctl_deploy_service") || s.AllowsTool("list_work_item_intents") {
+		t.Error("implement-grant tools must be the implement scope's reads")
+	}
+	if !s.AdmitsAgent("implementer") || s.AdmitsAgent("issue-investigator") || s.AdmitsAgent("") {
+		t.Error("implement-grant scope must be minted for the implementer only")
+	}
+	if !s.ReadAllTenants || s.BoundTenant || s.MintByTenantMember {
+		t.Error("implement-grant scope must read like implement and be issued by the exchange only")
+	}
+	for _, name := range AgentScopeNames() {
+		sc, _ := LookupAgentScope(name)
+		if sc.PinnedGrant != (name == AgentScopeImplementGrant) {
+			t.Errorf("scope %s: PinnedGrant = %v", name, sc.PinnedGrant)
+		}
 	}
 }

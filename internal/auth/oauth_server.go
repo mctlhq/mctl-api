@@ -34,10 +34,12 @@ import (
 	"unicode/utf8"
 
 	jose "github.com/go-jose/go-jose/v4"
+	"github.com/jackc/pgx/v5"
 	"github.com/mctlhq/mctl-api/internal/auth/cimd"
 	"github.com/mctlhq/mctl-api/internal/auth/clientstore"
 	"github.com/mctlhq/mctl-api/internal/auth/flowstore"
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore"
+	"github.com/mctlhq/mctl-api/internal/auth/teamgrant"
 )
 
 // ErrServerError is returned by OAuth server operations that fail due to a
@@ -168,6 +170,22 @@ type OAuthServer struct {
 	// verification but confined to a few routes (see internal/api). Empty
 	// disables it: the resource answers invalid_target.
 	SupportResource string
+	// GlovoResource is the RFC 8707 resource of the Glovo MCP facade
+	// (GLOVO_MCP_RESOURCE). Empty disables it. It is admitted for a flow only
+	// while GlovoReady holds (GLOVO_ENABLED plus every dependency), and then
+	// only with an explicit team grant; otherwise ErrGlovoNotReady.
+	// Verification accepts it only as the single aud of a token and confines
+	// it to no route yet (see internal/api).
+	GlovoResource string
+	// GlovoEnabled is the kill switch (GLOVO_ENABLED, default false). The
+	// Glovo resource is admitted only while it is on and GlovoReady holds;
+	// GlovoResource alone never opens it.
+	GlovoEnabled bool
+	// TeamGrants stores the team grants of Glovo flows; TeamEligibility is
+	// the live membership-and-allowlist answer. Both are required by
+	// GlovoReady. Inject via main.go after construction.
+	TeamGrants      teamgrant.Store
+	TeamEligibility TeamEligibility
 	// RejectHS256 refuses every HS256 access token (OAUTH_JWT_ACCEPT_HS256
 	// false). The zero value accepts them.
 	RejectHS256 bool
@@ -1426,6 +1444,23 @@ func (s *OAuthServer) IssueCode(ctx context.Context, login, principalID, clientI
 // token_endpoint_auth_method was read from its document at consent. With
 // none given, a CIMD client's document is resolved here instead.
 func (s *OAuthServer) IssueCodeWithAuthMethod(ctx context.Context, login, principalID, clientID, redirectURI, codeChallenge string, groups []string, authMethod, resource string) (string, error) {
+	return s.IssueCodeForTeamGrant(ctx, login, principalID, clientID, redirectURI, codeChallenge, groups, authMethod, resource, "", "")
+}
+
+// IssueCodeForTeamGrant is IssueCodeWithAuthMethod for a code bound to a
+// pending team grant. A code for the Glovo resource without one is refused,
+// so no path but the consent step can yield a Glovo token.
+func (s *OAuthServer) IssueCodeForTeamGrant(ctx context.Context, login, principalID, clientID, redirectURI, codeChallenge string, groups []string, authMethod, resource, teamGrantID, selectedTenant string) (string, error) {
+	if s.isGlovoFlow(resource) {
+		if !s.GlovoReady() {
+			return "", ErrGlovoNotReady
+		}
+		if teamGrantID == "" || selectedTenant == "" {
+			return "", errors.New("a code for the glovo resource needs a team grant")
+		}
+	} else if teamGrantID != "" {
+		return "", errors.New("a team grant is only for the glovo resource")
+	}
 	if err := s.checkMintPrincipal(principalID); err != nil {
 		return "", err
 	}
@@ -1447,6 +1482,7 @@ func (s *OAuthServer) IssueCodeWithAuthMethod(ctx context.Context, login, princi
 		Resource:      resource,
 		CreatedAt:     time.Now(),
 	}
+	entry.TeamGrantID, entry.SelectedTenant = teamGrantID, selectedTenant
 	if s.IsCIMDClient(clientID) {
 		// Recorded so the code can only be redeemed with the authentication
 		// the client declared when it was issued, even if its document later
@@ -1569,15 +1605,18 @@ func (s *OAuthServer) ExchangeCodeForResource(ctx context.Context, code, codeVer
 	if len(requested) > 0 && wantResource != entry.Resource {
 		return "", "", fmt.Errorf("%w: the code was issued for a different resource", ErrInvalidTarget)
 	}
-	accessToken, err := s.issueJWTFor(entry.Login, entry.PrincipalID, entry.Groups, s.audienceForResource(entry.Resource), entry.ClientID)
-	if err != nil {
-		return "", "", err
-	}
 	// The session remembers a private_key_jwt client's method, so it can
 	// only be refreshed with it, whatever the document says later.
 	bound := ""
 	if method == cimd.AuthMethodPrivateKeyJWT {
 		bound = method
+	}
+	if s.isGlovoFlow(entry.Resource) {
+		return s.exchangeGlovoCode(ctx, entry, clientID, bound)
+	}
+	accessToken, err := s.issueJWTFor(entry.Login, entry.PrincipalID, entry.Groups, s.audienceForResource(entry.Resource), entry.ClientID)
+	if err != nil {
+		return "", "", err
 	}
 	refreshToken, err := s.issueRefreshToken(entry.Login, entry.PrincipalID, entry.Groups, clientID, bound, entry.Resource)
 	if err != nil {
@@ -1624,6 +1663,12 @@ func (s *OAuthServer) IssueJWT(login, principalID string, groups []string) (stri
 
 // issueJWTFor is IssueJWT for an explicit audience; "" is the default one.
 func (s *OAuthServer) issueJWTFor(login, principalID string, groups []string, aud, clientID string) (string, error) {
+	return s.issueJWTWithGrant(login, principalID, groups, aud, clientID, "", "")
+}
+
+// issueJWTWithGrant is issueJWTFor that also signs the team grant claims
+// (tgr, stn). They are set only for the Glovo audience, never for any other.
+func (s *OAuthServer) issueJWTWithGrant(login, principalID string, groups []string, aud, clientID, teamGrantID, selectedTenant string) (string, error) {
 	if aud == "" {
 		aud = s.accessAudience()
 	}
@@ -1655,6 +1700,9 @@ func (s *OAuthServer) issueJWTFor(login, principalID string, groups []string, au
 		IssuedAt:  now.Unix(),
 		ExpiresAt: now.Add(ttl).Unix(),
 	}
+	if s.isGlovoFlow(aud) {
+		payload.TeamGrant, payload.SelectedTenant = teamGrantID, selectedTenant
+	}
 	return s.signAccessToken(payload)
 }
 
@@ -1680,16 +1728,13 @@ func (s *OAuthServer) issueRefreshToken(login, principalID string, groups []stri
 	if err := s.checkMintPrincipal(principalID); err != nil {
 		return "", err
 	}
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("generate refresh token: %w", err)
+	if s.isGlovoFlow(resource) {
+		return "", errors.New("a refresh token for the glovo resource is issued only by the bound code exchange")
 	}
-	token := base64.RawURLEncoding.EncodeToString(b)
-	ttl := s.RefreshTokenTTL
-	if ttl == 0 {
-		ttl = 30 * 24 * time.Hour
+	token, expiresAt, err := s.newRefreshTokenValue()
+	if err != nil {
+		return "", err
 	}
-	expiresAt := time.Now().Add(ttl)
 	if s.RefreshStore != nil {
 		if err := s.RefreshStore.Insert(token, clientID, refreshstore.Session{Login: login, PrincipalID: principalID, Groups: groups, AuthMethod: authMethod, Resource: resource}, expiresAt); err != nil {
 			slog.Error("oauth: refresh store insert failed", "error", err)
@@ -1708,6 +1753,19 @@ func (s *OAuthServer) issueRefreshToken(login, principalID string, groups []stri
 		ExpiresAt:   expiresAt,
 	})
 	return token, nil
+}
+
+// newRefreshTokenValue draws a refresh token and its expiry.
+func (s *OAuthServer) newRefreshTokenValue() (string, time.Time, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", time.Time{}, fmt.Errorf("generate refresh token: %w", err)
+	}
+	ttl := s.RefreshTokenTTL
+	if ttl == 0 {
+		ttl = 30 * 24 * time.Hour
+	}
+	return base64.RawURLEncoding.EncodeToString(b), time.Now().Add(ttl), nil
 }
 
 // RefreshAccessToken validates a refresh token, rotates it, and issues a new access token.
@@ -1765,9 +1823,10 @@ func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refresh
 		// successor was committed, the portal kept the old token, and its
 		// next attempt was read as a replay and revoked the family as stolen.
 		var refused error
-		downgrade := false
-		accept := func(sess refreshstore.Session) error {
-			refused, downgrade = nil, false
+		downgrade, revokeGrant := false, false
+		var grant teamgrant.Grant
+		accept := func(ctx context.Context, tx pgx.Tx, sess refreshstore.Session) error {
+			refused, downgrade, revokeGrant, grant = nil, false, false, teamgrant.Grant{}
 			if err := checkSessionAuthMethod(sess.AuthMethod, method); err != nil {
 				refused, downgrade = err, true
 				return err
@@ -1780,10 +1839,34 @@ func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refresh
 				refused = err
 				return err
 			}
+			// A team grant is read and refused here, on the rotation's own
+			// transaction, and never written: a write would roll back with
+			// the refusal. A lost grant or team revokes after RotateIfTx.
+			if err := s.glovoRefreshAccept(ctx, tx, sess, clientID, &grant, &revokeGrant); err != nil {
+				if !errors.Is(err, ErrServerError) {
+					refused = err
+				}
+				return err
+			}
 			return nil
 		}
-		sess, err := s.RefreshStore.RotateIf(refreshToken, newToken, clientID, time.Now().Add(ttl), accept)
+		var sess refreshstore.Session
+		var err error
+		if bs, ok := s.RefreshStore.(refreshstore.BoundStore); ok {
+			sess, err = bs.RotateIfTx(refreshToken, newToken, clientID, time.Now().Add(ttl), accept)
+		} else {
+			sess, err = s.RefreshStore.RotateIf(refreshToken, newToken, clientID, time.Now().Add(ttl), func(sess refreshstore.Session) error {
+				return accept(ctx, nil, sess)
+			})
+		}
 		if err != nil && refused != nil && errors.Is(err, refused) {
+			if revokeGrant {
+				// The grant is lost or its team is: end the family and the
+				// grant together, after the refusal, never inside accept.
+				if rerr := s.RefreshStore.RevokeFamily(refreshToken, clientID, "team_grant_invalid"); rerr != nil {
+					slog.Error("oauth: refresh store revoke on lost team grant failed", "error", rerr)
+				}
+			}
 			if downgrade {
 				// The token was presented without the authentication its
 				// session was issued under, so whoever holds it is not that
@@ -1820,7 +1903,7 @@ func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refresh
 		if !s.PrincipalMode {
 			groups = s.groupsForSession(sess.Login, sess.Groups)
 		}
-		accessToken, err := s.issueJWTFor(sess.Login, sess.PrincipalID, groups, s.audienceForResource(sess.Resource), clientID)
+		accessToken, err := s.issueJWTWithGrant(sess.Login, sess.PrincipalID, groups, s.audienceForResource(sess.Resource), clientID, sess.TeamGrantID, grant.Tenant)
 		if err != nil {
 			return "", "", err
 		}
@@ -1854,6 +1937,10 @@ func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refresh
 	}
 	if err := resourceRefused(entry.Resource); err != nil {
 		return "", "", err
+	}
+	if s.isGlovoFlow(entry.Resource) {
+		// No team grant is bound without the Postgres store.
+		return "", "", ErrTeamGrantInvalid
 	}
 	// The successor row records the groups only when they are a fresh
 	// resolution. A degraded or fail-closed fallback must not overwrite the
@@ -1912,17 +1999,23 @@ func (s *OAuthServer) refreshablePrincipal(login, principalID string) error {
 // the persistent store is active — see refreshstore.Store).
 // clientID scopes the revocation to tokens issued for that client; pass ""
 // to revoke unconditionally (in-memory fallback, or when client is unknown).
-func (s *OAuthServer) RevokeRefreshToken(refreshToken, clientID string) {
+//
+// A store failure is returned, never swallowed: the family and its team grant
+// are revoked in one transaction, and a revocation that did not happen must
+// not be reported as one (RFC 7009 section 2.2.1 allows a 503).
+func (s *OAuthServer) RevokeRefreshToken(refreshToken, clientID string) error {
 	if refreshToken == "" {
-		return
+		return nil
 	}
 	if s.RefreshStore != nil {
 		if err := s.RefreshStore.RevokeFamily(refreshToken, clientID, "explicit_revoke"); err != nil {
 			slog.Warn("oauth: failed to revoke refresh token family", "error", err)
+			return fmt.Errorf("revoke refresh token: %w", ErrServerError)
 		}
-		return
+		return nil
 	}
 	s.refreshTokens.delete(refreshToken)
+	return nil
 }
 
 // RevokePrincipalSessions revokes every refresh token recorded for
@@ -1962,6 +2055,10 @@ func (s *OAuthServer) ValidateJWT(token string) (*User, error) {
 		u.tokenAudience = audience{s.accessAudience()}
 	}
 	u.supportAudience = payload.support
+	u.glovoAudience = payload.glovo
+	if payload.glovo {
+		u.teamGrantID, u.selectedTenant = payload.TeamGrant, payload.SelectedTenant
+	}
 	u.oauthClientID = boundedClientID(payload.ClientID)
 	return u, nil
 }
@@ -2085,9 +2182,18 @@ type jwtPayload struct {
 	// ID is the jti claim. Only the internal support mint sets it; every
 	// other access token omits it.
 	ID string `json:"jti,omitempty"`
+	// TeamGrant (tgr) and SelectedTenant (stn) are the team grant a Glovo
+	// token was minted under. Minted only for the Glovo audience, and read
+	// back only from it: on any other audience they are dropped at
+	// verification, so forging them onto an API token does nothing.
+	TeamGrant      string `json:"tgr,omitempty"`
+	SelectedTenant string `json:"stn,omitempty"`
 	// support is set by verification, never by the token: its aud names the
 	// support resource, so it may reach only the routes mctl-support relays.
 	support bool
+	// glovo is set by verification, never by the token: its aud is exactly
+	// the Glovo resource.
+	glovo bool
 }
 
 func (s *OAuthServer) accessAudience() string {
@@ -2233,6 +2339,13 @@ func (s *OAuthServer) verifyAccessToken(token string) (*jwtPayload, error) {
 	}
 	if len(payload.Audience) > 0 {
 		switch {
+		case s.GlovoResource != "" && payload.Audience.contains(s.GlovoResource):
+			// First, so a mixed [glovo, api] or [glovo, support] aud is
+			// refused outright instead of read as another audience.
+			if len(payload.Audience) != 1 {
+				return fail("aud_mismatch", errors.New("JWT audience for the glovo resource must be exact"))
+			}
+			payload.glovo = true
 		case s.SupportResource != "" && payload.Audience.contains(s.SupportResource):
 			// Wins over an API entry in the same aud: fail closed.
 			payload.support = true
@@ -2245,6 +2358,9 @@ func (s *OAuthServer) verifyAccessToken(token string) (*jwtPayload, error) {
 			return fail("aud_missing", errors.New("JWT has no audience"))
 		}
 		oauthJWTAudlessAccepted.Inc()
+	}
+	if !payload.glovo {
+		payload.TeamGrant, payload.SelectedTenant = "", ""
 	}
 	oauthJWTVerifications.WithLabelValues(alg, "ok").Inc()
 	return &payload, nil
@@ -2270,6 +2386,10 @@ type authCodeEntry struct {
 	// Resource is the flow resource the code was issued for ("" is the
 	// default API resource).
 	Resource string `json:",omitempty"`
+	// TeamGrantID and SelectedTenant bind a Glovo code to the pending team
+	// grant the human created at consent.
+	TeamGrantID    string `json:",omitempty"`
+	SelectedTenant string `json:",omitempty"`
 }
 
 type pendingAuth struct {
