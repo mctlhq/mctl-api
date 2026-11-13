@@ -1411,11 +1411,15 @@ func main() {
 	// Glovo basket MCP (mctl-api#1006): dark unless GLOVO_BASKET_MCP_ENABLED
 	// is true; set without its dependencies or schemas, the boot is refused.
 	basketCtx, cancelBasket := context.WithTimeout(rootCtx, 15*time.Second)
-	// ApprovalPageBaseURL stays empty until the owner approval page
-	// (mctl-api#1007) is mounted; that change sets it to the API's public
-	// origin when the page is enabled.
-	glovoBasketRoutes, err := configureGlovoBasket(basketCtx, glovoBasketDeps{
+	// The owner approval page (mctl-api#1007) is built over the basket
+	// store; GLOVO_BASKET_UI_ENABLED without the basket MCP refuses the boot.
+	basketUIEnv := glovoBasketUIEnvFromOS()
+	glovoBasketRoutes, glovoBasketPage, err := configureGlovoBasket(basketCtx, glovoBasketDeps{
 		OAuth: oauthServer, Glovo: glovoRoutes, Pool: glovoPoolOf(glovoStore), Ledger: workItemsStore,
+		UIEnabled: basketUIEnv.Enabled,
+		Page: func(view mctlapi.GlovoBasketApprovalView) *mctlapi.GlovoBasketApprovalPageOptions {
+			return glovoBasketApprovalOptions(cfg, basketUIEnv, principalResolver, principalAuthz, view, oauthFlowStore(oauthServer))
+		},
 	}, os.LookupEnv)
 	cancelBasket()
 	if err != nil {
@@ -1460,7 +1464,7 @@ func main() {
 		OAuthServer:                    oauthServer,
 		IdentityLink:                   identityLinkOptions(cfg, principalStore, principalCache, oauthServer, ghValidator),
 		DevLoopDecide:                  devLoopDecideOptions(cfg, principalResolver, principalAuthz),
-		GlovoBasketApproval:            glovoBasketApprovalOptions(cfg, glovoBasketUIEnvFromOS(), principalResolver, principalAuthz, nil, oauthFlowStore(oauthServer)),
+		GlovoBasketApproval:            glovoBasketPage,
 		OAuthUpstream:                  cfg.oauthUpstreamMode(),
 		OAuthZitadel:                   oauthZitadelOptions(cfg, principalStore, oauthServer),
 		SurfaceZitadel:                 surfaceZitadelOptions(cfg),
