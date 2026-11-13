@@ -128,6 +128,10 @@ type Options struct {
 	// DevLoopDecide configures the DevLoop decide page (mctl-api#964,
 	// handlers_devloop_decide.go). Nil disables it (503).
 	DevLoopDecide *DevLoopDecideOptions
+	// GlovoBasketApproval configures the Glovo basket approval page
+	// (mctl-api#1006, glovo_basket_approval_page.go). Its routes are mounted
+	// only when it is complete; nil keeps them unmounted (404).
+	GlovoBasketApproval *GlovoBasketApprovalPageOptions
 	// OAuthUpstream is where /oauth/authorize signs people in
 	// (OAUTH_UPSTREAM, mctl-api#467); the zero value is GitHub.
 	OAuthUpstream OAuthUpstreamMode
@@ -420,6 +424,8 @@ type Handlers struct {
 	// principalSets memoizes shadow mode's principal-keyed tenant sets;
 	// nil reads the checkout on every comparison.
 	principalSets *principalSetCache
+	// glovoBasketApproval is the basket approval page; nil when not mounted.
+	glovoBasketApproval *basketDecider
 }
 
 // NewRouter creates the HTTP router with all API routes.
@@ -433,6 +439,9 @@ func NewRouter(opts Options) http.Handler {
 	}
 	if opts.DevLoopDecide != nil {
 		h.devLoopDecide = newDevLoopDecider(opts.DevLoopDecide)
+	}
+	if opts.GlovoBasketApproval.enabled() {
+		h.glovoBasketApproval = newBasketDecider(opts.GlovoBasketApproval)
 	}
 	if opts.OAuthZitadel != nil {
 		h.oauthZitadel = &oauthZitadel{opts: opts.OAuthZitadel, lazyOIDCProvider: lazyOIDCProvider{issuer: opts.OAuthZitadel.Issuer}}
@@ -522,6 +531,14 @@ func NewRouter(opts Options) http.Handler {
 		r.Get(decideCallbackPath, h.handleDevLoopDecideCallback)
 		r.Post(decideConfirmPath, h.handleDevLoopDecideConfirm)
 		r.Get(decidePathPrefix+"{workflow_id}", h.handleDevLoopDecidePage)
+		// Glovo basket approval page (mctl-api#1006): dark unless
+		// configured; the owner signs in inside the flow, like above.
+		if h.glovoBasketApproval != nil {
+			r.Post(basketStartPath, h.handleGlovoBasketApprovalStart)
+			r.Get(basketCallbackPath, h.handleGlovoBasketApprovalCallback)
+			r.Post(basketConfirmPath, h.handleGlovoBasketApprovalConfirm)
+			r.Get(basketPagePrefix+"{approval_ref}", h.handleGlovoBasketApprovalPage)
+		}
 	})
 	r.Group(func(r chi.Router) {
 		// Keyed by IP, so every process of one desktop MCP client shares the
