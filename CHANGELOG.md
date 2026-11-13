@@ -1,5 +1,16 @@
 # Changelog
 
+## [4.156.0](https://github.com/mctlhq/mctl-api/compare/4.155.0...4.156.0) (2026-11-13)
+
+
+### Features
+
+* **api:** owner approval page for Glovo basket approvals ([#1006](https://github.com/mctlhq/mctl-api/issues/1006)) ([74fe870](https://github.com/mctlhq/mctl-api/commit/74fe8704e42c57966d33f6bce0a4cf9ccbca2a46))
+* **glovo:** basket MCP v1, dark by default ([#1006](https://github.com/mctlhq/mctl-api/issues/1006)) ([5fab877](https://github.com/mctlhq/mctl-api/commit/5fab877f53ce44377f0ae447a24bc8c726fb1756))
+* **glovo:** integrate basket MCP with the owner approval page ([f273e43](https://github.com/mctlhq/mctl-api/commit/f273e43121ae758a71e002f37f80b4784a43df9d))
+* **glovo:** operator-run schema migrator for the basket canary ([#1006](https://github.com/mctlhq/mctl-api/issues/1006)) ([373e237](https://github.com/mctlhq/mctl-api/commit/373e237823294f832353cacd83ab5a4d6f8e4cd4))
+* **helm:** per-host ingress paths, extraPaths and glovoBasketUISecret slot ([73dfaf0](https://github.com/mctlhq/mctl-api/commit/73dfaf03c44daed90a59875c624de177b0101ff4))
+
 ## [4.155.0](https://github.com/mctlhq/mctl-api/compare/4.154.0...4.155.0) (2026-11-11)
 
 
