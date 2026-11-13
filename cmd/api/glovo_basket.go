@@ -27,6 +27,7 @@ import (
 
 	"github.com/mctlhq/mctl-api/internal/api"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/glovo/scope"
 	"github.com/mctlhq/mctl-api/internal/glovobasket"
 	"github.com/mctlhq/mctl-api/internal/workitems"
 )
@@ -37,10 +38,14 @@ type glovoBasketDeps struct {
 	Glovo  *api.GlovoRoutes
 	Pool   *pgxpool.Pool
 	Ledger *workitems.Store
-	// ApprovalPageBaseURL is the API's public https origin when the owner
-	// approval page (mctl-api#1007) is mounted, else empty: only then does
-	// glovo_request_approval return an approval_url.
-	ApprovalPageBaseURL string
+	// UIEnabled is GLOVO_BASKET_UI_ENABLED: the owner approval page
+	// (mctl-api#1007) decides basket approvals, so switching it on without
+	// the basket MCP is a refused boot, not a page with nothing behind it.
+	UIEnabled bool
+	// Page builds the approval page's options over the basket store's view,
+	// or returns nil when the page stays off (it logs what is missing). It
+	// is called only when the basket MCP is on.
+	Page func(view api.GlovoBasketApprovalView) *api.GlovoBasketApprovalPageOptions
 }
 
 // configureGlovoBasket wires the Glovo basket MCP (mctl-api#1006). It is dark:
@@ -49,43 +54,58 @@ type glovoBasketDeps struct {
 // resolver, the Glovo pool, the work-items ledger, a Glovo resource that is
 // an https .../mcp URL) and both schemas must verify; otherwise the boot is
 // refused. It never applies a schema.
-func configureGlovoBasket(ctx context.Context, d glovoBasketDeps, lookup func(string) (string, bool)) (*api.GlovoBasketRoutes, error) {
+//
+// The approval page is built here, over the same store, so that
+// glovo_request_approval returns an approval_url exactly when the page is
+// mounted: its BaseURL is the URL's origin.
+func configureGlovoBasket(ctx context.Context, d glovoBasketDeps, lookup func(string) (string, bool)) (*api.GlovoBasketRoutes, *api.GlovoBasketApprovalPageOptions, error) {
+	routes, page, err := configureGlovoBasketMCP(ctx, d, lookup)
+	if err == nil && routes == nil && d.UIEnabled {
+		return nil, nil, errors.New("GLOVO_BASKET_UI_ENABLED=true requires GLOVO_BASKET_MCP_ENABLED=true: the page decides basket approvals")
+	}
+	return routes, page, err
+}
+
+func configureGlovoBasketMCP(ctx context.Context, d glovoBasketDeps, lookup func(string) (string, bool)) (*api.GlovoBasketRoutes, *api.GlovoBasketApprovalPageOptions, error) {
 	raw, set := lookup("GLOVO_BASKET_MCP_ENABLED")
 	if !set || strings.TrimSpace(raw) == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	on, err := strconv.ParseBool(strings.TrimSpace(raw))
 	if err != nil {
-		return nil, fmt.Errorf("GLOVO_BASKET_MCP_ENABLED: %w", err)
+		return nil, nil, fmt.Errorf("GLOVO_BASKET_MCP_ENABLED: %w", err)
 	}
 	if !on {
-		return nil, nil
+		return nil, nil, nil
 	}
 	switch {
 	case d.Glovo == nil || !d.Glovo.Enabled || d.Glovo.Resolver == nil:
-		return nil, errors.New("GLOVO_BASKET_MCP_ENABLED=true requires GLOVO_ENABLED=true with its team grants")
+		return nil, nil, errors.New("GLOVO_BASKET_MCP_ENABLED=true requires GLOVO_ENABLED=true with its team grants")
 	case d.OAuth == nil || !d.OAuth.GlovoReady():
-		return nil, errors.New("GLOVO_BASKET_MCP_ENABLED=true requires a ready Glovo OAuth resource")
+		return nil, nil, errors.New("GLOVO_BASKET_MCP_ENABLED=true requires a ready Glovo OAuth resource")
 	case d.Pool == nil:
-		return nil, errors.New("GLOVO_BASKET_MCP_ENABLED=true requires the Glovo database pool")
+		return nil, nil, errors.New("GLOVO_BASKET_MCP_ENABLED=true requires the Glovo database pool")
 	case d.Ledger == nil:
-		return nil, errors.New("GLOVO_BASKET_MCP_ENABLED=true requires the work-items ledger (WORK_ITEMS_DB_URL)")
+		return nil, nil, errors.New("GLOVO_BASKET_MCP_ENABLED=true requires the work-items ledger (WORK_ITEMS_DB_URL)")
 	}
 	res, err := url.Parse(d.OAuth.GlovoResource)
 	if err != nil || res.Scheme != "https" || res.Host == "" || res.Path != "/mcp" || res.RawQuery != "" || res.Fragment != "" {
-		return nil, fmt.Errorf("GLOVO_BASKET_MCP_ENABLED=true requires the Glovo resource to be https://<host>/mcp, got %q", d.OAuth.GlovoResource)
+		return nil, nil, fmt.Errorf("GLOVO_BASKET_MCP_ENABLED=true requires the Glovo resource to be https://<host>/mcp, got %q", d.OAuth.GlovoResource)
 	}
 	if err := workitems.VerifyGlovoApprovalSchema(ctx, d.Pool); err != nil {
-		return nil, fmt.Errorf("glovo basket: approval schema: %w", err)
+		return nil, nil, fmt.Errorf("glovo basket: approval schema: %w", err)
 	}
 	if err := glovobasket.VerifySchema(ctx, d.Pool); err != nil {
-		return nil, fmt.Errorf("glovo basket: %w", err)
+		return nil, nil, fmt.Errorf("glovo basket: %w", err)
 	}
 	store := &glovobasket.PGStore{Pool: d.Pool}
-	h, err := glovobasket.NewHandler(glovobasket.Config{Store: store, Resolver: d.Glovo.Resolver,
-		ApprovalPageBaseURL: d.ApprovalPageBaseURL})
+	var page *api.GlovoBasketApprovalPageOptions
+	if d.Page != nil {
+		page = d.Page(api.NewGlovoBasketApprovalView(store))
+	}
+	h, err := glovobasket.NewHandler(basketMCPConfig(store, d.Glovo.Resolver, page))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	pool := d.Pool
 	return &api.GlovoBasketRoutes{
@@ -102,5 +122,16 @@ func configureGlovoBasket(ctx context.Context, d glovoBasketDeps, lookup func(st
 				return glovobasket.VerifySchema(ctx, pool)
 			},
 		},
-	}, nil
+	}, page, nil
+}
+
+// basketMCPConfig is the basket MCP's configuration. approval_url points at
+// the approval page only when the page is mounted (page non-nil); its origin
+// is the page's BaseURL, the same SELF_URL the page signs people in under.
+func basketMCPConfig(store glovobasket.Store, resolver *scope.Resolver, page *api.GlovoBasketApprovalPageOptions) glovobasket.Config {
+	cfg := glovobasket.Config{Store: store, Resolver: resolver}
+	if page != nil {
+		cfg.ApprovalPageBaseURL = page.BaseURL
+	}
+	return cfg
 }

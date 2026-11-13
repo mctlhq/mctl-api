@@ -77,7 +77,7 @@ import (
 
 // GlovoBasketApprovalKind is the action kind of a basket approval. The page
 // serves no other kind: a Glovo order approval is not decided here.
-const GlovoBasketApprovalKind = "glovo.basket_approval"
+const GlovoBasketApprovalKind = workitems.ActionKindGlovoBasketApproval
 
 // ErrGlovoBasketApprovalNotFound is what a GlovoBasketApprovalView answers
 // when it holds no basket approval with that reference. Any other error is a
@@ -529,12 +529,11 @@ func (h *Handlers) readBasketApproval(r *http.Request, d *basketDecider, user *a
 }
 
 // basketApprovalLedger is the ledger the decision handler decides a basket
-// approval with, so the page checks the very binding the decision will.
-// On main that is GlovoApprovals; once the basket ledger lands as its own
-// decisions (mctl-api#1006 slice 1, glovoDecisionsFor), this returns
-// h.glovoDecisionsFor(GlovoBasketApprovalKind) instead.
+// approval with (glovoDecisionsFor, the basket MCP's own decisions), so the
+// page checks the very binding the decision will. Nil when the basket MCP is
+// not configured: then the page finds nothing to decide.
 func (h *Handlers) basketApprovalLedger() GlovoApprovalDecisions {
-	return h.opts.GlovoApprovals
+	return h.glovoDecisionsFor(workitems.ActionKindGlovoBasketApproval)
 }
 
 // basketTableOf checks a snapshot's arithmetic and formats it. A page that

@@ -19,6 +19,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/auth/flowstore"
 	"github.com/mctlhq/mctl-api/internal/glovo"
+	"github.com/mctlhq/mctl-api/internal/glovobasket"
 	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
@@ -92,6 +93,14 @@ func (l *basketLedger) count() int {
 	return len(l.decided)
 }
 
+// noBasketPayloads completes GlovoBasketRoutes in tests that read the
+// basket through basketViewFake.
+type noBasketPayloads struct{}
+
+func (noBasketPayloads) DecisionPayload(context.Context, string) (*glovobasket.DecisionPayload, error) {
+	return nil, workitems.ErrApprovalNotFound
+}
+
 // basketViewFake is the basket store's side.
 type basketViewFake struct {
 	mu    sync.Mutex
@@ -152,6 +161,10 @@ func newBasketEnv(t *testing.T) *basketEnv {
 		basketForeignTnt + "|" + basketForeignPRN: "developer",
 	}}
 	e.h.opts.GlovoApprovals = e.ledger
+	// The basket ledger is the basket MCP's own decisions (glovoDecisionsFor),
+	// which both the page and the decision route resolve.
+	e.h.opts.GlovoBasket = &GlovoBasketRoutes{Host: "glovo.example", Resource: "https://glovo.example/mcp",
+		MCP: http.NotFoundHandler(), Decisions: e.ledger, Payloads: noBasketPayloads{}}
 	e.h.opts.TenantAuthzMode = TenantAuthzPrincipal
 	e.h.opts.PrincipalMembership = e.members
 	prev := glovo.Default

@@ -44,9 +44,9 @@ func glovoBasketUIEnvFromOS() glovoBasketUIEnv {
 // glovoBasketApprovalOptions configures the basket approval page, or returns
 // nil (routes unmounted) with one log line saying what is missing. The page
 // is off, silently, unless GLOVO_BASKET_UI_ENABLED is exactly "true"; it
-// fails closed on anything else missing, the basket view included. main
-// passes a nil view until the basket store (mctl-api#1006 slice 1) is wired,
-// so the flag alone mounts nothing. flow is the OAuth server's shared flow
+// fails closed on anything else missing, the basket view included.
+// configureGlovoBasket calls it with the basket store's view, and only when
+// the basket MCP is on. flow is the OAuth server's shared flow
 // store: without it the page would keep challenges in one replica's memory,
 // so it stays off.
 func glovoBasketApprovalOptions(cfg config, env glovoBasketUIEnv, pr auth.PrincipalResolver, authz *auth.PrincipalAuthz, view mctlapi.GlovoBasketApprovalView, flow flowstore.Store) *mctlapi.GlovoBasketApprovalPageOptions {
