@@ -58,6 +58,9 @@ spec:
             {{- if and .Values.devLoopDecideSecret (or .Values.env.DEVLOOP_DECIDE_CLIENT_ID .Values.env.DEVLOOP_DECIDE_CLIENT_SECRET) }}
             {{- fail "set DEVLOOP_DECIDE_CLIENT_ID and DEVLOOP_DECIDE_CLIENT_SECRET either in env or through devLoopDecideSecret, not both" }}
             {{- end }}
+            {{- if and .Values.glovoBasketUISecret (or .Values.env.GLOVO_BASKET_UI_CLIENT_ID .Values.env.GLOVO_BASKET_UI_CLIENT_SECRET) }}
+            {{- fail "set GLOVO_BASKET_UI_CLIENT_ID and GLOVO_BASKET_UI_CLIENT_SECRET either in env or through glovoBasketUISecret, not both" }}
+            {{- end }}
             {{- range $key, $value := .Values.env }}
             {{- /* oidcProvidersSecret, zitadelLinkSecret, oauthZitadelSecret and devLoopDecideSecret
                    supply these below; a literal entry (even an empty one)
@@ -66,7 +69,8 @@ spec:
             {{- if not (or (and $.Values.oidcProvidersSecret (eq $key "MCTL_OIDC_PROVIDERS"))
                            (and $.Values.zitadelLinkSecret (or (eq $key "ZITADEL_LINK_CLIENT_ID") (eq $key "ZITADEL_LINK_CLIENT_SECRET")))
                            (and $.Values.oauthZitadelSecret (or (eq $key "OAUTH_ZITADEL_CLIENT_ID") (eq $key "OAUTH_ZITADEL_CLIENT_SECRET")))
-                           (and $.Values.devLoopDecideSecret (or (eq $key "DEVLOOP_DECIDE_CLIENT_ID") (eq $key "DEVLOOP_DECIDE_CLIENT_SECRET")))) }}
+                           (and $.Values.devLoopDecideSecret (or (eq $key "DEVLOOP_DECIDE_CLIENT_ID") (eq $key "DEVLOOP_DECIDE_CLIENT_SECRET")))
+                           (and $.Values.glovoBasketUISecret (or (eq $key "GLOVO_BASKET_UI_CLIENT_ID") (eq $key "GLOVO_BASKET_UI_CLIENT_SECRET")))) }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
@@ -255,6 +259,24 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.devLoopDecideSecret }}
                   key: DEVLOOP_DECIDE_CLIENT_SECRET
+                  optional: true
+            {{- end }}
+            {{- if .Values.glovoBasketUISecret }}
+            # The confidential ZITADEL client of the Glovo basket owner
+            # approval page (mctlhq/mctl-api#1007), written by the zitadel-iac
+            # Job. Optional: without both keys the page stays off (logged)
+            # and nothing else changes.
+            - name: GLOVO_BASKET_UI_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.glovoBasketUISecret }}
+                  key: GLOVO_BASKET_UI_CLIENT_ID
+                  optional: true
+            - name: GLOVO_BASKET_UI_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.glovoBasketUISecret }}
+                  key: GLOVO_BASKET_UI_CLIENT_SECRET
                   optional: true
             {{- end }}
             {{- if .Values.usagePricingConfigMap }}
