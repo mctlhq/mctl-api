@@ -304,6 +304,40 @@ func (u *User) HasTenantAccess(tenant string) bool {
 	return false
 }
 
+// TenantScope returns the tenants HasTenantAccess admits, for a query that
+// must filter before it limits. all is true when every tenant is admitted;
+// otherwise tenants is the complete set, and an empty set admits nothing.
+// It mirrors HasTenantAccess branch for branch: a change to one is a change
+// to both (TestTenantScopeMatchesHasTenantAccess).
+func (u *User) TenantScope() (tenants []string, all bool) {
+	if u == nil {
+		return []string{}, false
+	}
+	if u.IsAdmin() {
+		return nil, true
+	}
+	if s, ok := u.AgentScope(); ok {
+		if s.BoundTenant {
+			if u.boundTenant == "" {
+				return []string{}, false
+			}
+			return []string{u.boundTenant}, false
+		}
+		if s.ReadAllTenants {
+			return nil, true
+		}
+	}
+	seen := make(map[string]bool, len(u.Groups))
+	tenants = make([]string, 0, len(u.Groups))
+	for _, g := range u.Groups {
+		if !seen[g] {
+			seen[g] = true
+			tenants = append(tenants, g)
+		}
+	}
+	return tenants, false
+}
+
 // UserFromContext returns the authenticated user from request context.
 func UserFromContext(ctx context.Context) *User {
 	u, _ := ctx.Value(userContextKey).(*User)

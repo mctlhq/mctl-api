@@ -415,6 +415,11 @@ func (s *Store) List(ctx context.Context, f ListFilter) ([]Alert, error) {
 		args = append(args, f.Since)
 		argIdx++
 	}
+	if f.Tenants != nil {
+		conditions = append(conditions, fmt.Sprintf("tenant = ANY($%d::text[])", argIdx))
+		args = append(args, f.Tenants)
+		argIdx++
+	}
 
 	query := `SELECT ` + alertColumns + ` FROM alerts`
 	if len(conditions) > 0 {
@@ -435,27 +440,41 @@ func (s *Store) List(ctx context.Context, f ListFilter) ([]Alert, error) {
 	}
 	defer rows.Close()
 
+	// A row that fails to scan or a broken stream is a failed read, not a
+	// shorter list.
 	var alerts []Alert
 	for rows.Next() {
 		var a Alert
 		if err := scanAlert(rows, &a); err != nil {
-			slog.Error("alerts store: scan failed", "error", err)
-			continue
+			return nil, fmt.Errorf("alerts store: list: scan: %w", err)
 		}
 		alerts = append(alerts, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("alerts store: list: %w", err)
 	}
 	return alerts, nil
 }
 
-// Summary returns aggregate counts by status, severity, and type.
-func (s *Store) Summary(ctx context.Context) (*Summary, error) {
+// Summary returns aggregate counts of active incidents by status, severity,
+// and type. tenants follows ListFilter.Tenants: nil counts every tenant, a
+// non-nil slice counts only those, and an empty one counts nothing.
+func (s *Store) Summary(ctx context.Context, tenants []string) (*Summary, error) {
 	sum := &Summary{
 		ByStatus:   make(map[string]int),
 		BySeverity: make(map[string]int),
 		ByType:     make(map[string]int),
 	}
 
-	rows, err := s.pool.Query(ctx, `SELECT status, severity, type FROM alerts WHERE status NOT IN ('resolved', 'suppressed')`)
+	query := `SELECT status, severity, type, count(*) FROM alerts WHERE status NOT IN ('resolved', 'suppressed')`
+	var args []interface{}
+	if tenants != nil {
+		query += ` AND tenant = ANY($1::text[])`
+		args = append(args, tenants)
+	}
+	query += ` GROUP BY status, severity, type`
+
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("alerts store: summary: %w", err)
 	}
@@ -463,13 +482,17 @@ func (s *Store) Summary(ctx context.Context) (*Summary, error) {
 
 	for rows.Next() {
 		var status, severity, alertType string
-		if err := rows.Scan(&status, &severity, &alertType); err != nil {
-			continue
+		var n int
+		if err := rows.Scan(&status, &severity, &alertType, &n); err != nil {
+			return nil, fmt.Errorf("alerts store: summary: scan: %w", err)
 		}
-		sum.ByStatus[status]++
-		sum.BySeverity[severity]++
-		sum.ByType[alertType]++
-		sum.Total++
+		sum.ByStatus[status] += n
+		sum.BySeverity[severity] += n
+		sum.ByType[alertType] += n
+		sum.Total += n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("alerts store: summary: %w", err)
 	}
 	return sum, nil
 }

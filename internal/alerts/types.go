@@ -132,6 +132,10 @@ type ListFilter struct {
 	Severity string
 	Limit    int
 	Since    time.Time
+	// Tenants, when non-nil, restricts the result to these tenants inside the
+	// query, before LIMIT. A non-nil empty slice matches nothing; nil leaves
+	// the result unrestricted. It narrows Tenant rather than replacing it.
+	Tenants []string
 }
 
 // Summary holds aggregate counts.
