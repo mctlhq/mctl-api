@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.156.1](https://github.com/mctlhq/mctl-api/compare/4.156.0...4.156.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* **api:** scope incident list and summary by tenant in SQL ([828e4ef](https://github.com/mctlhq/mctl-api/commit/828e4ef2d857eadb4e2169dcd419d4c00d1bfed8))
+* **api:** scope incident list and summary by tenant in SQL ([1065389](https://github.com/mctlhq/mctl-api/commit/10653895ca96e547241cb0c59cbb84966bddb53a))
+
 ## [4.156.0](https://github.com/mctlhq/mctl-api/compare/4.155.0...4.156.0) (2026-11-13)
 
 
