@@ -42,7 +42,11 @@ var roleNameRE = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
 // object in schema glovo that another role owns, a recorded schema version
 // above the compiled one, and a runtimeRole that does not match
 // ^[a-z_][a-z0-9_]{0,62}$.
-func ApplySchema(ctx context.Context, migrationConnStr, runtimeRole string) error {
+func ApplySchema(ctx context.Context, migrationConnStr, runtimeRole string, opts ...SchemaOption) error {
+	var cfg schemaConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	if !roleNameRE.MatchString(runtimeRole) {
 		return fmt.Errorf("glovo: invalid runtime role name")
 	}
@@ -56,6 +60,11 @@ func ApplySchema(ctx context.Context, migrationConnStr, runtimeRole string) erro
 		return fmt.Errorf("glovo: begin schema tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if cfg.txSetup != nil {
+		if err := cfg.txSetup(ctx, tx); err != nil {
+			return fmt.Errorf("glovo: schema tx setup: %w", err)
+		}
+	}
 
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('glovo-schema'))`); err != nil {
 		return fmt.Errorf("glovo: schema lock: %w", err)
@@ -133,22 +142,37 @@ func ApplySchema(ctx context.Context, migrationConnStr, runtimeRole string) erro
 	return nil
 }
 
+// ForeignOwned lists the schema, relations and functions in schema glovo that
+// current_user (the migration role) does not own: what ApplySchema refuses to
+// adopt. The operator-run migrator's preflight calls it too, so what it
+// refuses up front and what the apply refuses are one predicate.
+func ForeignOwned(ctx context.Context, q dbq.Querier) ([]string, error) {
+	var out []string
+	err := q.QueryRow(ctx, `
+SELECT coalesce(array_agg(x ORDER BY x), '{}') FROM (
+  SELECT 'schema glovo' AS x FROM pg_namespace n, pg_roles r
+    WHERE n.nspname = 'glovo' AND r.rolname = current_user AND n.nspowner <> r.oid
+  UNION ALL
+  SELECT 'glovo.' || c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace, pg_roles r
+    WHERE n.nspname = 'glovo' AND r.rolname = current_user AND c.relowner <> r.oid
+  UNION ALL
+  SELECT 'glovo.' || p.proname || '()' FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace, pg_roles r
+    WHERE n.nspname = 'glovo' AND r.rolname = current_user AND p.proowner <> r.oid) s`).Scan(&out)
+	if err != nil {
+		return nil, fmt.Errorf("glovo: ownership check: %w", err)
+	}
+	return out, nil
+}
+
 // checkOwnership refuses schema glovo, or any relation or function in it, that
 // current_user (the migration role) does not own.
 func checkOwnership(ctx context.Context, q dbq.Querier) error {
-	var n int
-	err := q.QueryRow(ctx, `
-SELECT (SELECT count(*) FROM pg_namespace WHERE nspname = 'glovo' AND nspowner <> r.oid)
-     + (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-         WHERE n.nspname = 'glovo' AND c.relowner <> r.oid)
-     + (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-         WHERE n.nspname = 'glovo' AND p.proowner <> r.oid)
-FROM pg_roles r WHERE r.rolname = current_user`).Scan(&n)
+	foreign, err := ForeignOwned(ctx, q)
 	if err != nil {
-		return fmt.Errorf("glovo: ownership check: %w", err)
+		return err
 	}
-	if n != 0 {
-		return fmt.Errorf("glovo: schema glovo holds %d object(s) owned by another role; refusing to adopt them", n)
+	if len(foreign) != 0 {
+		return fmt.Errorf("glovo: schema glovo holds %d object(s) owned by another role; refusing to adopt them", len(foreign))
 	}
 	return nil
 }
@@ -514,3 +538,21 @@ RETURNING `+connColsAs("c")+`, old.state, COALESCE(old.secret_ref, '')`, ids, st
 	}
 	return out, nil
 }
+
+// TxSetup runs first inside a schema transaction, before any lock is taken. The
+// operator-run migrator (cmd/glovo-migrate) uses it for SET LOCAL lock_timeout
+// and statement_timeout and to re-check current_user. A returned error aborts
+// and rolls the transaction back.
+type TxSetup func(ctx context.Context, tx pgx.Tx) error
+
+// SchemaOption configures ApplySchema.
+type SchemaOption func(*schemaConfig)
+
+type schemaConfig struct{ txSetup TxSetup }
+
+// WithTxSetup installs a TxSetup.
+func WithTxSetup(f TxSetup) SchemaOption { return func(c *schemaConfig) { c.txSetup = f } }
+
+// CompiledSchemaVersion is the version ApplySchema records in
+// glovo.glovo_schema_version.
+func CompiledSchemaVersion() int { return schemaVersion }

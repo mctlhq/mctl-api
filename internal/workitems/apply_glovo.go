@@ -385,6 +385,11 @@ func ApplyGlovoApprovalSchema(ctx context.Context, migrationConnStr, runtimeRole
 		return fmt.Errorf("workitems: begin approval schema tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if cfg.txSetup != nil {
+		if err := cfg.txSetup(ctx, tx); err != nil {
+			return fmt.Errorf("workitems: approval schema tx setup: %w", err)
+		}
+	}
 	for _, k := range []string{"glovo-approval-schema", "glovo-schema"} {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, k); err != nil {
 			return fmt.Errorf("workitems: approval schema lock: %w", err)
@@ -494,20 +499,50 @@ func grantRow(ctx context.Context, tx pgx.Tx, role, tbl string, privs, updateCol
 	return nil
 }
 
+// GlovoApprovalForeignOwned lists schema glovo, and the relations and
+// functions of the approval slice in it, that current_user (the migration
+// role) does not own.
+func GlovoApprovalForeignOwned(ctx context.Context, q dbq.Querier) ([]string, error) {
+	var out []string
+	err := q.QueryRow(ctx, `
+SELECT coalesce(array_agg(x ORDER BY x), '{}') FROM (
+  SELECT 'schema glovo' AS x FROM pg_namespace WHERE nspname = 'glovo' AND pg_get_userbyid(nspowner) <> current_user
+  UNION ALL
+  SELECT 'glovo.' || c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'glovo' AND c.relname = ANY($1) AND pg_get_userbyid(c.relowner) <> current_user
+  UNION ALL
+  SELECT 'glovo.' || p.proname || '()' FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'glovo' AND p.proname = ANY($2) AND pg_get_userbyid(p.proowner) <> current_user) s`,
+		glovoApprovalRelations, glovoApprovalFunctions).Scan(&out)
+	if err != nil {
+		return nil, fmt.Errorf("workitems: approval ownership check: %w", err)
+	}
+	return out, nil
+}
+
+// ApprovalStepForeignOwned is everything ApplyGlovoApprovalSchema refuses on
+// for ownership: the generic block, then the approval slice. The migrator's
+// preflight uses it so the two cannot drift.
+func ApprovalStepForeignOwned(ctx context.Context, q dbq.Querier) ([]string, error) {
+	g, err := GenericForeignOwned(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	a, err := GlovoApprovalForeignOwned(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	return append(g, a...), nil
+}
+
 // checkGlovoApprovalOwnership refuses schema glovo, or a relation or function
 // of this slice in it, that current_user (the migration role) does not own.
 func checkGlovoApprovalOwnership(ctx context.Context, q dbq.Querier) error {
-	var bad int
-	if err := q.QueryRow(ctx, `
-SELECT (SELECT count(*) FROM pg_namespace WHERE nspname = 'glovo' AND pg_get_userbyid(nspowner) <> current_user)
-     + (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-         WHERE n.nspname = 'glovo' AND c.relname = ANY($1) AND pg_get_userbyid(c.relowner) <> current_user)
-     + (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-         WHERE n.nspname = 'glovo' AND p.proname = ANY($2) AND pg_get_userbyid(p.proowner) <> current_user)`,
-		glovoApprovalRelations, glovoApprovalFunctions).Scan(&bad); err != nil {
-		return fmt.Errorf("workitems: approval ownership check: %w", err)
+	foreign, err := GlovoApprovalForeignOwned(ctx, q)
+	if err != nil {
+		return err
 	}
-	if bad != 0 {
+	if len(foreign) != 0 {
 		return errors.New("workitems: schema glovo or an object of the approval schema is not owned by the migration role")
 	}
 	return nil
