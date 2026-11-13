@@ -192,6 +192,8 @@ type e2eOpts struct {
 	noWorker     bool
 	noPurger     bool
 	storeOptions []glovo.Option
+	// configure, when set, adjusts the router options before NewRouter.
+	configure func(e *e2eEnv, o *Options)
 }
 
 func e2eAdminURL(t *testing.T) string {
@@ -353,11 +355,15 @@ func newE2E(t *testing.T, o e2eOpts) *e2eEnv {
 			realNext.ServeHTTP(w, r)
 		})
 	}
-	e.router = NewRouter(Options{
+	ro := Options{
 		AuthMiddleware: mw, OAuthServer: srv, TenantAuthzMode: TenantAuthzPrincipal, PrincipalMembership: e.members,
 		GitReader: newAllowGit("alpha", "beta", "labs", "sys"), GlovoAllowlist: e.store, Glovo: e.routes,
 		mcpHandler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
-	})
+	}
+	if o.configure != nil {
+		o.configure(e, &ro)
+	}
+	e.router = NewRouter(ro)
 
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})))

@@ -94,6 +94,14 @@ var Policies = PolicySet{
 		Reasons:    []string{workitems.GlovoPolicyRuleID},
 		SideEffect: "write",
 	},
+	// The owner's approval of one frozen synthetic basket revision
+	// (mctl-api#1006). It has no side effect: nothing spends it.
+	workitems.GlovoBasketPolicyRuleID: {
+		Version:    workitems.GlovoBasketPolicyVersion,
+		Decision:   "require_approval",
+		Reasons:    []string{workitems.GlovoBasketPolicyRuleID},
+		SideEffect: "none",
+	},
 }
 
 // Policy status values returned by Check.

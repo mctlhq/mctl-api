@@ -1408,6 +1408,22 @@ func main() {
 
 	var draining atomic.Bool
 
+	// Glovo basket MCP (mctl-api#1006): dark unless GLOVO_BASKET_MCP_ENABLED
+	// is true; set without its dependencies or schemas, the boot is refused.
+	basketCtx, cancelBasket := context.WithTimeout(rootCtx, 15*time.Second)
+	// ApprovalPageBaseURL stays empty until the owner approval page
+	// (mctl-api#1007) is mounted; that change sets it to the API's public
+	// origin when the page is enabled.
+	glovoBasketRoutes, err := configureGlovoBasket(basketCtx, glovoBasketDeps{
+		OAuth: oauthServer, Glovo: glovoRoutes, Pool: glovoPoolOf(glovoStore), Ledger: workItemsStore,
+	}, os.LookupEnv)
+	cancelBasket()
+	if err != nil {
+		slog.Error("invalid configuration", "error", err)
+		stopSignals()
+		os.Exit(1)
+	}
+
 	deletionProbeRequired := (cfg.PrincipalDBConfigured && !cfg.PrincipalsDisabled) || os.Getenv("CUSTOMER_DELETION_ENABLED") == "true"
 	signup := signupOptions(cfg, principalStore)
 	if signup != nil && signup.Store != nil {
@@ -1489,6 +1505,7 @@ func main() {
 		PrincipalMembership:            gitReader,
 		GlovoAllowlist:                 glovoAllowlist(glovoStore),
 		Glovo:                          glovoRoutes,
+		GlovoBasket:                    glovoBasketRoutes,
 		GlovoControl:                   glovoControlRoutes,
 		GlovoJoin:                      glovoJoinRoutes,
 		AdminPrincipals:                cfg.adminPrincipals(),
