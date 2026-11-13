@@ -247,13 +247,19 @@ func (h *Handlers) ListIncidents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Scope in SQL, before LIMIT: filtering afterwards drops the caller's
+	// rows whenever other tenants' newer rows fill the page.
+	if tenants, all := user.TenantScope(); !all {
+		f.Tenants = tenants
+	}
+
 	all, err := h.opts.AlertStore.List(r.Context(), f)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list incidents: "+err.Error())
 		return
 	}
 
-	// Post-filter: non-admins see only their accessible tenants.
+	// Defense in depth: the query is already scoped.
 	var items []alerts.Alert
 	for i := range all {
 		if user.IsAdmin() || user.HasTenantAccess(all[i].Tenant) {
@@ -525,41 +531,17 @@ func (h *Handlers) IncidentSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Admins get the global summary; non-admins get a summary scoped to their tenants.
-	if user.IsAdmin() {
-		sum, err := h.opts.AlertStore.Summary(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to get summary: "+err.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, sum)
-		return
+	// One aggregate over every row the caller may see. Counting a page of
+	// List instead capped the total at 50 rows across all tenants.
+	var scope []string
+	if tenants, all := user.TenantScope(); !all {
+		scope = tenants
 	}
-
-	all, err := h.opts.AlertStore.List(r.Context(), alerts.ListFilter{})
+	sum, err := h.opts.AlertStore.Summary(r.Context(), scope)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to get summary: "+err.Error())
 		return
 	}
-
-	sum := &alerts.Summary{
-		ByStatus:   make(map[string]int),
-		BySeverity: make(map[string]int),
-		ByType:     make(map[string]int),
-	}
-	for i := range all {
-		if !user.HasTenantAccess(all[i].Tenant) {
-			continue
-		}
-		if all[i].Status == alerts.StatusResolved || all[i].Status == "suppressed" {
-			continue
-		}
-		sum.ByStatus[all[i].Status]++
-		sum.BySeverity[all[i].Severity]++
-		sum.ByType[all[i].Type]++
-		sum.Total++
-	}
-
 	writeJSON(w, http.StatusOK, sum)
 }
 
