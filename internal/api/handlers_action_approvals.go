@@ -192,10 +192,14 @@ func canSeeActionApproval(u *auth.User, a *workitems.ActionApprovalRequest) bool
 // sees it. The binding is read on the Glovo pool; any failure reads as not
 // visible.
 func (h *Handlers) glovoOwnerSees(ctx context.Context, u *auth.User, a *workitems.ActionApprovalRequest) bool {
-	if h.opts.GlovoApprovals == nil || !workitems.IsGlovoKind(a.ActionKind) || !isGlovoOwnerCandidate(u) {
+	if !workitems.IsGlovoKind(a.ActionKind) || !isGlovoOwnerCandidate(u) {
 		return false
 	}
-	_, b, err := h.opts.GlovoApprovals.ForDecision(ctx, a.ID)
+	d := h.glovoDecisionsFor(a.ActionKind)
+	if d == nil {
+		return false
+	}
+	_, b, err := d.ForDecision(ctx, a.ID)
 	return err == nil && isGlovoOwnerDecider(u, b)
 }
 
@@ -724,7 +728,7 @@ func (h *Handlers) glovoOwnerCheck(w http.ResponseWriter, r *http.Request, user 
 		writeErrorCode(w, http.StatusServiceUnavailable, "unavailable", "cannot decide this approval right now; try again later", nil)
 		return nil, false
 	}
-	d := h.opts.GlovoApprovals
+	d := h.glovoDecisionsFor(cur.ActionKind)
 	if d == nil || !isGlovoOwnerCandidate(user) {
 		return forbid()
 	}
@@ -757,7 +761,7 @@ func (h *Handlers) glovoOwnerCheck(w http.ResponseWriter, r *http.Request, user 
 		}
 		return unavailable(ref.detail)
 	}
-	if !glovo.Default.Open || d.Ready(r.Context()) != nil {
+	if !glovoKindOpen(cur.ActionKind) || d.Ready(r.Context()) != nil {
 		return h.glovoNotReady(w, r, user, cur.ID)
 	}
 	return binding, true
@@ -883,7 +887,7 @@ func (h *Handlers) DecideActionApproval(w http.ResponseWriter, r *http.Request) 
 		err error
 	)
 	if binding != nil {
-		a, err = h.opts.GlovoApprovals.Decide(r.Context(), in)
+		a, err = h.glovoDecisionsFor(cur.ActionKind).Decide(r.Context(), in)
 	} else {
 		a, err = h.opts.WorkItems.DecideActionApproval(r.Context(), in)
 	}
@@ -901,7 +905,11 @@ func (h *Handlers) DecideActionApproval(w http.ResponseWriter, r *http.Request) 
 	extra := map[string]string{"policy_status": h.policyStatusOf(a)}
 	if binding != nil {
 		// Ids and enums only: no args_digest, no basket.
-		extra["order_ref"] = binding.OrderRef
+		if binding.BasketID != "" {
+			extra["basket_ref"] = binding.BasketID + "@" + strconv.FormatInt(binding.BasketRevision, 10)
+		} else {
+			extra["order_ref"] = binding.OrderRef
+		}
 	}
 	h.auditActionApproval(r, user, "action_approval.decision", a, operations.RiskMedium, extra)
 	h.writeApproval(w, http.StatusOK, a)

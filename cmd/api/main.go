@@ -1408,6 +1408,26 @@ func main() {
 
 	var draining atomic.Bool
 
+	// Glovo basket MCP (mctl-api#1006): dark unless GLOVO_BASKET_MCP_ENABLED
+	// is true; set without its dependencies or schemas, the boot is refused.
+	basketCtx, cancelBasket := context.WithTimeout(rootCtx, 15*time.Second)
+	// The owner approval page (mctl-api#1007) is built over the basket
+	// store; GLOVO_BASKET_UI_ENABLED without the basket MCP refuses the boot.
+	basketUIEnv := glovoBasketUIEnvFromOS()
+	glovoBasketRoutes, glovoBasketPage, err := configureGlovoBasket(basketCtx, glovoBasketDeps{
+		OAuth: oauthServer, Glovo: glovoRoutes, Pool: glovoPoolOf(glovoStore), Ledger: workItemsStore,
+		UIEnabled: basketUIEnv.Enabled,
+		Page: func(view mctlapi.GlovoBasketApprovalView) *mctlapi.GlovoBasketApprovalPageOptions {
+			return glovoBasketApprovalOptions(cfg, basketUIEnv, principalResolver, principalAuthz, view, oauthFlowStore(oauthServer))
+		},
+	}, os.LookupEnv)
+	cancelBasket()
+	if err != nil {
+		slog.Error("invalid configuration", "error", err)
+		stopSignals()
+		os.Exit(1)
+	}
+
 	deletionProbeRequired := (cfg.PrincipalDBConfigured && !cfg.PrincipalsDisabled) || os.Getenv("CUSTOMER_DELETION_ENABLED") == "true"
 	signup := signupOptions(cfg, principalStore)
 	if signup != nil && signup.Store != nil {
@@ -1444,6 +1464,7 @@ func main() {
 		OAuthServer:                    oauthServer,
 		IdentityLink:                   identityLinkOptions(cfg, principalStore, principalCache, oauthServer, ghValidator),
 		DevLoopDecide:                  devLoopDecideOptions(cfg, principalResolver, principalAuthz),
+		GlovoBasketApproval:            glovoBasketPage,
 		OAuthUpstream:                  cfg.oauthUpstreamMode(),
 		OAuthZitadel:                   oauthZitadelOptions(cfg, principalStore, oauthServer),
 		SurfaceZitadel:                 surfaceZitadelOptions(cfg),
@@ -1489,6 +1510,7 @@ func main() {
 		PrincipalMembership:            gitReader,
 		GlovoAllowlist:                 glovoAllowlist(glovoStore),
 		Glovo:                          glovoRoutes,
+		GlovoBasket:                    glovoBasketRoutes,
 		GlovoControl:                   glovoControlRoutes,
 		GlovoJoin:                      glovoJoinRoutes,
 		AdminPrincipals:                cfg.adminPrincipals(),

@@ -75,8 +75,8 @@ func TestIsGlovoKindIsThePrefixPredicate(t *testing.T) {
 			t.Errorf("%q is listed but not a Glovo kind", k)
 		}
 	}
-	if len(GlovoActionKinds) != 1 || GlovoActionKinds[0] != "glovo.place_order_fake" {
-		t.Errorf("M1 has exactly one Glovo kind: %v", GlovoActionKinds)
+	if len(GlovoActionKinds) != 2 || GlovoActionKinds[0] != "glovo.place_order_fake" || GlovoActionKinds[1] != "glovo.basket_approval" {
+		t.Errorf("the Glovo kinds are the order approval and the basket approval: %v", GlovoActionKinds)
 	}
 }
 
