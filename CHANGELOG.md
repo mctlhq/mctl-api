@@ -1,5 +1,24 @@
 # Changelog
 
+## [4.157.0](https://github.com/mctlhq/mctl-api/compare/4.156.2...4.157.0) (2026-11-14)
+
+
+### Features
+
+* **deploy:** digest-bound owner grants for preview apply ([bc10d9f](https://github.com/mctlhq/mctl-api/commit/bc10d9f0c7c9c25d6cc07b2d2dddab0ebd73f09e))
+* **deploy:** digest-bound owner grants for preview apply ([3c6cc77](https://github.com/mctlhq/mctl-api/commit/3c6cc778d78ccc1b38a0344eb5159568548e7ba2))
+
+
+### Bug Fixes
+
+* **approvals:** match the requester by principal id on decide ([02c3847](https://github.com/mctlhq/mctl-api/commit/02c3847def033fb936a8510de06c7652adb858a1))
+* canonical evidence numbers, trailing JSON, disabled non-humans ([0a05418](https://github.com/mctlhq/mctl-api/commit/0a054186a4050f459f25ea6d22055a1ed157b4f7))
+* **deploy:** omit unset apply params from preview-deploy submits ([1e9c9a7](https://github.com/mctlhq/mctl-api/commit/1e9c9a77fcc78b7efcb5c4b2605cdab32db0a16f))
+* gated P3s in support TTL, bridge read grants, work-item grants ([5764ce5](https://github.com/mctlhq/mctl-api/commit/5764ce59b50d2c313fed03f91158552d4ec69b46))
+* gated P3s in support TTL, bridge read grants, work-item grants ([28a6d91](https://github.com/mctlhq/mctl-api/commit/28a6d91ee0998eb85f9bb2d92bec7d1b5c8b56ec))
+* **incidents:** refuse lifecycle state on create, fail partial evidence ([e1bdbed](https://github.com/mctlhq/mctl-api/commit/e1bdbed8e2ddfdbd8c2fbe12130a8fe46e78f28b))
+* **incidents:** refuse lifecycle state on create, fail partial evidence ([6de73a6](https://github.com/mctlhq/mctl-api/commit/6de73a65dcf4c8a4816da970af661b158749650e))
+
 ## [4.156.2](https://github.com/mctlhq/mctl-api/compare/4.156.1...4.156.2) (2026-11-14)
 
 
