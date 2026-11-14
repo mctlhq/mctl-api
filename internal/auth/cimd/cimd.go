@@ -551,16 +551,16 @@ func parseDocument(body []byte, clientID string) (Document, error) {
 			return bad("redirect_uri %q must not contain a fragment or userinfo", s)
 		}
 		// An allowlist, not a denylist: https with a host, or http on a
-		// loopback IP literal (RFC 8252 section 7.3). url.Parse lower-cases
-		// the scheme. Any other entry that passed the checks above is
-		// dropped rather than refusing the document, so a client that also
-		// lists, say, http://localhost/callback (Codex does) keeps its usable
-		// entries; RedirectAllowed only ever sees the accepted set. A
+		// loopback host (RFC 8252 section 7.3, see isLoopbackHost). url.Parse
+		// lower-cases the scheme. Any other entry that passed the checks
+		// above is dropped rather than refusing the document, so a client
+		// that also lists, say, a custom scheme keeps its usable entries;
+		// RedirectAllowed only ever sees the accepted set. A
 		// malformed entry (relative, fragment, userinfo, too long) stays
 		// fatal by choice, even when its scheme would have been dropped.
 		switch {
 		case u.Scheme == "https" && u.Host != "" && u.Hostname() != "":
-		case u.Scheme == "http" && isLoopbackIP(u.Hostname()):
+		case u.Scheme == "http" && isLoopbackHost(u.Hostname()):
 		default:
 			dropped = append(dropped, s)
 			continue
@@ -584,9 +584,10 @@ func parseDocument(body []byte, clientID string) (Document, error) {
 }
 
 // RedirectAllowed reports whether uri matches an entry of the document's
-// redirect_uris: exactly, or (RFC 8252 §7.3) for an http entry on the IP
-// literal 127.0.0.1 or [::1], with any port. Scheme, host, path and query
-// must still match exactly. "localhost" gets no port exemption (§8.3).
+// redirect_uris: exactly, or (RFC 8252 §7.3) for an http entry on a loopback
+// host (127.0.0.1, [::1] or localhost), with any port. Scheme, host, path and
+// query must still match exactly, so localhost and 127.0.0.1 never stand in
+// for each other.
 func RedirectAllowed(entries []string, uri string) bool {
 	if uri == "" || strings.Contains(uri, "\\") {
 		return false
@@ -597,7 +598,7 @@ func RedirectAllowed(entries []string, uri string) bool {
 		}
 	}
 	u, err := url.Parse(uri)
-	if err != nil || u.Scheme != "http" || u.User != nil || u.Fragment != "" || !isLoopbackIP(u.Hostname()) {
+	if err != nil || u.Scheme != "http" || u.User != nil || u.Fragment != "" || !isLoopbackHost(u.Hostname()) {
 		return false
 	}
 	for _, e := range entries {
@@ -605,7 +606,7 @@ func RedirectAllowed(entries []string, uri string) bool {
 			continue
 		}
 		eu, err := url.Parse(e)
-		if err != nil || eu.Scheme != "http" || eu.User != nil || eu.Fragment != "" || !isLoopbackIP(eu.Hostname()) {
+		if err != nil || eu.Scheme != "http" || eu.User != nil || eu.Fragment != "" || !isLoopbackHost(eu.Hostname()) {
 			continue
 		}
 		if eu.Hostname() == u.Hostname() && eu.EscapedPath() == u.EscapedPath() && eu.RawQuery == u.RawQuery && eu.ForceQuery == u.ForceQuery {
@@ -615,9 +616,18 @@ func RedirectAllowed(entries []string, uri string) bool {
 	return false
 }
 
-// isLoopbackIP accepts only the host text 127.0.0.1 or ::1, so other spellings
-// of the same addresses are refused too. This is deliberately stricter
-// than RFC 8252 section 7.3, which allows any loopback address: no known native
-// client uses another one, and every accepted form widens what a document can
-// name. Do not widen it to 127.0.0.0/8 without such a client (mctl-api#687).
-func isLoopbackIP(h string) bool { return h == "127.0.0.1" || h == "::1" }
+// isLoopbackHost accepts only the host text 127.0.0.1, ::1 or localhost, so
+// other spellings of the same addresses (127.000.000.001, [::0001],
+// LOCALHOST, localhost.) are refused too. This is deliberately stricter than
+// RFC 8252 section 7.3, which allows any loopback address: every accepted form
+// widens what a document can name. Do not widen it to 127.0.0.0/8 without a
+// native client that needs it (mctl-api#687).
+//
+// localhost is accepted although RFC 8252 section 8.3 discourages it, because
+// a real client needs it: Claude Code's document lists only
+// http://localhost/callback and http://127.0.0.1/callback, and it sends the
+// localhost form with an ephemeral port. The section 8.3 risk is the client
+// machine resolving localhost to a non-loopback address; browsers pin
+// localhost to loopback, and the entry can only come from a document on an
+// exactly allowlisted host (OAUTH_CIMD_ALLOWED_HOSTS), never from the caller.
+func isLoopbackHost(h string) bool { return h == "127.0.0.1" || h == "::1" || h == "localhost" }

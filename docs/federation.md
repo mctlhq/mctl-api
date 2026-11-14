@@ -596,18 +596,22 @@ These limits are deliberate:
   (10 per minute) is per host and shared by every document on it, and a
   `.suffix` entry lets a caller pick hosts and fill the bounded rate map.
 - **Unusable redirect entries are dropped.** A well-formed `redirect_uris`
-  entry that is neither https nor loopback-IP http (for example
-  `http://localhost/callback`, which Codex lists) is ignored rather than
-  refusing the document; a document left with none is refused, and a malformed
-  entry still refuses it. The `redirect_uri` of a request must match the
-  accepted set exactly (loopback IPs with any port), with no normalisation. A
+  entry that is neither https nor loopback http (for example a custom
+  scheme) is ignored rather than refusing the document; a document left with
+  none is refused, and a malformed entry still refuses it. The `redirect_uri`
+  of a request must match the accepted set exactly (loopback hosts with any
+  port), with no normalisation. A
   refused `redirect_uri` is logged with the dropped entries
   (`oauth: redirect_uri not in the client metadata document`).
-- **Loopback is the host spelled exactly `127.0.0.1` or `[::1]`.** The check
-  compares text, so other loopback addresses and other spellings of these two
-  (`127.000.000.001`, `[::0001]`) are refused. This is stricter than RFC 8252
-  section 7.3, which allows any loopback address. Widen it only for a real
-  native client that needs it.
+- **Loopback is the host spelled exactly `127.0.0.1`, `[::1]` or
+  `localhost`.** The check compares text, so other loopback addresses and
+  other spellings (`127.000.000.001`, `[::0001]`, `LOCALHOST`, `localhost.`)
+  are refused, and `localhost` and `127.0.0.1` never match each other's
+  entries. This is stricter than RFC 8252 section 7.3, which allows any
+  loopback address. Widen it only for a real native client that needs it.
+  `localhost` is accepted for that reason, despite section 8.3: Claude Code's
+  document (`https://claude.ai/oauth/claude-code-client-metadata`) lists
+  `http://localhost/callback` and sends that form with an ephemeral port.
 
 ## `MCTL_FEDERATION_DISABLED`: the kill switch
 
