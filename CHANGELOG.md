@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.156.2](https://github.com/mctlhq/mctl-api/compare/4.156.1...4.156.2) (2026-11-14)
+
+
+### Bug Fixes
+
+* **agentregistry:** fail ListVersions and ListPromotions on read errors ([8eb86c3](https://github.com/mctlhq/mctl-api/commit/8eb86c3198e36ab7c0456d3a074014e14f9c8ec5))
+* **api:** read service status in project apps so 404 means absent ([9b9f7bb](https://github.com/mctlhq/mctl-api/commit/9b9f7bb28c7e6814950e208f7253d2babfb386ef))
+* **api:** scope service status to the caller's tenant, fail closed ([0e2dcd9](https://github.com/mctlhq/mctl-api/commit/0e2dcd908a83c6da474bd22256bd4089b48c056e))
+* **argoarchive:** list steps oldest first and fail partial listings ([4ff0f7b](https://github.com/mctlhq/mctl-api/commit/4ff0f7bcf72e612c69cf5922452ba6071fa92220))
+* fail partial reads in argoarchive and agentregistry lists ([bf5f0d9](https://github.com/mctlhq/mctl-api/commit/bf5f0d9bba376678f3236cb29f6e1091e0518bd1))
+* **loki:** match the service's logs by exact release, not pod prefix ([6074f87](https://github.com/mctlhq/mctl-api/commit/6074f878c0b053ba85b5d4627e069216bacc92af))
+* scope loki logs and service status to the exact tenant service ([7cfa9bd](https://github.com/mctlhq/mctl-api/commit/7cfa9bdef561d2cf3398c718619ac36cc6f90155))
+* **securityfindings:** make observation dedup per tenant ([073d466](https://github.com/mctlhq/mctl-api/commit/073d466ee8d29dd3b13752b64bbcbd5b7fa300dc))
+* **securityfindings:** make observation dedup per tenant ([09ec2a0](https://github.com/mctlhq/mctl-api/commit/09ec2a0b91edcee59d5d1dda54dbd79062ce6a55))
+
 ## [4.156.1](https://github.com/mctlhq/mctl-api/compare/4.156.0...4.156.1) (2026-11-13)
 
 
