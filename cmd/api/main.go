@@ -694,14 +694,16 @@ func main() {
 		}
 	}
 
-	// Deploy-plan store (mctl-api#866): immutable preview plans, kept in the
-	// same database as the work items and behind the same WORK_ITEMS_DISABLED
-	// kill switch. Nil makes POST /api/v1/deploy/plan and
-	// GET /api/v1/deploy/plans/{id} answer 503.
+	// Deploy-plan store (mctl-api#866): immutable preview plans, behind the
+	// same WORK_ITEMS_DISABLED kill switch as the work items. It opens its own
+	// source (deployPlanStoreSource), never WORK_ITEMS_DB_URL: the store
+	// creates its tables at boot, so it needs a role with CREATE, while
+	// WORK_ITEMS_DB_URL may name a DML-only role (mctl-api#1006). Nil makes
+	// POST /api/v1/deploy/plan and GET /api/v1/deploy/plans/{id} answer 503.
 	var deployPlans mctlapi.DeployPlanStore
-	if !workItemsDisabled && workItemsDBURL != "" {
+	if deployPlanDBURL := deployPlanStoreSource(); !workItemsDisabled && deployPlanDBURL != "" {
 		dps, dpErr := initStore(initCtx, storeFailures, "deploy plans", func(ctx context.Context) (*deployplan.Store, error) {
-			return deployplan.NewStore(ctx, workItemsDBURL)
+			return deployplan.NewStore(ctx, deployPlanDBURL)
 		})
 		if dpErr != nil {
 			slog.Error("deploy-plan store init failed; deploy plan routes will return 503", "error", dpErr)
@@ -2912,6 +2914,17 @@ func workItemsStoreSource() (dbURL string, disabled bool) {
 		dbURL = postgresURL(os.Getenv("AUDIT_DB_URL"))
 	}
 	return dbURL, killSwitchOn(os.Getenv("WORK_ITEMS_DISABLED"))
+}
+
+// deployPlanStoreSource is the URL the deploy-plan store opens:
+// DEPLOY_PLAN_DB_URL, else AUDIT_DB_URL. It deliberately ignores
+// WORK_ITEMS_DB_URL, which may name a DML-only role that cannot run the
+// store's boot-time DDL (mctl-api#1006).
+func deployPlanStoreSource() string {
+	if u := postgresURL(os.Getenv("DEPLOY_PLAN_DB_URL")); u != "" {
+		return u
+	}
+	return postgresURL(os.Getenv("AUDIT_DB_URL"))
 }
 
 // workItemsStoreConfigured is whether main will try to open the store.

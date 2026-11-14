@@ -84,6 +84,27 @@ func TestWorkItemsStoreSource(t *testing.T) {
 	}
 }
 
+// The deploy-plan store runs DDL at boot, so it must never follow
+// WORK_ITEMS_DB_URL (which may be a DML-only role, mctl-api#1006):
+// DEPLOY_PLAN_DB_URL first, then AUDIT_DB_URL.
+func TestDeployPlanStoreSource(t *testing.T) {
+	t.Setenv("WORK_ITEMS_DB_URL", "postgres://work/db")
+	t.Setenv("AUDIT_DB_URL", "postgres://audit/db")
+	t.Setenv("DEPLOY_PLAN_DB_URL", "")
+	if u := deployPlanStoreSource(); u != postgresURL("postgres://audit/db") {
+		t.Fatalf("work-items URL set, no own URL: got %q, want the audit URL", u)
+	}
+	t.Setenv("DEPLOY_PLAN_DB_URL", "postgres://plans/db")
+	if u := deployPlanStoreSource(); u != postgresURL("postgres://plans/db") {
+		t.Fatalf("own URL set: got %q", u)
+	}
+	t.Setenv("DEPLOY_PLAN_DB_URL", "")
+	t.Setenv("AUDIT_DB_URL", "")
+	if u := deployPlanStoreSource(); u != "" {
+		t.Fatalf("only the work-items URL set: got %q, want empty (store off)", u)
+	}
+}
+
 // MCTL_AGENT_RECEIPT_MAX_AGE (mctl-api#773) refuses the boot on a value that
 // does not parse, is not positive or exceeds the cap, and defaults to 5m.
 func TestConfigValidate_AgentReceiptMaxAge(t *testing.T) {
