@@ -300,6 +300,15 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An agent-deploy tenant deploys through a stored plan and a human grant
+	// only (mctl-api#1031): POST /api/v1/deploy/apply submits preview-deploy
+	// itself and never comes through here. Direct deploys and previews are
+	// refused for it whoever calls, admins included; CI OIDC, authorized by
+	// authorizeCIDeploy above, is the one caller that passes.
+	if !ciAuthorized && agentDeployGated(opName) && !h.refuseAgentDeployDirect(w, r, user, op, tenantParam) {
+		return
+	}
+
 	if opName == "preview-deploy" {
 		if err := operations.PreparePreviewDeployInput(input); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
