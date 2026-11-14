@@ -247,7 +247,7 @@ func TestDeployApprovalPage_OwnerApprovesWhatWasShown(t *testing.T) {
 	}
 
 	res := e.confirm(ck, form, "approve")
-	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "Deploy approved") {
+	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "Deploy approved") || !strings.Contains(res.Body.String(), "can now apply this plan once") {
 		t.Fatalf("confirm = %d %s", res.Code, res.Body.String())
 	}
 	a := e.approval(id)
@@ -279,7 +279,8 @@ func TestDeployApprovalPage_OwnerRejects(t *testing.T) {
 	id, _ := e.pendingGrant("reject")
 	_, ck, form := e.signIn(id, "z-owner")
 	res := e.confirm(ck, form, "reject")
-	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "Deploy rejected") {
+	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "Deploy rejected") ||
+		!strings.Contains(res.Body.String(), "cannot apply this plan") || strings.Contains(res.Body.String(), "can now apply") {
 		t.Fatalf("confirm = %d %s", res.Code, res.Body.String())
 	}
 	if a := e.approval(id); a.State != workitems.ApprovalDenied || a.DecidedByPrincipalID != glovoOwnerPRN {

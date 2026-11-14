@@ -16,6 +16,7 @@ import (
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/auth/flowstore"
 	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/workitems"
@@ -118,7 +119,7 @@ type grantFixture struct {
 	plans   []string
 }
 
-func newGrantFixture(t *testing.T, values string) *grantFixture {
+func newGrantFixture(t *testing.T, values string, edit ...func(*mctlapi.Options)) *grantFixture {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
@@ -153,7 +154,7 @@ func newGrantFixture(t *testing.T, values string) *grantFixture {
 	// acme/web is connected to acme in the portal.
 	portal := httptest.NewServer(http.HandlerFunc(bindingAnswer(true)))
 	t.Cleanup(portal.Close)
-	f.router = mctlapi.NewRouter(mctlapi.Options{
+	opts := mctlapi.Options{
 		Registry: operations.NewRegistry(), GitReader: &fakeGitReader{tenants: []gitops.Tenant{{Name: "acme"}}}, ArgoCD: &fakeArgoCD{}, AuditLog: f.log, Executor: f.exec,
 		BackstageInternalURL: portal.URL, BackstageGithubAppConnectToken: "tok",
 		SourceRepoBindings:  repoBindings{},
@@ -161,7 +162,11 @@ func newGrantFixture(t *testing.T, values string) *grantFixture {
 		PlatformDomain: "mctl.ai", Clock: func() time.Time { return f.now },
 		WorkItems: wi, TenantAuthzMode: mctlapi.TenantAuthzPrincipal, PrincipalMembership: f.members,
 		Principals: f.prins, AdminPrincipals: map[string]bool{grantRootPRN: true},
-	})
+	}
+	for _, e := range edit {
+		e(&opts)
+	}
+	f.router = mctlapi.NewRouter(opts)
 	f.dev = f.human(t, "alice", grantDevPRN)
 	f.owner = f.human(t, "olga", grantOwnerPRN)
 	f.root = f.human(t, "root", grantRootPRN)
@@ -467,4 +472,31 @@ func TestPreviewDeploy_ServerSetParamsRefusedInBody(t *testing.T) {
 	if len(f.exec.submitted) != 0 {
 		t.Fatalf("submitted = %v", f.exec.submitted)
 	}
+}
+
+// The request answer carries the page link when the decide page is mounted,
+// and says the grant cannot be decided yet when it is not.
+func TestDeployApprovalRequest_DecideLink(t *testing.T) {
+	dark := newGrantFixture(t, faithfulValues)
+	body := dark.request(t, dark.dev, dark.newPlan(t, faithfulIntent()), http.StatusCreated)
+	if _, ok := body["decide_url"]; ok || body["decide_unavailable"] == nil {
+		t.Fatalf("dark page: %v", body)
+	}
+
+	lit := newGrantFixture(t, faithfulValues, func(o *mctlapi.Options) {
+		o.DeployApproval = &mctlapi.DeployApprovalPageOptions{ProviderName: "zitadel", Issuer: "https://auth.example",
+			ClientID: "id", ClientSecret: "secret", BaseURL: "https://api.example", Principals: refusingPrincipals{},
+			Authz: &auth.PrincipalAuthz{}, Flow: &flowstore.PostgresStore{}}
+	})
+	body = lit.request(t, lit.dev, lit.newPlan(t, faithfulIntent()), http.StatusCreated)
+	id := body["approval"].(map[string]any)["id"].(string)
+	if body["decide_url"] != "https://api.example/deploy/approvals/"+id || body["decide_unavailable"] != nil {
+		t.Fatalf("mounted page: %v", body)
+	}
+}
+
+type refusingPrincipals struct{}
+
+func (refusingPrincipals) ResolvePrincipal(context.Context, auth.Identity) (string, error) {
+	return "", auth.ErrIdentityRefused
 }

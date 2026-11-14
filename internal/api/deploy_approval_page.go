@@ -604,13 +604,12 @@ func (h *Handlers) handleDeployApprovalConfirm(w http.ResponseWriter, r *http.Re
 	h.auditActionApproval(r, user, "action_approval.decision", decided, operations.RiskMedium,
 		map[string]string{"surface": deployPageAuditOp})
 	h.auditDeployPage(r, user, id, c.ApprovalRef, "succeeded", decision)
-	title := "Deploy approved"
+	title, outcome := "Deploy approved", "The assistant that asked can now apply this plan once. Nothing was deployed yet."
 	if decision == "reject" {
-		title = "Deploy rejected"
+		title, outcome = "Deploy rejected", "The assistant that asked cannot apply this plan. Nothing was deployed."
 	}
 	shown.approval = decided
-	d.renderPage(w, http.StatusOK, title, append(shown.lines(id.Display),
-		"The assistant that asked can now apply this plan once. Nothing was deployed yet."), deployPageData{Diff: shown.plan.Diff})
+	d.renderPage(w, http.StatusOK, title, append(shown.lines(id.Display), outcome), deployPageData{Diff: shown.plan.Diff})
 }
 
 // auditDeployPage records what the page itself decided. Ids only.
