@@ -33,6 +33,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -104,6 +105,19 @@ type listBucketResult struct {
 
 // ListSteps returns every archived step log for a workflow, oldest first.
 //
+// "Oldest" is the archive's LastModified: Argo's wait sidecar uploads a
+// step's log when the step finishes, so it is the step's completion time.
+// The listing carries no start time (the object layout has none, and the pod
+// name's suffix is a hash, not a sequence), so this is the closest real time
+// the archive holds. Ties break on the object key so the order is stable.
+// S3 itself lists in key order, which is alphabetical by step name and says
+// nothing about when a step ran.
+//
+// A listing that cannot be read completely is an error, never a shorter
+// list: a page that says it is truncated but gives no continuation token, a
+// workflow with more pages than the cap, and an object with no
+// LastModified (it cannot be placed in time).
+//
 // An empty result is not an error: it means nothing was archived under
 // that workflow name — either the name is wrong, the run predates the
 // bucket's 30-day lifecycle window, or no step ever produced output.
@@ -122,8 +136,10 @@ func (c *Client) ListSteps(ctx context.Context, workflow string) ([]StepLog, err
 
 	// Bounded loop: a workflow has a handful of steps, so pagination is
 	// defensive rather than expected. The cap stops a malformed or
-	// looping continuation token from spinning forever.
-	for page := 0; page < 20; page++ {
+	// looping continuation token from spinning forever; running into it is
+	// a failed read, not the end of the list.
+	complete := false
+	for page := 0; page < maxListPages; page++ {
 		params := map[string]string{
 			"list-type": "2",
 			"prefix":    prefix,
@@ -147,6 +163,9 @@ func (c *Client) ListSteps(ctx context.Context, workflow string) ([]StepLog, err
 			if pod == "" {
 				continue
 			}
+			if obj.LastModified.IsZero() {
+				return nil, fmt.Errorf("argoarchive: listing entry %q has no LastModified; step order unknown", obj.Key)
+			}
 			steps = append(steps, StepLog{
 				Step:         strings.TrimPrefix(pod, workflow+"-"),
 				Pod:          pod,
@@ -156,14 +175,30 @@ func (c *Client) ListSteps(ctx context.Context, workflow string) ([]StepLog, err
 			})
 		}
 
-		if !result.IsTruncated || result.NextContinuationToken == "" {
+		if !result.IsTruncated {
+			complete = true
 			break
+		}
+		if result.NextContinuationToken == "" {
+			return nil, fmt.Errorf("argoarchive: listing page %d is truncated but has no continuation token", page+1)
 		}
 		continuation = result.NextContinuationToken
 	}
+	if !complete {
+		return nil, fmt.Errorf("argoarchive: listing for %q did not end within %d pages", workflow, maxListPages)
+	}
 
+	sort.SliceStable(steps, func(i, j int) bool {
+		if !steps[i].LastModified.Equal(steps[j].LastModified) {
+			return steps[i].LastModified.Before(steps[j].LastModified)
+		}
+		return steps[i].Key < steps[j].Key
+	})
 	return steps, nil
 }
+
+// maxListPages caps ListSteps' pagination (1000 keys per page).
+const maxListPages = 20
 
 // mainLogName is the exact object name Argo's wait sidecar uploads a step's
 // log as. Anything else under a pod's prefix (output artifacts, directory
