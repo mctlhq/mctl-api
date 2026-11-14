@@ -1,5 +1,19 @@
 # Changelog
 
+## [4.158.0](https://github.com/mctlhq/mctl-api/compare/4.157.0...4.158.0) (2026-11-14)
+
+
+### Features
+
+* **api:** refuse direct deploys for agent-deploy tenants ([b3774c8](https://github.com/mctlhq/mctl-api/commit/b3774c84f2f01e6eb6ff15bd0155cb05171ff05f))
+* **api:** refuse direct deploys for agent-deploy tenants ([a609b91](https://github.com/mctlhq/mctl-api/commit/a609b91bc9f4b485efe84b338da5e31dc2fee5c3))
+
+
+### Bug Fixes
+
+* **operations:** cap create-tenant names at 31 characters ([3bfe868](https://github.com/mctlhq/mctl-api/commit/3bfe868bde17c66c122cc8bb49503f85f2b75bee))
+* **operations:** cap create-tenant names at 31 characters ([3798f34](https://github.com/mctlhq/mctl-api/commit/3798f341f56878dc021fbc396a3085ebc4256eb7))
+
 ## [4.157.0](https://github.com/mctlhq/mctl-api/compare/4.156.2...4.157.0) (2026-11-14)
 
 
