@@ -186,6 +186,13 @@ var reservedProviderNames = map[string]bool{
 	ProviderPrincipal: true,
 }
 
+// IsReservedProviderName reports whether name is an identity namespace of a
+// built-in principal type (or the legacy Dex slot), which a configuration
+// that names one federated machine user must never point at.
+func IsReservedProviderName(name string) bool {
+	return reservedProviderNames[name] || name == ProviderDex
+}
+
 // reservedNameExempt reports whether p is one of the built-in JWT providers
 // that own a reserved namespace: the local-OAuth provider ("github", design.md
 // "The contract") and the GitHub Actions provider ("github-actions").

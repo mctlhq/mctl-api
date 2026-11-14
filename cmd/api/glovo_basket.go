@@ -46,6 +46,10 @@ type glovoBasketDeps struct {
 	// or returns nil when the page stays off (it logs what is missing). It
 	// is called only when the basket MCP is on.
 	Page func(view api.GlovoBasketApprovalView) *api.GlovoBasketApprovalPageOptions
+	// Join, when set, is handed the basket store, the resolver and the
+	// approval page (nil when off) once the basket MCP is up, for the basket
+	// join API. It is not called when the basket MCP stays off.
+	Join func(store *glovobasket.PGStore, resolver *scope.Resolver, page *api.GlovoBasketApprovalPageOptions)
 }
 
 // configureGlovoBasket wires the Glovo basket MCP (mctl-api#1006). It is dark:
@@ -95,10 +99,13 @@ func configureGlovoBasketMCP(ctx context.Context, d glovoBasketDeps, lookup func
 	if err := workitems.VerifyGlovoApprovalSchema(ctx, d.Pool); err != nil {
 		return nil, nil, fmt.Errorf("glovo basket: approval schema: %w", err)
 	}
-	if err := glovobasket.VerifySchema(ctx, d.Pool); err != nil {
+	version, err := glovobasket.VerifySchemaVersion(ctx, d.Pool)
+	if err != nil {
 		return nil, nil, fmt.Errorf("glovo basket: %w", err)
 	}
-	store := &glovobasket.PGStore{Pool: d.Pool}
+	// The store writes the binding snapshot itself only against schema 2;
+	// against 1 (not migrated yet) it writes what it always did.
+	store := &glovobasket.PGStore{Pool: d.Pool, SchemaVersion: version}
 	var page *api.GlovoBasketApprovalPageOptions
 	if d.Page != nil {
 		page = d.Page(api.NewGlovoBasketApprovalView(store))
@@ -106,6 +113,9 @@ func configureGlovoBasketMCP(ctx context.Context, d glovoBasketDeps, lookup func
 	h, err := glovobasket.NewHandler(basketMCPConfig(store, d.Glovo.Resolver, page))
 	if err != nil {
 		return nil, nil, err
+	}
+	if d.Join != nil {
+		d.Join(store, d.Glovo.Resolver, page)
 	}
 	pool := d.Pool
 	return &api.GlovoBasketRoutes{

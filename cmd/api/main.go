@@ -62,6 +62,8 @@ import (
 	"github.com/mctlhq/mctl-api/internal/ghtoken"
 	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/glovo"
+	"github.com/mctlhq/mctl-api/internal/glovo/scope"
+	"github.com/mctlhq/mctl-api/internal/glovobasket"
 	"github.com/mctlhq/mctl-api/internal/governance"
 	"github.com/mctlhq/mctl-api/internal/humaninput"
 	"github.com/mctlhq/mctl-api/internal/k8s"
@@ -1416,7 +1418,18 @@ func main() {
 	// The owner approval page (mctl-api#1007) is built over the basket
 	// store; GLOVO_BASKET_UI_ENABLED without the basket MCP refuses the boot.
 	basketUIEnv := glovoBasketUIEnvFromOS()
+	// Basket join API for the separate basket service: dark unless
+	// GLOVO_BASKET_JOIN_ENABLED and the service identity are set; built over
+	// the basket MCP, so it stays off while that is off. A wrong value is
+	// logged and leaves it off.
+	var basketJoinDeps *glovoBasketJoinDeps
 	glovoBasketRoutes, glovoBasketPage, err := configureGlovoBasket(basketCtx, glovoBasketDeps{
+		Join: func(store *glovobasket.PGStore, resolver *scope.Resolver, page *mctlapi.GlovoBasketApprovalPageOptions) {
+			basketJoinDeps = &glovoBasketJoinDeps{Tokens: oauthServer, Principals: principalResolver, Resolver: resolver, Approvals: store}
+			if page != nil {
+				basketJoinDeps.PageBaseURL = page.BaseURL
+			}
+		},
 		OAuth: oauthServer, Glovo: glovoRoutes, Pool: glovoPoolOf(glovoStore), Ledger: workItemsStore,
 		UIEnabled: basketUIEnv.Enabled,
 		Page: func(view mctlapi.GlovoBasketApprovalView) *mctlapi.GlovoBasketApprovalPageOptions {
@@ -1428,6 +1441,10 @@ func main() {
 		slog.Error("invalid configuration", "error", err)
 		stopSignals()
 		os.Exit(1)
+	}
+	glovoBasketJoinRoutes, gbjErr := configureGlovoBasketJoin(os.LookupEnv, basketJoinDeps)
+	if gbjErr != nil {
+		slog.Error("glovo basket join disabled", "error", gbjErr)
 	}
 
 	deletionProbeRequired := (cfg.PrincipalDBConfigured && !cfg.PrincipalsDisabled) || os.Getenv("CUSTOMER_DELETION_ENABLED") == "true"
@@ -1520,6 +1537,7 @@ func main() {
 		GlovoBasket:                    glovoBasketRoutes,
 		GlovoControl:                   glovoControlRoutes,
 		GlovoJoin:                      glovoJoinRoutes,
+		GlovoBasketJoin:                glovoBasketJoinRoutes,
 		AdminPrincipals:                cfg.adminPrincipals(),
 		RequireRegisteredPolicy:        cfg.requireRegisteredPolicy(),
 		Clock:                          approvalClock,
