@@ -164,6 +164,10 @@ var governedAgentTools = toolSet(
 	"mctl_deploy_analyze",
 	// Stores an immutable plan row; not a read verb.
 	"mctl_deploy_plan",
+	// Opens a pending grant request; grants nothing (mctl-api#1026).
+	"mctl_request_deploy_approval",
+	// Spends an owner's grant and submits preview-deploy (mctl-api#1026).
+	"mctl_deploy_apply",
 	"mctl_add_custom_domain",
 	"mctl_approve_dev_loop",
 	"mctl_bind_agent_release",

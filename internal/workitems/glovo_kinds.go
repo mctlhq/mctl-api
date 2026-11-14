@@ -96,11 +96,11 @@ func IsGlovoKind(kind string) bool { return strings.HasPrefix(kind, glovoKindPre
 
 // ErrApprovalKindNotSpendable: a generic spend or settle path met a Glovo row
 // (409 approval_kind_not_spendable_here).
-var ErrApprovalKindNotSpendable = errors.New("glovo action approvals are not spendable through the generic routes")
+var ErrApprovalKindNotSpendable = errors.New("glovo and deploy action approvals are not spendable through the generic routes")
 
 // ErrApprovalKindNotCreatable: the generic create route was given a Glovo kind
 // (400 approval_kind_not_creatable_here).
-var ErrApprovalKindNotCreatable = errors.New("glovo action approvals are not creatable through the generic route")
+var ErrApprovalKindNotCreatable = errors.New("glovo and deploy action approvals are not creatable through the generic route")
 
 // GlovoBinding is one row of glovo.approval_bindings: what the owner's
 // approval is bound to. Every field except CommandID is immutable once written.

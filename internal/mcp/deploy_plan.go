@@ -77,6 +77,70 @@ func (s *Server) toolGetDeployPlan() (mcplib.Tool, server.ToolHandlerFunc) {
 	return tool, handler
 }
 
+func (s *Server) toolRequestDeployApproval() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_request_deploy_approval",
+		mcplib.WithTitleAnnotation("Request Deploy Approval"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(true),
+		mcplib.WithDescription(`Ask for the human grant a deploy plan needs before it can be applied. Returns a pending approval (aar_...) bound to the plan's id and digest.
+
+This grants nothing. An owner of the plan's tenant decides it on a page where they sign in fresh; no tool, token or agent can decide it, and confirm is not a thing here. Show the person the plan's diff and ask them to approve it there.
+
+Calling again for the same plan returns the same approval with its current state (pending, approved, denied, consumed or expired), so use it to check whether the owner has decided.
+
+Refused with deploy_apply_not_reproducible when the plan cannot be applied as planned: the intent changes runtime, env, resources or secrets (preview-deploy renders the gitops values), or the build context is not the repository root.`),
+		mcplib.WithString("plan_id", mcplib.Required(), mcplib.Description("Plan id (dpl_...), as returned by mctl_deploy_plan")),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		id, err := req.RequireString("plan_id")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		out, err := s.deployPlanRequest(ctx, http.MethodPost, "/api/v1/deploy/plans/"+url.PathEscape(id)+"/approval", map[string]any{})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to request deploy approval: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(out)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolDeployApply() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_deploy_apply",
+		mcplib.WithTitleAnnotation("Apply Deploy Plan"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
+		mcplib.WithDescription(`Apply an approved deploy plan: spend the owner's grant once and start the preview deploy exactly as planned (same preview id, host, gitops commit and image revision). Returns the workflow and the preview URL.
+
+Needs the approval id from mctl_request_deploy_approval, decided by an owner of the tenant. Without an approved grant for this exact plan the apply is refused (deploy_apply_grant_required, approval_intent_mismatch, approval_not_approved, approval_consumed, approval_expired); there is no confirm parameter and none is accepted. A grant is single use: after a failed submit, request a new one.`),
+		mcplib.WithString("plan_id", mcplib.Required(), mcplib.Description("Plan id (dpl_...)")),
+		mcplib.WithString("approval_id", mcplib.Required(), mcplib.Description("Approval id (aar_...) from mctl_request_deploy_approval, approved by a tenant owner")),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		plan, err := req.RequireString("plan_id")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		approval, err := req.RequireString("approval_id")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		// Only these two fields: anything else the caller passes, confirm
+		// included, never reaches the API.
+		out, err := s.deployPlanRequest(ctx, http.MethodPost, "/api/v1/deploy/apply",
+			map[string]any{"plan_id": plan, "approval_id": approval})
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to apply deploy plan: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(out)), nil
+	}
+	return tool, handler
+}
+
 // deployPlanRequest calls the REST route and, unlike doRequest, keeps the
 // API's machine-readable code in the error, because the deploy-plan codes
 // (prod_requires_promote, onboard_requires_preview_onboard, ...) are the

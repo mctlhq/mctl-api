@@ -565,10 +565,16 @@ func (s *Store) getActionApproval(ctx context.Context, q querier, id, lock strin
 // (created=false).
 func (s *Store) CreateActionApproval(ctx context.Context, in ActionApprovalInput) (*ActionApprovalRequest, bool, error) {
 	// A Glovo approval has its own creator (CreateGlovoApprovalTx): the owner,
-	// the binding and the order are part of it (mctl-api#989).
-	if IsGlovoKind(in.ActionKind) {
+	// the binding and the order are part of it (mctl-api#989). A deploy
+	// approval has its own too (CreateDeployApproval): its intent is the
+	// stored plan's (mctl-api#1026).
+	if isDedicatedKind(in.ActionKind) {
 		return nil, false, fmt.Errorf("%w: %q", ErrApprovalKindNotCreatable, in.ActionKind)
 	}
+	return s.createActionApproval(ctx, in)
+}
+
+func (s *Store) createActionApproval(ctx context.Context, in ActionApprovalInput) (*ActionApprovalRequest, bool, error) {
 	if err := in.validate(); err != nil {
 		return nil, false, err
 	}
@@ -802,6 +808,13 @@ func CheckSelfDecision(cur *ActionApprovalRequest, decidedBy, decidedByPrincipal
 // request that is decided, consumed or expired is refused, and the
 // requester can never decide its own request.
 func (s *Store) DecideActionApproval(ctx context.Context, in ActionDecisionInput) (*ActionApprovalRequest, error) {
+	return s.decideActionApproval(ctx, in, false)
+}
+
+// decideActionApproval decides a generic request, or, with deploy, a
+// deploy.apply request (DecideDeployApproval) whose requester check is the
+// caller's fresh sign-in, not the principal comparison.
+func (s *Store) decideActionApproval(ctx context.Context, in ActionDecisionInput, deploy bool) (*ActionApprovalRequest, error) {
 	if err := checkText("decided_by", in.DecidedBy, MaxExternalIDBytes, true); err != nil {
 		return nil, err
 	}
@@ -826,11 +839,15 @@ func (s *Store) DecideActionApproval(ctx context.Context, in ActionDecisionInput
 		if err != nil {
 			return err
 		}
-		if IsGlovoKind(cur.ActionKind) {
+		switch {
+		case deploy && cur.ActionKind != ActionKindDeployApply:
 			return fmt.Errorf("%w: %s", ErrApprovalKindNotSpendable, cur.ID)
-		}
-		if err := CheckSelfDecision(cur, in.DecidedBy, in.DecidedByPrincipalID); err != nil {
-			return err
+		case !deploy && isDedicatedKind(cur.ActionKind):
+			return fmt.Errorf("%w: %s", ErrApprovalKindNotSpendable, cur.ID)
+		case !deploy:
+			if err := CheckSelfDecision(cur, in.DecidedBy, in.DecidedByPrincipalID); err != nil {
+				return err
+			}
 		}
 		switch cur.State {
 		case ApprovalPending:
@@ -893,6 +910,16 @@ func ConsumeStateRefusal(a *ActionApprovalRequest) error {
 // a refusal the request is read back to name the reason; the refusal itself
 // never depends on that read.
 func (s *Store) ConsumeActionApproval(ctx context.Context, id, intentHash string) (*ActionApprovalRequest, error) {
+	return s.consumeActionApproval(ctx, id, intentHash, false)
+}
+
+// consumeActionApproval spends a generic request, or, with deploy, a
+// deploy.apply request (ConsumeDeployApproval).
+func (s *Store) consumeActionApproval(ctx context.Context, id, intentHash string, deploy bool) (*ActionApprovalRequest, error) {
+	kindPredicate := "NOT " + dedicatedKindPredicate
+	if deploy {
+		kindPredicate = "action_kind = '" + ActionKindDeployApply + "'"
+	}
 	if err := checkText("intent_hash", intentHash, MaxApprovalFieldBytes, true); err != nil {
 		return nil, err
 	}
@@ -900,7 +927,7 @@ func (s *Store) ConsumeActionApproval(ctx context.Context, id, intentHash string
 	out, err := scanActionApproval(s.pool.QueryRow(ctx, `UPDATE action_approval_requests
 		SET state='consumed', consumed_at=$3
 		WHERE id=$1 AND state='approved' AND intent_hash=$2 AND expires_at > $3
-			  AND (fresh_until IS NULL OR fresh_until > $3) AND NOT `+glovoKindPredicate+`
+			  AND (fresh_until IS NULL OR fresh_until > $3) AND `+kindPredicate+`
 		RETURNING `+actionApprovalColumns, id, intentHash, now), now)
 	if err == nil {
 		return out, nil
@@ -912,7 +939,7 @@ func (s *Store) ConsumeActionApproval(ctx context.Context, id, intentHash string
 	if err != nil {
 		return nil, err
 	}
-	if IsGlovoKind(cur.ActionKind) {
+	if (deploy && cur.ActionKind != ActionKindDeployApply) || (!deploy && isDedicatedKind(cur.ActionKind)) {
 		return nil, fmt.Errorf("%w: %s", ErrApprovalKindNotSpendable, id)
 	}
 	if err := ConsumeStateRefusal(cur); err != nil {
@@ -952,7 +979,7 @@ func (s *Store) MarkActionApprovalExecuted(ctx context.Context, id, target, arti
 	out, err := scanActionApproval(s.pool.QueryRow(ctx, `UPDATE action_approval_requests
 		SET state='executed', executed_at=$5
 		WHERE id=$1 AND state='consumed' AND requested_by=$2 AND target=$3
-		  AND artifact_hash=$4 AND artifact_hash <> '' AND NOT `+glovoKindPredicate+`
+		  AND artifact_hash=$4 AND artifact_hash <> '' AND NOT `+dedicatedKindPredicate+`
 		RETURNING `+actionApprovalColumns, id, caller, target, artifactHash, now), now)
 	if err == nil {
 		return out, nil
@@ -967,7 +994,7 @@ func (s *Store) MarkActionApprovalExecuted(ctx context.Context, id, target, arti
 	if cur.RequestedBy != caller {
 		return nil, fmt.Errorf("workitems: action approval %s: %w", id, ErrApprovalNotFound)
 	}
-	if IsGlovoKind(cur.ActionKind) {
+	if isDedicatedKind(cur.ActionKind) {
 		return nil, fmt.Errorf("%w: %s", ErrApprovalKindNotSpendable, id)
 	}
 	switch cur.State {
@@ -1045,7 +1072,7 @@ func (s *Store) ReserveActionApproval(ctx context.Context, id, target, artifactH
 		WHERE id=$1 AND state='consumed' AND requested_by=$2 AND target=$3
 		  AND artifact_hash=$4 AND artifact_hash <> ''
 		  AND consumed_at > $6
-		  AND (fresh_until IS NULL OR fresh_until > $5) AND NOT `+glovoKindPredicate+`
+		  AND (fresh_until IS NULL OR fresh_until > $5) AND NOT `+dedicatedKindPredicate+`
 		RETURNING `+actionApprovalColumns, id, caller, target, artifactHash, now, now.Add(-maxAge)), now)
 	if err == nil {
 		return out, nil
@@ -1060,7 +1087,7 @@ func (s *Store) ReserveActionApproval(ctx context.Context, id, target, artifactH
 	if cur.RequestedBy != caller {
 		return nil, fmt.Errorf("workitems: action approval %s: %w", id, ErrApprovalNotFound)
 	}
-	if IsGlovoKind(cur.ActionKind) {
+	if isDedicatedKind(cur.ActionKind) {
 		return nil, fmt.Errorf("%w: %s", ErrApprovalKindNotSpendable, id)
 	}
 	switch cur.State {
@@ -1099,11 +1126,11 @@ func (s *Store) SettleActionApproval(ctx context.Context, id, caller string, suc
 	}
 	now := s.now()
 	q, args := `UPDATE action_approval_requests SET state='consumed'
-		WHERE id=$1 AND state='in_flight' AND requested_by=$2 AND NOT `+glovoKindPredicate+`
+		WHERE id=$1 AND state='in_flight' AND requested_by=$2 AND NOT `+dedicatedKindPredicate+`
 		RETURNING `+actionApprovalColumns, []any{id, caller}
 	if succeeded {
 		q, args = `UPDATE action_approval_requests SET state='executed', executed_at=$3
-		WHERE id=$1 AND state='in_flight' AND requested_by=$2 AND NOT `+glovoKindPredicate+`
+		WHERE id=$1 AND state='in_flight' AND requested_by=$2 AND NOT `+dedicatedKindPredicate+`
 		RETURNING `+actionApprovalColumns, []any{id, caller, now}
 	}
 	out, err := scanActionApproval(s.pool.QueryRow(ctx, q, args...), now)
@@ -1120,7 +1147,7 @@ func (s *Store) SettleActionApproval(ctx context.Context, id, caller string, suc
 	if cur.RequestedBy != caller {
 		return nil, fmt.Errorf("workitems: action approval %s: %w", id, ErrApprovalNotFound)
 	}
-	if IsGlovoKind(cur.ActionKind) {
+	if isDedicatedKind(cur.ActionKind) {
 		return nil, fmt.Errorf("%w: %s", ErrApprovalKindNotSpendable, id)
 	}
 	if cur.State == ApprovalExecuted {

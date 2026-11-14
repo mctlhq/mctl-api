@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS deploy_plans (
   expires_at           TIMESTAMPTZ NOT NULL CHECK (expires_at > created_at
                          AND expires_at <= created_at + interval '24 hours')
 );
+ALTER TABLE deploy_plans ADD COLUMN IF NOT EXISTS intent_changes_values BOOLEAN;
 CREATE UNIQUE INDEX IF NOT EXISTS deploy_plans_idem
   ON deploy_plans (created_by, idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS deploy_plans_tenant ON deploy_plans (tenant, created_at DESC);
@@ -66,7 +67,7 @@ CREATE TRIGGER deploy_plans_no_update BEFORE UPDATE ON deploy_plans
 const planColumns = `id, digest, schema_version, tenant, service, environment, intent, intent_canonical,
 	revision, gitops_base_sha, action, preview_id, values_before_sha256, values_after, diff, host,
 	requires_approval, required_role, approval_reason, created_by, surface, COALESCE(idempotency_key, ''),
-	created_at, expires_at`
+	created_at, expires_at, intent_changes_values`
 
 // Store keeps deploy plans in Postgres. Rows are immutable: there is no
 // update method and a trigger rejects any UPDATE.
@@ -118,13 +119,15 @@ func (s *Store) Insert(ctx context.Context, p *Plan) (*Plan, bool, error) {
 	row := s.pool.QueryRow(ctx, `
 INSERT INTO deploy_plans (id, digest, schema_version, tenant, service, environment, intent, intent_canonical,
 	revision, gitops_base_sha, action, preview_id, values_before_sha256, values_after, diff, host,
-	requires_approval, required_role, approval_reason, created_by, surface, idempotency_key, created_at, expires_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+	requires_approval, required_role, approval_reason, created_by, surface, idempotency_key, created_at, expires_at,
+	intent_changes_values)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
 ON CONFLICT (created_by, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
 RETURNING `+planColumns,
 		p.ID, p.Digest, p.SchemaVersion, p.Tenant, p.Service, p.Environment, p.Intent, p.IntentCanonical,
 		p.Revision, p.GitopsBaseSHA, string(p.Action), p.PreviewID, p.ValuesBeforeSHA256, p.ValuesAfter, p.Diff, p.Host,
-		p.RequiresApproval, p.RequiredRole, p.ApprovalReason, p.CreatedBy, p.Surface, idem, p.CreatedAt, p.ExpiresAt)
+		p.RequiresApproval, p.RequiredRole, p.ApprovalReason, p.CreatedBy, p.Surface, idem, p.CreatedAt, p.ExpiresAt,
+		p.IntentChangesValues)
 	stored, err := scanPlan(row)
 	if err == nil {
 		return stored, false, nil
@@ -165,7 +168,7 @@ func scanPlan(row pgx.Row) (*Plan, error) {
 	if err := row.Scan(&p.ID, &p.Digest, &p.SchemaVersion, &p.Tenant, &p.Service, &p.Environment, &p.Intent,
 		&p.IntentCanonical, &p.Revision, &p.GitopsBaseSHA, &action, &p.PreviewID, &p.ValuesBeforeSHA256,
 		&p.ValuesAfter, &p.Diff, &p.Host, &p.RequiresApproval, &p.RequiredRole, &p.ApprovalReason,
-		&p.CreatedBy, &p.Surface, &p.IdempotencyKey, &p.CreatedAt, &p.ExpiresAt); err != nil {
+		&p.CreatedBy, &p.Surface, &p.IdempotencyKey, &p.CreatedAt, &p.ExpiresAt, &p.IntentChangesValues); err != nil {
 		return nil, err
 	}
 	p.Action = Action(action)

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 
@@ -225,6 +226,9 @@ func (h *Handlers) DeployPlan(w http.ResponseWriter, r *http.Request) {
 		a.refuse(w, http.StatusInternalServerError, "deploy_plan_failed", "the plan could not be computed")
 		return
 	}
+	// Compared before redaction: a change hidden behind a redacted value is
+	// still a change preview-deploy would not make.
+	changes := !reflect.DeepEqual(before, after)
 	approval := deployplan.RequiredApproval(intent.Spec.Environment, deployplan.ActionUpdate)
 	digest := deployplan.Digest(deployplan.DigestInput{
 		Tenant: tenant, Service: service, Environment: intent.Spec.Environment,
@@ -255,7 +259,8 @@ func (h *Handlers) DeployPlan(w http.ResponseWriter, r *http.Request) {
 		ValuesBeforeSHA256: deployplan.SHA256Hex(beforeYAML), ValuesAfter: afterYAML,
 		Diff: deployplan.UnifiedDiff(beforeYAML, afterYAML), Host: host,
 		RequiresApproval: approval.Required, RequiredRole: approval.Role, ApprovalReason: approval.Reason,
-		CreatedBy: createdBy, Surface: surface, IdempotencyKey: req.IdempotencyKey,
+		IntentChangesValues: &changes,
+		CreatedBy:           createdBy, Surface: surface, IdempotencyKey: req.IdempotencyKey,
 		CreatedAt: now, ExpiresAt: now.Add(ttl),
 	}
 	stored, replayed, err := h.opts.DeployPlans.Insert(r.Context(), plan)
