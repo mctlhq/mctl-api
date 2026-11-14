@@ -868,3 +868,53 @@ func TestNewestSpentActionApprovalUsesItsIndex(t *testing.T) {
 		t.Fatalf("NewestSpentActionApproval is not served by action_approval_requests_spent:\n%s", plan.String())
 	}
 }
+
+// One human signed in through two providers has two principal strings but
+// one prn_ principal; the self-decision check must see through the strings.
+func TestCheckSelfDecisionComparesPrincipalIDs(t *testing.T) {
+	withID := &ActionApprovalRequest{ID: "aar_1", RequestedBy: "github:alice", RequestedByPrincipalID: "prn_alice"}
+	legacy := &ActionApprovalRequest{ID: "aar_2", RequestedBy: "github:alice"}
+	for _, tc := range []struct {
+		name      string
+		cur       *ActionApprovalRequest
+		by, pid   string
+		wantError error
+	}{
+		{"same string", withID, "github:alice", "prn_alice", ErrApprovalSelfDecision},
+		{"same principal under another login", withID, "oidc:alice", "prn_alice", ErrApprovalSelfDecision},
+		{"unresolved decider", withID, "oidc:bob", "", ErrApprovalDeciderUnresolved},
+		{"different principal", withID, "oidc:bob", "prn_bob", nil},
+		{"legacy row, same string", legacy, "github:alice", "", ErrApprovalSelfDecision},
+		{"legacy row, other string", legacy, "oidc:bob", "", nil},
+	} {
+		err := CheckSelfDecision(tc.cur, tc.by, tc.pid)
+		if tc.wantError == nil && err != nil || tc.wantError != nil && !errors.Is(err, tc.wantError) {
+			t.Errorf("%s: err = %v, want %v", tc.name, err, tc.wantError)
+		}
+	}
+}
+
+func TestDecideActionApprovalRefusesSamePrincipalUnderAnotherLogin(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	in := approvalInput(s, "k-prn-self")
+	in.RequestedByPrincipalID = "prn_requester"
+	a := createApproval(t, s, in)
+
+	if _, err := s.DecideActionApproval(ctx, ActionDecisionInput{ID: a.ID, DecidedBy: "oidc:same-human",
+		DecidedByPrincipalID: "prn_requester", Decision: DecisionApprove}); !errors.Is(err, ErrApprovalSelfDecision) {
+		t.Fatalf("same principal, other login = %v, want ErrApprovalSelfDecision", err)
+	}
+	if _, err := s.DecideActionApproval(ctx, ActionDecisionInput{ID: a.ID, DecidedBy: "github:root",
+		Decision: DecisionApprove}); !errors.Is(err, ErrApprovalDeciderUnresolved) {
+		t.Fatalf("unresolved decider = %v, want ErrApprovalDeciderUnresolved", err)
+	}
+	if got, err := s.ActionApproval(ctx, a.ID); err != nil || got.State != ApprovalPending {
+		t.Fatalf("a refused decision changed the request: %+v %v", got, err)
+	}
+	d, err := s.DecideActionApproval(ctx, ActionDecisionInput{ID: a.ID, DecidedBy: "github:root",
+		DecidedByPrincipalID: "prn_root", Decision: DecisionDeny, Reason: "no"})
+	if err != nil || d.State != ApprovalDenied || d.DecidedByPrincipalID != "prn_root" {
+		t.Fatalf("a different principal = %+v %v", d, err)
+	}
+}

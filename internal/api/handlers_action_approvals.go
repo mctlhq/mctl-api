@@ -54,6 +54,7 @@ const (
 	aarCodeIntentHashInvalid   = "intent_hash_mismatch"
 	aarCodeAlreadyDecided      = "approval_already_decided"
 	aarCodeSelfDecision        = "approval_self_decision"
+	aarCodeDeciderUnresolved   = "approval_decider_unresolved"
 	aarCodeNotApproved         = "approval_not_approved"
 	aarCodeDenied              = "approval_denied"
 	aarCodeExpired             = "approval_expired"
@@ -220,6 +221,7 @@ var actionApprovalRefusals = []struct {
 	{workitems.ErrApprovalIntentHash, http.StatusBadRequest, aarCodeIntentHashInvalid, false},
 	{workitems.ErrApprovalAlreadyDecided, http.StatusConflict, aarCodeAlreadyDecided, false},
 	{workitems.ErrApprovalSelfDecision, http.StatusForbidden, aarCodeSelfDecision, false},
+	{workitems.ErrApprovalDeciderUnresolved, http.StatusForbidden, aarCodeDeciderUnresolved, false},
 	{workitems.ErrApprovalNotApproved, http.StatusConflict, aarCodeNotApproved, false},
 	{workitems.ErrApprovalDenied, http.StatusConflict, aarCodeDenied, false},
 	{workitems.ErrApprovalExpired, http.StatusConflict, aarCodeExpired, true},
@@ -871,7 +873,7 @@ func (h *Handlers) DecideActionApproval(w http.ResponseWriter, r *http.Request) 
 	// The completeness gate applies only to a decision that could succeed;
 	// terminal-state and self-decision refusals keep precedence.
 	digest := ""
-	if cur.State == workitems.ApprovalPending && cur.RequestedBy != principalOf(user) {
+	if cur.State == workitems.ApprovalPending && workitems.CheckSelfDecision(cur, principalOf(user), user.PrincipalID()) == nil {
 		var ok bool
 		digest, ok = h.guardDecision(w, r, user, cur, body.Decision, body.ContextDigest, bind)
 		if !ok {

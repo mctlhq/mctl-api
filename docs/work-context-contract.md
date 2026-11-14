@@ -196,7 +196,11 @@ may live in different databases.
   derive it from the intent alone. Every bound field and the decision
   `reason` pass the `secretscan.Scan` gate below (400). Decide: a human admin acting
   directly only — never a service, a surface or a relayed request, never
-  the requester. Consume is one compare-and-set `UPDATE` (`state='approved'`,
+  the requester. "The requester" is matched by principal string and, when
+  the request records `requested_by_principal_id`, by `prn_` id, so the same
+  human under another login is refused as 403 `approval_self_decision`; if
+  that id is recorded but the decider's principal cannot be resolved, the
+  decision is refused as 403 `approval_decider_unresolved`. Consume is one compare-and-set `UPDATE` (`state='approved'`,
   matching `intent_hash`, unexpired) that records `consumed_at`, so a
   receipt authorizes exactly one side effect. The execution mark is a
   second compare-and-set (`state='consumed'`, the requester, the stored
