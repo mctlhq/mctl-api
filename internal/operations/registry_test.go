@@ -14,7 +14,10 @@
 
 package operations
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // wantServices mirrors config/settings.py's SERVICES list in mctlhq/mctl-agents;
 // update both places together when a service is added or removed there.
@@ -454,7 +457,6 @@ func TestReleasePinPatterns(t *testing.T) {
 		"mctl-agents-investigate": "issue-investigator",
 		"mctl-agents-implement":   "implementer",
 		"mctl-agents-shepherd":    "shepherd",
-		"mctl-agents-incidents":   "incident-responder",
 	}
 	const digest = "sha256:6ef615deee2a2864195014760bf6c3989b26059b47435933f04c6d8f5060e9f6"
 	for opName, agent := range agents {
@@ -506,7 +508,7 @@ func TestReleasePinPatterns(t *testing.T) {
 // the CWFT's default image.
 func TestReleasePinIsOmittedWhenEmpty(t *testing.T) {
 	registry := NewRegistry()
-	for _, opName := range []string{"mctl-agents-investigate", "mctl-agents-implement", "mctl-agents-shepherd", "mctl-agents-incidents"} {
+	for _, opName := range []string{"mctl-agents-investigate", "mctl-agents-implement", "mctl-agents-shepherd"} {
 		op, _ := registry.Get(opName)
 		for _, input := range []map[string]string{
 			{},
@@ -519,6 +521,35 @@ func TestReleasePinIsOmittedWhenEmpty(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestIncidentsDeclaresNoImagePin pins that the incident responder, the one
+// mctl-agents-run template holding MCTL_TOKEN, takes its image only from
+// gitops: an undeclared agent_image is stripped before submit, so no caller,
+// registry promotion or rollback can choose an older image that still has a
+// shell (mctlhq/mctl-gitops#1980).
+func TestIncidentsDeclaresNoImagePin(t *testing.T) {
+	registry := NewRegistry()
+	op, ok := registry.Get("mctl-agents-incidents")
+	if !ok {
+		t.Fatal("operation mctl-agents-incidents not found in registry")
+	}
+	for _, p := range op.Parameters {
+		if p.Name == "agent_image" || p.Name == "agent_version" {
+			t.Errorf("mctl-agents-incidents declares %s; its image must come from gitops only", p.Name)
+		}
+	}
+	kept, dropped := registry.StripUndeclared(op, map[string]string{
+		"mode":          "incident-responder",
+		"agent_image":   "ghcr.io/mctlhq/mctl-agents:1.54.0",
+		"agent_version": "incident-responder@1.54.0",
+	})
+	if _, ok := kept["agent_image"]; ok {
+		t.Errorf("agent_image survived StripUndeclared: %v", kept)
+	}
+	if want := []string{"agent_image", "agent_version"}; strings.Join(dropped, ",") != strings.Join(want, ",") {
+		t.Errorf("dropped = %v, want %v", dropped, want)
 	}
 }
 
