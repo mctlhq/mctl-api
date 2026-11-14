@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.158.1](https://github.com/mctlhq/mctl-api/compare/4.158.0...4.158.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **oauth:** accept localhost loopback redirects for CIMD clients ([971a87e](https://github.com/mctlhq/mctl-api/commit/971a87ed3ab63925863c8e4a51cebf4290584b8e))
+* **oauth:** accept localhost loopback redirects for CIMD clients ([c10cac7](https://github.com/mctlhq/mctl-api/commit/c10cac7df07272fc16542f584d828b805b8165b5))
+
 ## [4.158.0](https://github.com/mctlhq/mctl-api/compare/4.157.0...4.158.0) (2026-11-14)
 
 
