@@ -1022,3 +1022,75 @@ func TestDeploymentGlovoBasketUISecretConflictsWithEnv(t *testing.T) {
 		t.Errorf("failure should name glovoBasketUISecret, got: %s", out)
 	}
 }
+
+func TestDeploymentDefaultRenderHasNoDeployApprovalUI(t *testing.T) {
+	d, _ := renderDeployment(t)
+	c := mainContainer(t, d)
+	for _, name := range []string{"DEPLOY_APPROVAL_UI_CLIENT_ID", "DEPLOY_APPROVAL_UI_CLIENT_SECRET"} {
+		if _, ok := findEnv(c, name); ok {
+			t.Errorf("default render should not set %s", name)
+		}
+	}
+}
+
+func TestDeploymentEmptyDeployApprovalUISecretRendersUnchanged(t *testing.T) {
+	_, defaultOut := renderDeployment(t)
+	_, emptyOut := renderDeployment(t, "--set", "deployApprovalUISecret=")
+	if !bytes.Equal(defaultOut, emptyOut) {
+		t.Error("empty deployApprovalUISecret should render byte-identical output to the default")
+	}
+}
+
+func TestDeploymentRendersDeployApprovalUISecretRefs(t *testing.T) {
+	d, _ := renderDeployment(t, "--set", "deployApprovalUISecret=mctl-api-oidc-zitadel")
+	c := mainContainer(t, d)
+	for _, name := range []string{"DEPLOY_APPROVAL_UI_CLIENT_ID", "DEPLOY_APPROVAL_UI_CLIENT_SECRET"} {
+		if n := countEnv(c, name); n != 1 {
+			t.Fatalf("expected exactly one %s entry, got %d", name, n)
+		}
+		e, _ := findEnv(c, name)
+		if e.Value != "" || e.ValueFrom == nil || e.ValueFrom.SecretKeyRef == nil {
+			t.Fatalf("%s must come from a secretKeyRef only: %+v", name, e)
+		}
+		ref := e.ValueFrom.SecretKeyRef
+		if ref.Name != "mctl-api-oidc-zitadel" || ref.Key != name || !ref.Optional {
+			t.Errorf("%s secretKeyRef = %+v", name, ref)
+		}
+	}
+}
+
+func TestDeploymentDeployApprovalUISecretConflictsWithEnv(t *testing.T) {
+	helmPath := requireHelm(t)
+	for _, key := range []string{"DEPLOY_APPROVAL_UI_CLIENT_ID", "DEPLOY_APPROVAL_UI_CLIENT_SECRET"} {
+		// #nosec G204 -- see renderDeployment.
+		cmd := exec.Command(helmPath, "template", "mctl-api", ".", "--show-only", "templates/deployment.yaml",
+			"--set", "deployApprovalUISecret=mctl-api-oidc-zitadel",
+			"--set", "env."+key+"=x")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected the render to fail when %s is set both in env and through the slot", key)
+		}
+		if !strings.Contains(string(out), "deployApprovalUISecret") {
+			t.Errorf("failure should name deployApprovalUISecret, got: %s", out)
+		}
+	}
+}
+
+func TestIngressExtraPathsRoutesDeployApprovals(t *testing.T) {
+	in, _ := renderIngress(t, "--set", "ingress.extraPaths[0]=/deploy")
+	api := rulePaths(ruleByHost(t, in, "api.mctl.ai"))
+	if api[len(api)-1] != "/deploy" {
+		t.Errorf("api.mctl.ai paths = %v, want the defaults plus /deploy", api)
+	}
+}
+
+func TestDeploymentDeployApprovalUISecretSkipsEmptyEnvEntry(t *testing.T) {
+	// An empty literal passes the conflict check but would render a second
+	// entry with the same name, which server-side apply refuses.
+	d, _ := renderDeployment(t, "--set", "deployApprovalUISecret=mctl-api-oidc-zitadel",
+		"--set-string", "env.DEPLOY_APPROVAL_UI_CLIENT_ID=")
+	c := mainContainer(t, d)
+	if n := countEnv(c, "DEPLOY_APPROVAL_UI_CLIENT_ID"); n != 1 {
+		t.Fatalf("expected exactly one DEPLOY_APPROVAL_UI_CLIENT_ID entry, got %d", n)
+	}
+}
