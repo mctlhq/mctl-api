@@ -109,11 +109,22 @@ CREATE TABLE IF NOT EXISTS security_observations (
     ingested_at                TIMESTAMPTZ NOT NULL,
     ingested_by_principal_id   TEXT NOT NULL DEFAULT '',
     CONSTRAINT security_observations_id_shape CHECK (id LIKE 'sob\_%'),
-    CONSTRAINT security_observations_action CHECK (claimed_action IN ('present', 'fixed', 'absent', 'withdrawn')),
-    UNIQUE (provider_ref, observation_hash)
+    CONSTRAINT security_observations_action CHECK (claimed_action IN ('present', 'fixed', 'absent', 'withdrawn'))
 );
 CREATE INDEX IF NOT EXISTS security_observations_occurrence
     ON security_observations (occurrence_id, observed_at);
+-- Redelivery dedup is per provider AND tenant: one provider configured for
+-- two tenants can send byte-identical content for both, and the two are
+-- different observations. The table used to carry
+-- UNIQUE (provider_ref, observation_hash); that constraint is strictly
+-- stronger than this index, so building it on existing rows cannot fail, and
+-- it is dropped only after this one exists. Existing rows keep their hashes
+-- (the hash itself is unchanged), so a redelivery of an observation recorded
+-- before the change still finds it.
+CREATE UNIQUE INDEX IF NOT EXISTS security_observations_provider_tenant_hash
+    ON security_observations (provider_ref, tenant, observation_hash);
+ALTER TABLE security_observations
+    DROP CONSTRAINT IF EXISTS security_observations_provider_ref_observation_hash_key;
 
 CREATE TABLE IF NOT EXISTS security_remediation_attempts (
     id                      TEXT PRIMARY KEY,
