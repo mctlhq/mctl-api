@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -110,13 +111,20 @@ func (h *Handlers) loadCallerPlan(w http.ResponseWriter, user *auth.User, a *dep
 	return p, true
 }
 
-// planApplicable refuses a plan that cannot be applied as it was approved:
-// expired, stored with a digest that no longer matches its fields, or not
-// reproducible by preview-deploy. It returns the parsed intent.
-func (h *Handlers) planApplicable(w http.ResponseWriter, a *deployAudit, p *deployplan.Plan) (deployplan.Intent, bool) {
-	if p.Expired(h.deployPlanNow()) {
-		a.refuse(w, http.StatusConflict, codeDeployPlanExpired, "the plan has expired; plan again")
-		return deployplan.Intent{}, false
+// planRefusal is why a stored plan cannot be applied as it was planned.
+type planRefusal struct {
+	status    int
+	code, msg string
+}
+
+// planApplicableCheck refuses a plan that cannot be applied as it was
+// approved: expired, stored with a digest that no longer matches its
+// fields, or not reproducible by preview-deploy. It returns the parsed
+// intent. The apply route and the decide page ask the same question, so the
+// page never offers to approve what the apply would refuse.
+func planApplicableCheck(p *deployplan.Plan, now time.Time) (deployplan.Intent, *planRefusal) {
+	if p.Expired(now) {
+		return deployplan.Intent{}, &planRefusal{http.StatusConflict, codeDeployPlanExpired, "the plan has expired; plan again"}
 	}
 	// The row is immutable and its digest binds every field an apply uses;
 	// a mismatch means the stored row is not what was planned.
@@ -126,26 +134,31 @@ func (h *Handlers) planApplicable(w http.ResponseWriter, a *deployAudit, p *depl
 		Action: p.Action, PreviewID: p.PreviewID, ValuesAfter: p.ValuesAfter, Host: p.Host,
 	}) != p.Digest {
 		slog.Error("deploy apply: stored plan does not match its digest", "plan", p.ID)
-		a.refuse(w, http.StatusInternalServerError, codeDeployApplyUnavailable, "the stored plan does not match its digest")
-		return deployplan.Intent{}, false
+		return deployplan.Intent{}, &planRefusal{http.StatusInternalServerError, codeDeployApplyUnavailable, "the stored plan does not match its digest"}
 	}
 	intent, _, err := deployplan.ParseIntent([]byte(p.IntentCanonical))
 	if err != nil {
 		slog.Error("deploy apply: stored intent does not parse", "plan", p.ID, "error", err)
-		a.refuse(w, http.StatusInternalServerError, codeDeployApplyUnavailable, "the stored plan's intent cannot be read")
-		return deployplan.Intent{}, false
+		return deployplan.Intent{}, &planRefusal{http.StatusInternalServerError, codeDeployApplyUnavailable, "the stored plan's intent cannot be read"}
 	}
 	switch {
 	case p.Environment != deployplan.EnvironmentPreview || p.Action != deployplan.ActionUpdate:
-		a.refuse(w, http.StatusUnprocessableEntity, codeDeployApplyNotReproducible, "only a preview update plan can be applied")
-		return deployplan.Intent{}, false
+		return deployplan.Intent{}, &planRefusal{http.StatusUnprocessableEntity, codeDeployApplyNotReproducible, "only a preview update plan can be applied"}
 	case p.IntentChangesValues == nil || *p.IntentChangesValues:
-		a.refuse(w, http.StatusUnprocessableEntity, codeDeployApplyNotReproducible,
-			"the intent changes the service's values (runtime, env, resources or secrets), and preview-deploy renders the gitops values; apply it after preview-from-intent lands, or change the values in gitops")
-		return deployplan.Intent{}, false
+		return deployplan.Intent{}, &planRefusal{http.StatusUnprocessableEntity, codeDeployApplyNotReproducible,
+			"the intent changes the service's values (runtime, env, resources or secrets), and preview-deploy renders the gitops values; apply it after preview-from-intent lands, or change the values in gitops"}
 	case intent.Spec.Source.Context != "." && intent.Spec.Source.Context != "":
-		a.refuse(w, http.StatusUnprocessableEntity, codeDeployApplyNotReproducible,
-			"the preview build supports only the repository root as build context")
+		return deployplan.Intent{}, &planRefusal{http.StatusUnprocessableEntity, codeDeployApplyNotReproducible,
+			"the preview build supports only the repository root as build context"}
+	}
+	return intent, nil
+}
+
+// planApplicable is planApplicableCheck answered and audited.
+func (h *Handlers) planApplicable(w http.ResponseWriter, a *deployAudit, p *deployplan.Plan) (deployplan.Intent, bool) {
+	intent, ref := planApplicableCheck(p, h.deployPlanNow())
+	if ref != nil {
+		a.refuse(w, ref.status, ref.code, ref.msg)
 		return deployplan.Intent{}, false
 	}
 	return intent, true
