@@ -69,9 +69,11 @@ func (s *Store) ingestItem(ctx context.Context, pc ProviderContext, deliveryID s
 	}
 	fingerprint := Fingerprint(subject)
 
-	// The hash is the dedup key within one provider. delivery_id is part of
-	// it but never a key by itself: several findings in one delivery have
-	// distinct hashes, and redelivery of the same content repeats it.
+	// The hash is the dedup key within one provider and one tenant (the
+	// redelivery lookup and the unique index both carry the tenant).
+	// delivery_id is part of it but never a key by itself: several findings
+	// in one delivery have distinct hashes, and redelivery of the same
+	// content repeats it.
 	hash := hashJSON(map[string]string{
 		"identity_key":        ident.Key,
 		"subject_fingerprint": fingerprint,
@@ -111,11 +113,15 @@ func (s *Store) ingestTx(ctx context.Context, tx pgx.Tx, pc ProviderContext, del
 	ident CanonicalIdentity, subject Subject, fingerprint, hash string) (ItemResult, error) {
 	now := s.now()
 
-	// Redelivery: same provider, same content (including delivery id).
+	// Redelivery: same provider, same tenant, same content (including
+	// delivery id). Without the tenant, identical content sent for a second
+	// tenant came back as a "duplicate" carrying the first tenant's finding,
+	// occurrence and observation ids, and was never recorded.
 	var dupObs, dupOcc, dupFinding string
 	err := tx.QueryRow(ctx, `SELECT o.id, o.occurrence_id, c.finding_id
 		FROM security_observations o JOIN security_occurrences c ON c.id = o.occurrence_id
-		WHERE o.provider_ref = $1 AND o.observation_hash = $2`, pc.Ref, hash).Scan(&dupObs, &dupOcc, &dupFinding)
+		WHERE o.provider_ref = $1 AND o.tenant = $2 AND o.observation_hash = $3 AND c.tenant = $2`,
+		pc.Ref, in.Tenant, hash).Scan(&dupObs, &dupOcc, &dupFinding)
 	if err == nil {
 		return ItemResult{Status: ItemDuplicate, FindingID: dupFinding, OccurrenceID: dupOcc, ObservationID: dupObs}, nil
 	}
