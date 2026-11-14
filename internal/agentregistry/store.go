@@ -319,7 +319,20 @@ func (s *Store) ListVersions(ctx context.Context, agent string) ([]AgentVersion,
 		return nil, fmt.Errorf("agentregistry: list versions: %w", err)
 	}
 	defer rows.Close()
+	return collectVersions(rows)
+}
 
+// listRows is the part of pgx.Rows the list readers consume.
+type listRows interface {
+	Next() bool
+	Scan(dest ...any) error
+	Err() error
+}
+
+// collectVersions reads every row of a ListVersions query. A row that does
+// not scan and a stream that ends in an error both fail the whole read: a
+// partial read is never returned as a shorter list.
+func collectVersions(rows listRows) ([]AgentVersion, error) {
 	var versions []AgentVersion
 	for rows.Next() {
 		var v AgentVersion
@@ -327,10 +340,12 @@ func (s *Store) ListVersions(ctx context.Context, agent string) ([]AgentVersion,
 			&v.ID, &v.Agent, &v.Version, &v.ManifestJSON, &v.GitSHA,
 			&v.ImageRepository, &v.ImageDigest, &v.PromptHash, &v.CreatedAt, &v.CreatedBy,
 		); err != nil {
-			slog.Error("agentregistry: scan version failed", "error", err)
-			continue
+			return nil, fmt.Errorf("agentregistry: scan version: %w", err)
 		}
 		versions = append(versions, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("agentregistry: list versions: %w", err)
 	}
 	return versions, nil
 }
@@ -516,15 +531,22 @@ func (s *Store) ListPromotions(ctx context.Context, agent, environment string) (
 		return nil, fmt.Errorf("agentregistry: list promotions: %w", err)
 	}
 	defer rows.Close()
+	return collectPromotions(rows)
+}
 
+// collectPromotions reads every row of a ListPromotions query, failing the
+// whole read on a scan or stream error (see collectVersions).
+func collectPromotions(rows listRows) ([]AgentPromotion, error) {
 	var promotions []AgentPromotion
 	for rows.Next() {
 		var p AgentPromotion
 		if err := rows.Scan(&p.ID, &p.Agent, &p.Environment, &p.FromVersion, &p.ToVersion, &p.Reason, &p.Actor, &p.RollbackOf, &p.CreatedAt); err != nil {
-			slog.Error("agentregistry: scan promotion failed", "error", err)
-			continue
+			return nil, fmt.Errorf("agentregistry: scan promotion: %w", err)
 		}
 		promotions = append(promotions, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("agentregistry: list promotions: %w", err)
 	}
 	return promotions, nil
 }
