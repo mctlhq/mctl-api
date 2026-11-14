@@ -14,7 +14,10 @@
 
 package operations
 
-import "testing"
+import (
+	"regexp"
+	"testing"
+)
 
 // wantServices mirrors config/settings.py's SERVICES list in mctlhq/mctl-agents;
 // update both places together when a service is added or removed there.
@@ -740,5 +743,69 @@ func TestTraceparentDeclaredOnTracedAgentOperations(t *testing.T) {
 				t.Errorf("%s: accepted malformed traceparent %q", name, bad)
 			}
 		}
+	}
+}
+
+// TestCreateTenantNameCappedAt31 pins the create-tenant name limit to the 31
+// characters that team_name accepts everywhere else (deploy, the portal's
+// Vault secrets routes). A 32-63 character tenant used to be creatable but
+// could never be deployed to or hold secrets. delete-tenant must keep
+// accepting the old 63-character range so any such tenant stays removable.
+func TestCreateTenantNameCappedAt31(t *testing.T) {
+	reg := NewRegistry()
+	create, ok := reg.Get("create-tenant")
+	if !ok {
+		t.Fatal("create-tenant operation not found in registry")
+	}
+	name := func(n int) string {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = 'a'
+		}
+		return string(b)
+	}
+	hasTenantNameError := func(errs []string) bool {
+		for _, e := range errs {
+			if len(e) >= len("tenant_name") && e[:len("tenant_name")] == "tenant_name" {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, n := range []int{2, 31} {
+		if errs := reg.ValidateInput(create, map[string]string{"tenant_name": name(n)}); hasTenantNameError(errs) {
+			t.Errorf("create-tenant rejected a %d-character name: %v", n, errs)
+		}
+	}
+	for _, n := range []int{1, 32, 63} {
+		if errs := reg.ValidateInput(create, map[string]string{"tenant_name": name(n)}); !hasTenantNameError(errs) {
+			t.Errorf("create-tenant accepted a %d-character name, want a tenant_name error", n)
+		}
+	}
+
+	// The longest name create-tenant accepts must be a valid team_name for
+	// every operation that addresses a team (deploy-service and the rest).
+	checked := 0
+	for _, op := range reg.List() {
+		for i := range op.Parameters {
+			if p := op.Parameters[i]; p.Name == "team_name" && p.Pattern != "" {
+				checked++
+				if !regexp.MustCompile(p.Pattern).MatchString(name(31)) {
+					t.Errorf("%s team_name pattern %s rejects a 31-character name create-tenant accepts", op.Name, p.Pattern)
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Error("no operation declares a patterned team_name; the cross-check observed nothing")
+	}
+
+	del, ok := reg.Get("delete-tenant")
+	if !ok {
+		t.Fatal("delete-tenant operation not found in registry")
+	}
+	if errs := reg.ValidateInput(del, map[string]string{"tenant_name": name(63)}); hasTenantNameError(errs) {
+		t.Errorf("delete-tenant rejected a 63-character name, want it to keep accepting existing tenants: %v", errs)
 	}
 }

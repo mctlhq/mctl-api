@@ -504,7 +504,11 @@ var builtinOperations = []Operation{
 			"platform-gitops/argo-workflows/sso-team-{tenant_name}.yaml",
 		},
 		Parameters: []ParameterDef{
-			{Name: "tenant_name", Type: "string", Required: true, Description: "Workspace name (DNS-safe, lowercase)", Pattern: "^[a-z0-9][a-z0-9-]{1,62}$"},
+			// 31, not 63: every operation that takes team_name (deploy and
+			// friends) and the portal's Vault secrets routes cap the name at
+			// 31, so a longer tenant could be created but never deployed to.
+			// Checks that read or delete existing tenants keep accepting 63.
+			{Name: "tenant_name", Type: "string", Required: true, Description: "Workspace name (DNS-safe, lowercase, 2-31 characters)", Pattern: "^[a-z0-9][a-z0-9-]{1,30}$"},
 			{Name: "display_name", Type: "string", Description: "Human-readable team name. Free text; passed to the workflow via env only.", Pattern: quotedTextPattern, MaxLength: 128},
 			{Name: "description", Type: "string", Description: "Team description. Free text; passed to the workflow via env only.", Pattern: quotedTextPattern, MaxLength: 1024},
 			{Name: "workspace_profile", Type: "string", Default: "standard", Enum: []string{"standard", "starter"}, Description: "Starter fixes production+preview CPU, memory and PVC-byte quotas; standard preserves administrator/pilot defaults."},
