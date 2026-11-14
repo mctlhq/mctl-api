@@ -85,7 +85,7 @@ func (s *Server) toolRequestDeployApproval() (mcplib.Tool, server.ToolHandlerFun
 		mcplib.WithIdempotentHintAnnotation(true),
 		mcplib.WithDescription(`Ask for the human grant a deploy plan needs before it can be applied. Returns a pending approval (aar_...) bound to the plan's id and digest.
 
-This grants nothing. An owner of the plan's tenant decides it on a page where they sign in fresh; no tool, token or agent can decide it, and confirm is not a thing here. Show the person the plan's diff and ask them to approve it there.
+This grants nothing. An owner of the plan's tenant decides it on a page where they sign in fresh; no tool, token or agent can decide it, and confirm is not a thing here. Give the person the decide_url from the answer and ask them to open it: the page shows them the plan's diff and lets them approve or reject it. Without a decide_url the page is not enabled and the grant cannot be decided.
 
 Calling again for the same plan returns the same approval with its current state (pending, approved, denied, consumed or expired), so use it to check whether the owner has decided.
 

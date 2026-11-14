@@ -169,8 +169,23 @@ A preview apply of a stored deploy plan (`dpl_`) is authorized by a
   opens the pending grant. Any developer of the tenant may ask, an agent
   session included. The server builds the intent from the stored plan: plan id,
   plan digest, `tenant/service`, policy `deploy.apply.tenant-owner` v1. The body
-  carries nothing. A repeat returns the same grant.
-- A live owner of the tenant decides it on the fresh sign-in page. No bearer
+  carries nothing. A repeat returns the same grant. The answer carries
+  `decide_url`, the page link to give the person, or `decide_unavailable` when
+  the page is not enabled.
+- A live owner of the tenant decides it on the fresh sign-in page,
+  `/deploy/approvals/{aar_id}`. The link grants nothing. The person signs in
+  to ZITADEL in that browser with `prompt=login`, `max_age=0`, PKCE and a nonce,
+  and is resolved as their own principal. Anyone who is not a live owner of
+  the plan's tenant, an admin included, sees "no such approval" and nothing of
+  the plan. An owner sees the plan (target, revision, preview host, plan id and
+  digest, gitops commit, requester, context digest, diff). A plan the apply
+  would refuse is shown but not offered. On confirm the page resolves the
+  person, reads the ownership, the plan and the grant again, and decides only
+  if all three still match what was shown. The page is dark unless
+  `DEPLOY_APPROVAL_UI_ENABLED=true` with `DEPLOY_APPROVAL_UI_CLIENT_ID`,
+  `DEPLOY_APPROVAL_UI_CLIENT_SECRET`, `SELF_URL`, principal authz mode, the
+  shared OAuth flow store, the work-items and deploy-plan stores and the
+  ZITADEL federation entry. No bearer
   route decides it: the generic `/decision`, `/consume`, `/execute`, reserve and
   settle paths refuse every `deploy.*` kind, for admins too. An MCP session
   carries its person's own principal, so the requester's principal is not

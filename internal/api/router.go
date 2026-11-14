@@ -132,6 +132,10 @@ type Options struct {
 	// (mctl-api#1006, glovo_basket_approval_page.go). Its routes are mounted
 	// only when it is complete; nil keeps them unmounted (404).
 	GlovoBasketApproval *GlovoBasketApprovalPageOptions
+	// DeployApproval configures the deploy approval page (mctl-api#1026,
+	// deploy_approval_page.go), the only place a deploy.apply grant is
+	// decided. Its routes are mounted only when it is complete.
+	DeployApproval *DeployApprovalPageOptions
 	// OAuthUpstream is where /oauth/authorize signs people in
 	// (OAUTH_UPSTREAM, mctl-api#467); the zero value is GitHub.
 	OAuthUpstream OAuthUpstreamMode
@@ -426,6 +430,8 @@ type Handlers struct {
 	principalSets *principalSetCache
 	// glovoBasketApproval is the basket approval page; nil when not mounted.
 	glovoBasketApproval *basketDecider
+	// deployApproval is the deploy approval page; nil when not mounted.
+	deployApproval *deployDecider
 }
 
 // NewRouter creates the HTTP router with all API routes.
@@ -442,6 +448,9 @@ func NewRouter(opts Options) http.Handler {
 	}
 	if opts.GlovoBasketApproval.enabled() {
 		h.glovoBasketApproval = newBasketDecider(opts.GlovoBasketApproval)
+	}
+	if opts.DeployApproval.enabled() && opts.WorkItems != nil && opts.DeployPlans != nil {
+		h.deployApproval = newDeployDecider(opts.DeployApproval)
 	}
 	if opts.OAuthZitadel != nil {
 		h.oauthZitadel = &oauthZitadel{opts: opts.OAuthZitadel, lazyOIDCProvider: lazyOIDCProvider{issuer: opts.OAuthZitadel.Issuer}}
@@ -538,6 +547,13 @@ func NewRouter(opts Options) http.Handler {
 			r.Get(basketCallbackPath, h.handleGlovoBasketApprovalCallback)
 			r.Post(basketConfirmPath, h.handleGlovoBasketApprovalConfirm)
 			r.Get(basketPagePrefix+"{approval_ref}", h.handleGlovoBasketApprovalPage)
+		}
+		// Deploy approval page (mctl-api#1026): dark unless configured.
+		if h.deployApproval != nil {
+			r.Post(deployStartPath, h.handleDeployApprovalStart)
+			r.Get(deployCallbackPath, h.handleDeployApprovalCallback)
+			r.Post(deployConfirmPath, h.handleDeployApprovalConfirm)
+			r.Get(deployPagePrefix+"{approval_ref}", h.handleDeployApprovalPage)
 		}
 	})
 	r.Group(func(r chi.Router) {

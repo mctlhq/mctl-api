@@ -78,17 +78,10 @@ func glovoBasketApprovalOptions(cfg config, env glovoBasketUIEnv, pr auth.Princi
 	if flow == nil {
 		missing = append(missing, "the shared OAuth flow store (OAUTH_DB_URL)")
 	}
-	if cfg.FederationDisabled {
-		missing = append(missing, "the federation registry (MCTL_FEDERATION_DISABLED is on)")
-	} else if entries, err := auth.ParseOIDCProviders(cfg.OIDCProvidersRaw); err == nil {
-		for i := range entries {
-			if entries[i].Name == cfg.ZitadelLinkProvider {
-				opts.ProviderName, opts.Issuer = entries[i].Name, entries[i].Issuer
-			}
-		}
-	}
-	if opts.Issuer == "" && !cfg.FederationDisabled {
-		missing = append(missing, "an MCTL_OIDC_PROVIDERS entry named "+cfg.ZitadelLinkProvider)
+	var why string
+	opts.ProviderName, opts.Issuer, why = signInProvider(cfg)
+	if why != "" {
+		missing = append(missing, why)
 	}
 	if len(missing) > 0 {
 		slog.Error("glovo basket approval page disabled", "missing", strings.Join(missing, "; "))
@@ -96,6 +89,25 @@ func glovoBasketApprovalOptions(cfg config, env glovoBasketUIEnv, pr auth.Princi
 	}
 	slog.Info("glovo basket approval page enabled", "provider", opts.ProviderName, "issuer", opts.Issuer)
 	return opts
+}
+
+// signInProvider is the federation entry a fresh-sign-in page resolves its
+// person as (the one named ZITADEL_LINK_PROVIDER), or what is missing.
+func signInProvider(cfg config) (name, issuer, missing string) {
+	if cfg.FederationDisabled {
+		return "", "", "the federation registry (MCTL_FEDERATION_DISABLED is on)"
+	}
+	if entries, err := auth.ParseOIDCProviders(cfg.OIDCProvidersRaw); err == nil {
+		for i := range entries {
+			if entries[i].Name == cfg.ZitadelLinkProvider {
+				name, issuer = entries[i].Name, entries[i].Issuer
+			}
+		}
+	}
+	if issuer == "" {
+		return "", "", "an MCTL_OIDC_PROVIDERS entry named " + cfg.ZitadelLinkProvider
+	}
+	return name, issuer, ""
 }
 
 // oauthFlowStore is the OAuth server's shared flow store, or nil when there
