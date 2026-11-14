@@ -53,6 +53,10 @@ type AppStatus struct {
 	UpdatedAt  time.Time `json:"updatedAt"`
 	Namespace  string    `json:"namespace"`
 	Project    string    `json:"project"`
+	// DestNamespace is spec.destination.namespace: the namespace the
+	// application deploys into, which is what ties it to a tenant. Namespace
+	// above is where the Application object itself lives (argocd).
+	DestNamespace string `json:"destNamespace,omitempty"`
 }
 
 // AppList is a list of ArgoCD applications.
@@ -85,7 +89,10 @@ func (c *Client) GetAppStatus(appName string) (*AppStatus, error) {
 			Namespace string `json:"namespace"`
 		} `json:"metadata"`
 		Spec struct {
-			Project string `json:"project"`
+			Project     string `json:"project"`
+			Destination struct {
+				Namespace string `json:"namespace"`
+			} `json:"destination"`
 		} `json:"spec"`
 		Status struct {
 			Health struct {
@@ -114,6 +121,8 @@ func (c *Client) GetAppStatus(appName string) (*AppStatus, error) {
 		UpdatedAt:  updatedAt,
 		Namespace:  raw.Metadata.Namespace,
 		Project:    raw.Spec.Project,
+
+		DestNamespace: raw.Spec.Destination.Namespace,
 	}, nil
 }
 

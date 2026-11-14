@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -242,43 +243,75 @@ func (h *Handlers) GetServiceStatus(w http.ResponseWriter, r *http.Request) {
 
 	svc, _ := h.opts.GitReader.GetService(team, app)
 
-	// ArgoCD app naming convention: {team}-{app} (or preview-{team}-{app})
+	if h.opts.ArgoCD == nil {
+		writeError(w, http.StatusServiceUnavailable, "cannot read ArgoCD status for "+team+"/"+app+": argocd not configured")
+		return
+	}
+
+	// ArgoCD app naming convention: {team}-{app} (or preview-{team}-{app}).
+	// The name alone does not say whose application it is: tenant "acme"
+	// asking for app "beta-web" builds the name "acme-beta-web", which is
+	// tenant "acme-beta"'s app "web". Ownership is the destination namespace,
+	// so only an application that deploys into the caller's tenant counts.
 	argoAppName := team + "-" + app
-	status, err := h.opts.ArgoCD.GetAppStatus(argoAppName)
+	status, found, err := h.tenantAppStatus(argoAppName, team)
+	if err == nil && !found {
+		status, found, err = h.tenantAppStatus("preview-"+argoAppName, team, team+"-preview")
+	}
 	if err != nil {
+		slog.Warn("service status: argocd read failed", "team", team, "app", app, "error", err)
+		msg := "cannot read ArgoCD status for " + team + "/" + app + " right now; try again later"
 		if errors.Is(err, argocd.ErrUnauthenticated) {
-			writeJSON(w, http.StatusOK, map[string]interface{}{
-				"argocd":  nil,
-				"service": svc,
-				"error":   "ArgoCD token invalid or expired — update ARGOCD_TOKEN in Vault at platform/mctl-api/argocd-token",
-			})
-			return
+			msg = "ArgoCD token invalid or expired — update ARGOCD_TOKEN in Vault at platform/mctl-api/argocd-token"
 		}
-		// 403 or 404 — try preview app name
-		status, err = h.opts.ArgoCD.GetAppStatus("preview-" + argoAppName)
-		if err != nil {
-			if errors.Is(err, argocd.ErrUnauthenticated) {
-				writeJSON(w, http.StatusOK, map[string]interface{}{
-					"argocd":  nil,
-					"service": svc,
-					"error":   "ArgoCD token invalid or expired — update ARGOCD_TOKEN in Vault at platform/mctl-api/argocd-token",
-				})
-				return
-			}
-			// App not found in ArgoCD — return service info without ArgoCD status
-			writeJSON(w, http.StatusOK, map[string]interface{}{
-				"argocd":  nil,
-				"service": svc,
-				"note":    "ArgoCD application not found: " + argoAppName + " (service may not be deployed yet or uses a different naming convention)",
-			})
-			return
-		}
+		writeError(w, http.StatusServiceUnavailable, msg)
+		return
+	}
+	if !found {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"argocd":  nil,
+			"service": svc,
+			"note":    "ArgoCD application not found: " + argoAppName + " (service may not be deployed yet or uses a different naming convention)",
+		})
+		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"argocd":  status,
 		"service": svc,
 	})
+}
+
+// tenantAppStatus reads one ArgoCD application and returns it only when it
+// deploys into one of namespaces.
+//
+// found=false with a nil error is an observed absence for this tenant:
+// ArgoCD answered 404, or the application exists and deploys into another
+// namespace (it belongs to someone else, so for this caller it is not
+// there). Everything that is not an observation is an error, never "not
+// found": a 401/403, a transport failure, a malformed answer, and an
+// application whose destination namespace is empty, whose owner is therefore
+// unknown.
+func (h *Handlers) tenantAppStatus(name string, namespaces ...string) (*argocd.AppStatus, bool, error) {
+	status, err := h.opts.ArgoCD.GetAppStatus(name)
+	if err != nil {
+		if errors.Is(err, argocd.ErrNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("argocd application %s: %w", name, err)
+	}
+	if status == nil || status.Name != name {
+		return nil, false, fmt.Errorf("argocd application %s: malformed answer", name)
+	}
+	if status.DestNamespace == "" {
+		return nil, false, fmt.Errorf("argocd application %s: no destination namespace, owner unknown", name)
+	}
+	if !slices.Contains(namespaces, status.DestNamespace) {
+		slog.Warn("service status: argocd application deploys outside the requested tenant",
+			"application", name, "dest_namespace", status.DestNamespace, "want", namespaces)
+		return nil, false, nil
+	}
+	return status, true, nil
 }
 
 // ListAgentRuns returns recent mctl-agents-* operations from the audit log.

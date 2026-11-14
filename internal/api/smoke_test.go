@@ -235,7 +235,8 @@ func (f *fakeArgoCD) GetAppStatus(name string) (*argocd.AppStatus, error) {
 	if s, ok := f.apps[name]; ok {
 		return s, nil
 	}
-	return nil, fmt.Errorf("app not found: %s", name)
+	// The real client's documented absence signal (HTTP 404).
+	return nil, fmt.Errorf("%w: %s", argocd.ErrNotFound, name)
 }
 
 func (f *fakeArgoCD) ListApps(_ string) ([]argocd.AppStatus, error) {
@@ -326,7 +327,7 @@ func newTestRouter(t *testing.T) (http.Handler, *fakeExecutor) {
 	}
 	argoClient := &fakeArgoCD{
 		apps: map[string]*argocd.AppStatus{
-			"admins-mctl-web": {Name: "admins-mctl-web", Health: "Healthy", SyncStatus: "Synced"},
+			"admins-mctl-web": {Name: "admins-mctl-web", Health: "Healthy", SyncStatus: "Synced", DestNamespace: "admins"},
 		},
 	}
 	exec := &fakeExecutor{}
