@@ -107,6 +107,10 @@ var (
 	ErrApprovalAlreadyDecided = errors.New("action approval request is already decided")
 	// ErrApprovalSelfDecision: the requester tried to decide its own request.
 	ErrApprovalSelfDecision = errors.New("the requester cannot decide its own action approval request")
+	// ErrApprovalDeciderUnresolved: the request records its requester's
+	// principal but the decider's could not be resolved, so the two cannot
+	// be told apart. An unknown decider is never treated as a different one.
+	ErrApprovalDeciderUnresolved = errors.New("the decider's principal could not be resolved, so it cannot be told apart from the requester")
 	// Consume refusals, one per reason.
 	ErrApprovalNotApproved    = errors.New("action approval request is not approved")
 	ErrApprovalDenied         = errors.New("action approval request was denied")
@@ -771,6 +775,29 @@ type ActionDecisionInput struct {
 	FreshFor       time.Duration
 }
 
+// CheckSelfDecision refuses a decision by the request's own requester. The
+// principal string alone is not enough: one human signed in through two
+// providers (github:x, oidc:x) has two strings but one prn_ principal. When
+// the request records the requester's principal id, the decider's must be
+// known and different; an unresolved decider is refused rather than assumed
+// to be someone else. Rows written before principal ids were recorded carry
+// none, and for those the string comparison is all the evidence there is.
+func CheckSelfDecision(cur *ActionApprovalRequest, decidedBy, decidedByPrincipalID string) error {
+	if cur.RequestedBy == decidedBy {
+		return fmt.Errorf("%w: %s requested %s", ErrApprovalSelfDecision, decidedBy, cur.ID)
+	}
+	if cur.RequestedByPrincipalID == "" {
+		return nil
+	}
+	if decidedByPrincipalID == "" {
+		return fmt.Errorf("%w: %s", ErrApprovalDeciderUnresolved, cur.ID)
+	}
+	if decidedByPrincipalID == cur.RequestedByPrincipalID {
+		return fmt.Errorf("%w: principal %s requested %s", ErrApprovalSelfDecision, decidedByPrincipalID, cur.ID)
+	}
+	return nil
+}
+
 // DecideActionApproval moves a pending request to approved or denied. A
 // request that is decided, consumed or expired is refused, and the
 // requester can never decide its own request.
@@ -802,8 +829,8 @@ func (s *Store) DecideActionApproval(ctx context.Context, in ActionDecisionInput
 		if IsGlovoKind(cur.ActionKind) {
 			return fmt.Errorf("%w: %s", ErrApprovalKindNotSpendable, cur.ID)
 		}
-		if cur.RequestedBy == in.DecidedBy {
-			return fmt.Errorf("%w: %s requested %s", ErrApprovalSelfDecision, in.DecidedBy, cur.ID)
+		if err := CheckSelfDecision(cur, in.DecidedBy, in.DecidedByPrincipalID); err != nil {
+			return err
 		}
 		switch cur.State {
 		case ApprovalPending:
