@@ -614,8 +614,11 @@ var builtinOperations = []Operation{
 			{Name: "dockerfile_path", Type: "string", Default: "Dockerfile", Pattern: RepoPathPattern, Description: "Path to Dockerfile inside dockerfile_repo (default: Dockerfile)", MaxLength: RepoPathMaxLength},
 			// Set only by POST /api/v1/deploy/apply from an approved plan
 			// (mctl-api#1026); the generic execute path refuses them in a body.
-			{Name: "preview_id", Type: "string", Default: "", Pattern: "^[a-z0-9]{6}$", Description: "Server-set from an approved deploy plan; never accepted from a caller."},
-			{Name: "gitops_ref", Type: "string", Default: "", Pattern: "^[0-9a-f]{40}$", Description: "Server-set gitops commit of an approved deploy plan; never accepted from a caller."},
+			// OmitWhenEmpty: every other preview-deploy submit must reach Argo
+			// without them, so the CWFT's own defaults (generate an id, use the
+			// gitops HEAD) apply rather than an empty override.
+			{Name: "preview_id", Type: "string", Default: "", OmitWhenEmpty: true, Pattern: "^[a-z0-9]{6}$", Description: "Server-set from an approved deploy plan; never accepted from a caller."},
+			{Name: "gitops_ref", Type: "string", Default: "", OmitWhenEmpty: true, Pattern: "^[0-9a-f]{40}$", Description: "Server-set gitops commit of an approved deploy plan; never accepted from a caller."},
 		},
 	},
 	{

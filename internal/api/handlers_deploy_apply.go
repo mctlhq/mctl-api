@@ -352,7 +352,12 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Revalidate the decider's ownership, then spend, then submit.
+	// Revalidate the decider's ownership, then spend, then submit. Ownership
+	// lives in the gitops checkout, not in the ledger, so it cannot be read
+	// inside the spend's compare-and-set: a demotion landing between the two
+	// reads still lets this one apply through, the same window the generic
+	// action approvals have. The grant is single-use and bound to one plan,
+	// so the window admits at most the apply the owner already approved.
 	reval, ok := h.revalidateDeployGrant(w, r, user, grant, p.Tenant)
 	if !ok {
 		a.set("denied", "denied:revalidation")
