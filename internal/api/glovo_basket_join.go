@@ -20,6 +20,7 @@ import (
 
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/glovo"
+	"github.com/mctlhq/mctl-api/internal/glovobasketjoin"
 )
 
 // glovoBasketJoinMount is the basket join prefix relative to /api/v1.
@@ -105,4 +106,11 @@ func (h *Handlers) skipGlovoBasketServiceRateLimit(limitMW func(http.Handler) ht
 			limited.ServeHTTP(w, r)
 		})
 	}
+}
+
+// GlovoBasketJoinRefused counts one refusal of the basket join routes, by
+// route and code (both bounded sets), on the Glovo route refusal metric.
+// cmd/api sets it as glovobasketjoin.Service.OnRefused.
+func GlovoBasketJoinRefused(rf glovobasketjoin.Refused) {
+	glovoRouteRefusals.WithLabelValues("basket_join_"+rf.Route, string(rf.Code)).Inc()
 }

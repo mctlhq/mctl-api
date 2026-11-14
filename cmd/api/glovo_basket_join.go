@@ -17,6 +17,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/mctlhq/mctl-api/internal/api"
@@ -66,7 +67,13 @@ func configureGlovoBasketJoin(lookup func(string) (string, bool), d *glovoBasket
 		return nil, errors.New("GLOVO_BASKET_JOIN_ENABLED=true requires GLOVO_BASKET_MCP_ENABLED=true; basket join stays off")
 	}
 	svc := &glovobasketjoin.Service{Tokens: d.Tokens, Principals: d.Principals, Resolver: d.Resolver,
-		Approvals: d.Approvals, ApprovalPageBaseURL: d.PageBaseURL}
+		Approvals: d.Approvals, ApprovalPageBaseURL: d.PageBaseURL,
+		// Every refusal is counted and logged (route, code, status, reason;
+		// never the token), so a misbehaving basket service is visible.
+		OnRefused: func(rf glovobasketjoin.Refused) {
+			api.GlovoBasketJoinRefused(rf)
+			slog.Warn("glovo basket join refused", "refusal", rf.String())
+		}}
 	if err := svc.Validate(); err != nil {
 		return nil, fmt.Errorf("%w; basket join stays off", err)
 	}

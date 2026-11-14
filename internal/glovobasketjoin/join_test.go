@@ -366,3 +366,32 @@ func TestCanDecideNeedsDeveloper(t *testing.T) {
 		t.Fatalf("DeciderRole = %s", DeciderRole)
 	}
 }
+
+// The per-subject and write ceilings answer 429 with Retry-After, and a
+// refused write never reaches the ledger.
+func TestRateLimits(t *testing.T) {
+	e := newEnv(t)
+	svc := &Service{Tokens: e.svc.Tokens, Principals: e.svc.Principals, Resolver: e.svc.Resolver, Approvals: e.ap,
+		PerSubject: 3, Writes: 1, OnRefused: e.svc.OnRefused}
+	e.h = svc.Handler()
+	if res := e.call(PathApprovals, e.token(nil), approvalBody("")); res.code != http.StatusCreated {
+		t.Fatalf("first write = %d %s", res.code, res.raw)
+	}
+	req := httptest.NewRequest(http.MethodPost, PathApprovals, strings.NewReader(approvalBody("")))
+	req.Header.Set(glovojoin.SubjectTokenHeader, e.token(nil))
+	rec := httptest.NewRecorder()
+	e.h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "60" || len(e.ap.calls) != 1 {
+		t.Fatalf("second write = %d retry %q, %d ledger calls", rec.Code, rec.Header().Get("Retry-After"), len(e.ap.calls))
+	}
+	// Reads have their own, higher ceiling: one left of three.
+	if res := e.call(PathResolve, e.token(nil), "{}"); res.code != http.StatusOK {
+		t.Fatalf("read under the ceiling = %d %s", res.code, res.raw)
+	}
+	if res := e.call(PathResolve, e.token(nil), "{}"); res.code != http.StatusTooManyRequests {
+		t.Fatalf("read over the ceiling = %d %s", res.code, res.raw)
+	}
+	if n := len(e.refusals); n != 2 || e.refusals[0].Code != glovo.CodeRateLimited {
+		t.Fatalf("refusals %+v", e.refusals)
+	}
+}

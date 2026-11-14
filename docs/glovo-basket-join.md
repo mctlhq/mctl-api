@@ -104,8 +104,19 @@ This makes a binding self-contained, so its foreign key into
   only there, under the table lock, and re-enabled before commit).
 
 The binary accepts basket schema 1 and 2 at boot, so the deploy and the
-migration can happen in either order. `/approvals` answers `not_ready` until
-the database is at schema 2.
+migration can happen in either order, going forward. Two limits:
+
+- The schema version is read once at boot. Pods already running when the
+  database moves to schema 2 keep their schema-1 behaviour (the trigger fills
+  the snapshot), and `/approvals` answers `not_ready` until they restart.
+- Rolling back to a binary from before basket schema 2 is not possible once
+  the database is at schema 2 while the basket MCP is on: that binary accepts
+  only schema 1 and refuses the boot. Such a rollback needs
+  `GLOVO_BASKET_MCP_ENABLED` off.
+
+Every refusal of the two routes is counted on
+`mctl_glovo_route_refusals_total{route="basket_join_<route>"}` and logged
+(route, code, status, reason; never a token).
 
 The schema is applied by `glovo-migrate` (step `basket-v2`, formerly
 `basket-v1`) under the migration role; DDL never runs on the runtime role or
