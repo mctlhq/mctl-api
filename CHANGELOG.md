@@ -1,5 +1,21 @@
 # Changelog
 
+## [4.159.0](https://github.com/mctlhq/mctl-api/compare/4.158.1...4.159.0) (2026-11-14)
+
+
+### Features
+
+* **glovo:** add the dark basket join API for the basket service ([79547f5](https://github.com/mctlhq/mctl-api/commit/79547f559291aafa195b06f36150d4e8b4529349))
+* **glovobasket:** freeze a snapshot on every basket approval binding ([6653466](https://github.com/mctlhq/mctl-api/commit/6653466072cd7f11fd07fdc8013eba03bd26c126))
+* **glovo:** dark basket join API and frozen approval snapshots ([fcfdfc2](https://github.com/mctlhq/mctl-api/commit/fcfdfc2b8ac0657ca5f4af13e151a13daac6e59e))
+* **helm:** deployApprovalUISecret slot for the deploy approval page ([db4eb87](https://github.com/mctlhq/mctl-api/commit/db4eb87be3cd5839d42dd15abd8e248e169fdde3))
+* **helm:** deployApprovalUISecret slot for the deploy approval page ([71c5097](https://github.com/mctlhq/mctl-api/commit/71c5097af44771d1f7b5ed51cb8900626ed9456c))
+
+
+### Bug Fixes
+
+* **glovo:** count basket join refusals and state rollout limits ([eae5a86](https://github.com/mctlhq/mctl-api/commit/eae5a8669068f0207a5437147bd75173010d1fe1))
+
 ## [4.158.1](https://github.com/mctlhq/mctl-api/compare/4.158.0...4.158.1) (2026-11-14)
 
 
