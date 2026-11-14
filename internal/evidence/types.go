@@ -36,8 +36,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"math/big"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -504,7 +507,11 @@ func encodeCanonical(buf *bytes.Buffer, v any) error {
 		encodeCanonicalString(buf, t)
 		return nil
 	case json.Number:
-		buf.WriteString(t.String())
+		lit, err := canonicalNumber(t.String())
+		if err != nil {
+			return err
+		}
+		buf.WriteString(lit)
 		return nil
 	case float64:
 		return encodeCanonicalFloat(buf, t)
@@ -547,6 +554,74 @@ func encodeCanonical(buf *bytes.Buffer, v any) error {
 		return nil
 	default:
 		return fmt.Errorf("evidence: canonical json: unsupported type %T", v)
+	}
+}
+
+// canonicalNumber renders a JSON number literal the way Tier A's
+// json.dumps(json.loads(lit)) does, so the canonical bytes depend on the
+// number's value and not on how the sender spelled it (1E2, 1e+2 and 100.0
+// are one float; -0 and 0 are one int).
+//
+// Python's json.loads makes an int of a literal with no fraction and no
+// exponent (arbitrary precision) and a float of anything else; json.dumps
+// writes an int as plain digits and a float as repr(). A float that
+// overflows to infinity is refused, as allow_nan=False refuses it.
+func canonicalNumber(lit string) (string, error) {
+	if !strings.ContainsAny(lit, ".eE") {
+		var n big.Int
+		if _, ok := n.SetString(lit, 10); !ok {
+			return "", fmt.Errorf("evidence: canonical json: invalid integer %q", lit)
+		}
+		return n.String(), nil
+	}
+	f, err := strconv.ParseFloat(lit, 64)
+	if err != nil && !(errors.Is(err, strconv.ErrRange) && f == 0) {
+		return "", fmt.Errorf("evidence: canonical json: number %q is out of range", lit)
+	}
+	if math.IsInf(f, 0) || math.IsNaN(f) {
+		return "", fmt.Errorf("evidence: canonical json: number %q is out of range", lit)
+	}
+	return pythonFloatRepr(f), nil
+}
+
+// pythonFloatRepr is CPython's repr(float): the shortest digits that round-
+// trip, in fixed notation with at least one fractional digit when the
+// decimal point position is in -3..16, and as d[.ddd]e±XX otherwise.
+func pythonFloatRepr(f float64) string {
+	if f == 0 {
+		if math.Signbit(f) {
+			return "-0.0"
+		}
+		return "0.0"
+	}
+	// Shortest round-trip digits, e.g. "-1.5e+16".
+	e := strconv.FormatFloat(f, 'e', -1, 64)
+	sign := ""
+	if e[0] == '-' {
+		sign, e = "-", e[1:]
+	}
+	mant, expStr, _ := strings.Cut(e, "e")
+	digits := strings.Replace(mant, ".", "", 1)
+	exp, _ := strconv.Atoi(expStr)
+	decpt := exp + 1 // digits are d.ddd × 10^exp, so the point sits after decpt digits
+	if decpt > 16 || decpt < -3 {
+		m := digits[:1]
+		if len(digits) > 1 {
+			m += "." + digits[1:]
+		}
+		expSign := "+"
+		if exp < 0 {
+			expSign, exp = "-", -exp
+		}
+		return fmt.Sprintf("%s%se%s%02d", sign, m, expSign, exp)
+	}
+	switch {
+	case decpt <= 0:
+		return sign + "0." + strings.Repeat("0", -decpt) + digits
+	case decpt >= len(digits):
+		return sign + digits + strings.Repeat("0", decpt-len(digits)) + ".0"
+	default:
+		return sign + digits[:decpt] + "." + digits[decpt:]
 	}
 }
 

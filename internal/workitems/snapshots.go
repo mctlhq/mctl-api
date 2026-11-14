@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -155,7 +156,12 @@ func (in SnapshotInput) validate() error {
 	}
 	var obj map[string]json.RawMessage
 	dec := json.NewDecoder(bytes.NewReader(in.Canonical))
-	if err := dec.Decode(&obj); err != nil || obj == nil || dec.More() {
+	// dec.More() would miss a trailing '}' or ']': it reports only whether
+	// another element of an enclosing array or object follows.
+	if err := dec.Decode(&obj); err != nil || obj == nil {
+		return invalid("snapshot must be one JSON object")
+	}
+	if _, err := dec.Token(); err != io.EOF { //nolint:errorlint // io.EOF is a sentinel, never wrapped, by json.Decoder.Token's contract
 		return invalid("snapshot must be one JSON object")
 	}
 	if got := HashCanonical(in.Canonical); in.ContentHash != got {

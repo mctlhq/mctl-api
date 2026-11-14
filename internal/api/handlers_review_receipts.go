@@ -256,7 +256,7 @@ func decodeReviewBody(w http.ResponseWriter, raw []byte, dst any) string {
 		writeErrorCode(w, http.StatusBadRequest, code, "invalid JSON body: "+err.Error(), nil)
 		return code
 	}
-	if dec.More() {
+	if jsonHasTrailingData(dec) {
 		writeErrorCode(w, http.StatusBadRequest, reviewreceipts.CodeMalformed, "trailing data after JSON object", nil)
 		return reviewreceipts.CodeMalformed
 	}
@@ -602,4 +602,13 @@ func (h *Handlers) GetReviewGate(w http.ResponseWriter, r *http.Request) {
 		"pool_count":         len(docs),
 		"complete":           true,
 	})
+}
+
+// jsonHasTrailingData reports whether anything but whitespace follows the
+// value dec just decoded. dec.More() cannot answer that: it reports only
+// whether another element of an enclosing array or object follows, so it
+// is false before a stray '}' or ']' and lets `{...}}` through.
+func jsonHasTrailingData(dec *json.Decoder) bool {
+	_, err := dec.Token()
+	return err != io.EOF //nolint:errorlint // io.EOF is a sentinel, never wrapped, by json.Decoder.Token's contract
 }

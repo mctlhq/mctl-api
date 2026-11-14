@@ -148,6 +148,14 @@ func TestSealSnapshotRejectsBadInputBeforeTouchingTheStore(t *testing.T) {
 			in.Canonical = []byte(`{"a":1} {"b":2}`)
 			in.ContentHash = HashCanonical(in.Canonical)
 		},
+		"trailing brace": func(in *SnapshotInput) {
+			in.Canonical = []byte(`{"a":1}}`)
+			in.ContentHash = HashCanonical(in.Canonical)
+		},
+		"trailing bracket": func(in *SnapshotInput) {
+			in.Canonical = []byte(`{"a":1}]`)
+			in.ContentHash = HashCanonical(in.Canonical)
+		},
 		"empty": func(in *SnapshotInput) { in.Canonical, in.ContentHash = nil, HashCanonical(nil) },
 		"json null": func(in *SnapshotInput) {
 			in.Canonical = []byte(`null`)

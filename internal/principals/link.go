@@ -399,17 +399,20 @@ func (s *Store) DisablePrincipal(ctx context.Context, id string, admins []string
 	if err != nil {
 		return none, err
 	}
-	if p.Kind != auth.KindHuman {
-		return none, fmt.Errorf("%w: only a human principal is disabled here, not a %s principal", ErrNotHuman, p.Kind)
-	}
 	var res DisableResult
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM external_identities
 		WHERE principal_id=$1 AND revoked_at IS NULL`, id).Scan(&res.LiveIdentities); err != nil {
 		return none, fmt.Errorf("principals: count live identities: %w", err)
 	}
+	// Already disabled is a no-op whoever the principal is, so it is
+	// answered before the kind check: a retried disable of a non-human
+	// principal that is already off must not turn into ErrNotHuman.
 	if p.Status != StatusActive {
 		res.AlreadyDisabled = true
 		return res, nil
+	}
+	if p.Kind != auth.KindHuman {
+		return none, fmt.Errorf("%w: only a human principal is disabled here, not a %s principal", ErrNotHuman, p.Kind)
 	}
 	if isAdmin {
 		if err := lastAdminTx(ctx, tx, others); err != nil {
