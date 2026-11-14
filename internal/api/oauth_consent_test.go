@@ -104,10 +104,27 @@ func TestCIMDRedirectDecidedByDocumentAlone(t *testing.T) {
 	}
 }
 
+// The Claude Code document lists http://localhost/callback and
+// http://127.0.0.1/callback; Claude Code sends the localhost form with an
+// ephemeral port. Both forms pass, and neither host stands in for the other.
+func TestCIMDLocalhostRedirectAnyPort(t *testing.T) {
+	h, _ := cimdEnv(t, cimdDoc("http://localhost/callback"))
+	for _, u := range []string{"http://localhost/callback", "http://localhost:62049/callback"} {
+		if rec := authorize(h, cimdID, u); rec.Code != http.StatusFound {
+			t.Errorf("%s: %d", u, rec.Code)
+		}
+	}
+	for _, u := range []string{"http://127.0.0.1:62049/callback", "http://localhost:62049/other", "http://LOCALHOST:62049/callback"} {
+		if rec := authorize(h, cimdID, u); rec.Code != http.StatusBadRequest || rec.Header().Get("Location") != "" {
+			t.Errorf("%s: %d Location=%q", u, rec.Code, rec.Header().Get("Location"))
+		}
+	}
+}
+
 // A refused redirect_uri is logged clipped: /authorize takes it from the query
 // before any other check, so one request must not write an unbounded record.
 func TestCIMDRefusedRedirectIsLoggedClipped(t *testing.T) {
-	h, _ := cimdEnv(t, cimdDoc(cbURL, "http://localhost/callback"))
+	h, _ := cimdEnv(t, cimdDoc(cbURL, "http://app.example.com/callback"))
 	var buf bytes.Buffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
@@ -117,7 +134,7 @@ func TestCIMDRefusedRedirectIsLoggedClipped(t *testing.T) {
 		t.Fatalf("code %d", rec.Code)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "redirect_uri not in the client metadata document") || !strings.Contains(out, "http://localhost/callback") {
+	if !strings.Contains(out, "redirect_uri not in the client metadata document") || !strings.Contains(out, "http://app.example.com/callback") {
 		t.Fatalf("missing log line or dropped entry: %.300s", out)
 	}
 	if len(out) > 4096 {

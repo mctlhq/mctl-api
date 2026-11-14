@@ -70,15 +70,15 @@ func TestRedirectAllowed(t *testing.T) {
 		"https://app.example.com/cb",
 		"http://127.0.0.1:8000/callback",
 		"http://[::1]:9/cb?x=1",
-		// parseDocument drops localhost, so no resolved document holds this
-		// entry; it stays to pin that localhost gets exact match only.
-		"http://localhost:8000/cb",
+		"http://localhost/callback",
 	}
 	yes := []string{
 		"https://app.example.com/cb",
 		"http://127.0.0.1:8000/callback", "http://127.0.0.1:54321/callback", "http://127.0.0.1/callback",
 		"http://[::1]:5555/cb?x=1",
-		"http://localhost:8000/cb",
+		// Claude Code: its document lists http://localhost/callback and it
+		// sends an ephemeral port.
+		"http://localhost/callback", "http://localhost:62049/callback",
 	}
 	no := []string{
 		"https://app.example.com:444/cb", "https://app.example.com/other",
@@ -87,7 +87,13 @@ func TestRedirectAllowed(t *testing.T) {
 		"http://127.0.0.1:5000/callback?y=2",    // query
 		"http://[::1]:5555/cb",                  // query missing
 		"http://[::1]:5555/cb?x=2",              // query differs
-		"http://localhost:9999/cb",              // no port exemption for localhost
+		"http://localhost:62049/cb",             // localhost path differs
+		"http://LOCALHOST:62049/callback",       // other spelling
+		"http://localhost.:62049/callback",      // other spelling
+		"http://localhost:8000/callback?x=1",    // localhost query differs
+		"https://localhost:62049/callback",      // scheme
+		"http://u@localhost:62049/callback",     // userinfo
+		"http://localhost.evil.com:62049/callback",
 		"http://[::1]:5/callback",               // other host's path
 		"http://u@127.0.0.1:5000/callback",      // userinfo
 		"http://127.0.0.1:5000/callback#frag",   // fragment
@@ -108,6 +114,13 @@ func TestRedirectAllowed(t *testing.T) {
 	// The exemption never applies to an entry the document does not list.
 	if RedirectAllowed([]string{"https://app.example.com/cb"}, "http://127.0.0.1:5000/cb") {
 		t.Error("loopback not listed must be refused")
+	}
+	// localhost and 127.0.0.1 never stand in for each other.
+	if RedirectAllowed([]string{"http://127.0.0.1/callback"}, "http://localhost:5000/callback") {
+		t.Error("localhost must not match a 127.0.0.1 entry")
+	}
+	if RedirectAllowed([]string{"http://localhost/callback"}, "http://127.0.0.1:5000/callback") {
+		t.Error("127.0.0.1 must not match a localhost entry")
 	}
 }
 
@@ -254,7 +267,7 @@ func TestDocumentValidation(t *testing.T) {
 	for _, u := range []string{
 		"about:blank", "filesystem:https://a/x", "jar:https://a/x!/", "intent://cb#Intent;end", "ftp://app.example.com/cb",
 		"ws://app.example.com/cb", "wss://app.example.com/cb", "view-source:https://a/", "com.example.app:/cb",
-		"http://app.example.com/cb", "http://localhost:8000/cb", "http://127.0.0.2/cb", "https:///cb", "HTTP://app.example.com/cb",
+		"http://app.example.com/cb", "http://LOCALHOST:8000/cb", "http://127.0.0.2/cb", "https:///cb", "HTTP://app.example.com/cb",
 	} {
 		cases["scheme "+u] = fmt.Sprintf(`{"client_id":%q,"redirect_uris":[%q],"token_endpoint_auth_method":"none"}`, id, u)
 	}
@@ -269,7 +282,7 @@ func TestDocumentValidation(t *testing.T) {
 
 func TestAllowedRedirectSchemes(t *testing.T) {
 	f := newFixture(t, nil)
-	uris := []string{"https://app.example.com/cb", "http://127.0.0.1:8000/cb", "http://[::1]/cb"}
+	uris := []string{"https://app.example.com/cb", "http://127.0.0.1:8000/cb", "http://[::1]/cb", "http://localhost/cb"}
 	body, _ := json.Marshal(map[string]any{"client_id": f.url, "redirect_uris": uris, "token_endpoint_auth_method": "none"})
 	f.h = serve(string(body))
 	d, err := f.resolver().Resolve(context.Background(), f.url)
@@ -280,10 +293,10 @@ func TestAllowedRedirectSchemes(t *testing.T) {
 
 // A well-formed entry outside the allowlist is dropped, not fatal: the
 // document resolves with only its usable entries, and a dropped entry never
-// matches. This is the shape of the Codex document.
+// matches.
 func TestUnusableRedirectEntriesAreDropped(t *testing.T) {
 	f := newFixture(t, nil)
-	uris := []string{"http://127.0.0.1/callback", "http://localhost/callback", "javascript:alert(1)", "https://app.example.com/cb", "com.example.app:/cb"}
+	uris := []string{"http://127.0.0.1/callback", "http://localhost.example.com/callback", "javascript:alert(1)", "https://app.example.com/cb", "com.example.app:/cb"}
 	body, _ := json.Marshal(map[string]any{"client_id": f.url, "redirect_uris": uris, "token_endpoint_auth_method": "none"})
 	f.h = serve(string(body))
 	d, err := f.resolver().Resolve(context.Background(), f.url)
@@ -294,7 +307,7 @@ func TestUnusableRedirectEntriesAreDropped(t *testing.T) {
 	if !slices.Equal(d.RedirectURIs, want) {
 		t.Fatalf("redirect_uris = %v, want %v", d.RedirectURIs, want)
 	}
-	if dropped := []string{"http://localhost/callback", "javascript:alert(1)", "com.example.app:/cb"}; !slices.Equal(d.DroppedRedirectURIs, dropped) {
+	if dropped := []string{"http://localhost.example.com/callback", "javascript:alert(1)", "com.example.app:/cb"}; !slices.Equal(d.DroppedRedirectURIs, dropped) {
 		t.Fatalf("dropped = %v, want %v", d.DroppedRedirectURIs, dropped)
 	}
 	for _, u := range []string{"http://127.0.0.1:51234/callback", "https://app.example.com/cb"} {
@@ -302,7 +315,7 @@ func TestUnusableRedirectEntriesAreDropped(t *testing.T) {
 			t.Errorf("%q must be allowed", u)
 		}
 	}
-	for _, u := range []string{"http://localhost/callback", "http://localhost:51234/callback", "javascript:alert(1)", "com.example.app:/cb"} {
+	for _, u := range []string{"http://localhost.example.com/callback", "http://localhost:51234/callback", "javascript:alert(1)", "com.example.app:/cb"} {
 		if RedirectAllowed(d.RedirectURIs, u) {
 			t.Errorf("%q must be refused", u)
 		}
@@ -602,4 +615,31 @@ func TestRateStateIsHardBounded(t *testing.T) {
 func dialTo(ctx context.Context, network, addr string) (net.Conn, error) {
 	var d net.Dialer
 	return d.DialContext(ctx, network, addr)
+}
+
+// The Claude Code document, verbatim from
+// https://claude.ai/oauth/claude-code-client-metadata (2026-11-14): both
+// entries are kept and the localhost form it sends, with an ephemeral port,
+// is allowed.
+func TestClaudeCodeDocument(t *testing.T) {
+	f := newFixture(t, nil)
+	uris := []string{"http://localhost/callback", "http://127.0.0.1/callback"}
+	body, _ := json.Marshal(map[string]any{
+		"client_id": f.url, "client_name": "Claude Code", "redirect_uris": uris,
+		"grant_types": []string{"authorization_code", "refresh_token"}, "response_types": []string{"code"},
+		"token_endpoint_auth_method": "none",
+	})
+	f.h = serve(string(body))
+	d, err := f.resolver().Resolve(context.Background(), f.url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(d.RedirectURIs, uris) || len(d.DroppedRedirectURIs) != 0 {
+		t.Fatalf("redirect_uris = %v, dropped = %v", d.RedirectURIs, d.DroppedRedirectURIs)
+	}
+	for _, u := range []string{"http://localhost:62049/callback", "http://127.0.0.1:62049/callback"} {
+		if !RedirectAllowed(d.RedirectURIs, u) {
+			t.Errorf("%q must be allowed", u)
+		}
+	}
 }
