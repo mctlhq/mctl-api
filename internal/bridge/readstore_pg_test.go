@@ -385,3 +385,47 @@ func TestClaimGatesV1alpha2RowsWhileWireVersionsDisabled(t *testing.T) {
 		t.Fatalf("claimed %v, want only the v1alpha1 command %s (v1alpha2 %s must stay gated)", ids, v1, v2)
 	}
 }
+
+// has_table_privilege with a comma list is true when ANY listed privilege is
+// held, so a runtime role holding SELECT but missing INSERT used to pass the
+// check and the grant was skipped. A re-apply must restore each privilege.
+func TestApplyReadSchemaRestoresAMissingTablePrivilege(t *testing.T) {
+	s := pgStore(t)
+	ctx := context.Background()
+	role := "brrd_" + rtRnd()
+	if _, err := s.Pool().Exec(ctx, `CREATE ROLE `+role+` NOLOGIN`); err != nil {
+		t.Fatalf("create role: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = s.Pool().Exec(context.Background(), `DROP OWNED BY `+role)
+		_, _ = s.Pool().Exec(context.Background(), `DROP ROLE IF EXISTS `+role)
+	})
+	apply := func() {
+		t.Helper()
+		tx, err := s.Pool().Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyReadSchemaTx(ctx, tx, role); err != nil {
+			_ = tx.Rollback(ctx)
+			t.Fatal(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	apply()
+	for _, priv := range []string{"INSERT", "DELETE", "SELECT"} {
+		if _, err := s.Pool().Exec(ctx, `REVOKE `+priv+` ON bridge_read_results FROM `+role); err != nil {
+			t.Fatalf("revoke %s: %v", priv, err)
+		}
+		apply()
+		var has bool
+		if err := s.Pool().QueryRow(ctx, `SELECT has_table_privilege($1, 'bridge_read_results', $2)`, role, priv).Scan(&has); err != nil {
+			t.Fatal(err)
+		}
+		if !has {
+			t.Errorf("re-apply did not restore %s on bridge_read_results", priv)
+		}
+	}
+}

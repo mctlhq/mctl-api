@@ -123,14 +123,14 @@ func newApplyConfig(opts []ApplyOption) applyConfig {
 // above the compiled one.
 //
 // runtimeRole is the role the caller will run work-items traffic as; it is
-// validated and, when it is not the work-items role, receives nothing here.
+// validated and receives nothing here. Only the role named by
+// WithWorkItemsRole is granted DML: runtimeRole used to stand in for it when
+// the option was absent, which granted the full generic DML set to a role
+// the caller never named for it.
 func ApplySchema(ctx context.Context, migrationConnStr, runtimeRole string, opts ...ApplyOption) error {
 	cfg := newApplyConfig(opts)
 	if runtimeRole != "" && !roleNameRE.MatchString(runtimeRole) {
 		return errors.New("workitems: invalid runtime role name")
-	}
-	if cfg.workItemsRole == "" {
-		cfg.workItemsRole = runtimeRole
 	}
 	if cfg.workItemsRole != "" && !roleNameRE.MatchString(cfg.workItemsRole) {
 		return errors.New("workitems: invalid work-items role name")

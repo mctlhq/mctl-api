@@ -92,7 +92,7 @@ func TestApplySchemaRefusesAForeignOwner(t *testing.T) {
 	if _, err := oc.Exec(context.Background(), `CREATE TABLE public.work_items (id TEXT PRIMARY KEY)`); err != nil {
 		t.Fatal(err)
 	}
-	err := ApplySchema(context.Background(), e.migURL, e.wi)
+	err := ApplySchema(context.Background(), e.migURL, e.wi, WithWorkItemsRole(e.wi))
 	if err == nil || !strings.Contains(err.Error(), "not owned by the migration role") {
 		t.Fatalf("ApplySchema over a foreign-owned table: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestApplySchemaRefusesAHigherVersion(t *testing.T) {
 	if _, err := mig.Exec(context.Background(), `UPDATE public.work_items_schema_version SET version = version + 1`); err != nil {
 		t.Fatal(err)
 	}
-	if err := ApplySchema(context.Background(), e.migURL, e.wi); err == nil || !strings.Contains(err.Error(), "above the compiled version") {
+	if err := ApplySchema(context.Background(), e.migURL, e.wi, WithWorkItemsRole(e.wi)); err == nil || !strings.Contains(err.Error(), "above the compiled version") {
 		t.Fatalf("ApplySchema with a newer recorded version: %v", err)
 	}
 }
@@ -168,5 +168,36 @@ func TestGenericGrantsAreExact(t *testing.T) {
 				t.Errorf("work-items role %s on %s: have %v, want %v", p, rel, has, want[rel][p])
 			}
 		}
+	}
+}
+
+// TestApplySchemaGrantsNothingWithoutAWorkItemsRole: as WithWorkItemsRole
+// documents, without it ApplySchema issues no generic grants. runtimeRole used
+// to stand in for the work-items role, so the runtime role received the full
+// generic DML set it was never named for.
+func TestApplySchemaGrantsNothingWithoutAWorkItemsRole(t *testing.T) {
+	e := newSplitEnv(t)
+	if err := ApplySchema(context.Background(), e.migURL, e.rt); err != nil {
+		t.Fatalf("ApplySchema: %v", err)
+	}
+	mig := e.conn(e.migURL)
+	for _, g := range genericGrants {
+		for _, priv := range []string{"SELECT", "INSERT", "UPDATE", "DELETE"} {
+			var has bool
+			if err := mig.QueryRow(context.Background(), `SELECT has_table_privilege($1, $2, $3)`,
+				e.rt, "public."+g.Table, priv).Scan(&has); err != nil {
+				t.Fatal(err)
+			}
+			if has {
+				t.Errorf("runtime role %s holds %s on %s without WithWorkItemsRole", e.rt, priv, g.Table)
+			}
+		}
+	}
+	var seq bool
+	if err := mig.QueryRow(context.Background(), `SELECT has_sequence_privilege($1, 'public.work_item_intents_id_seq', 'USAGE')`, e.rt).Scan(&seq); err != nil {
+		t.Fatal(err)
+	}
+	if seq {
+		t.Errorf("runtime role %s holds USAGE on work_item_intents_id_seq without WithWorkItemsRole", e.rt)
 	}
 }
