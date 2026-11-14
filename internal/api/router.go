@@ -329,6 +329,11 @@ type Options struct {
 	// nine routes under /api/v1/assistants/glovo/v1alpha1. Nil, or Enabled
 	// false (GLOVO_JOIN_ENABLED), leaves them unmounted (404).
 	GlovoJoin *GlovoJoinRoutes
+	// GlovoBasketJoin configures the basket join API for the separate Glovo
+	// basket service: /api/v1/assistants/glovo-basket/v1. Nil, or not fully
+	// configured (GLOVO_BASKET_JOIN_ENABLED and the service identity), leaves
+	// it unmounted (404).
+	GlovoBasketJoin *GlovoBasketJoinRoutes
 	// Glovo configures the synthetic Glovo connection routes (mctl-api#961):
 	// facade, tenant installation and worker. Nil, or Enabled false, makes
 	// every one of them answer 503 not_ready.
@@ -615,6 +620,9 @@ func NewRouter(opts Options) http.Handler {
 		// The Glovo join facade reaches only the join prefix, and nothing else
 		// reaches the join prefix (mctl-api#957).
 		r.Use(h.glovoJoinGate)
+		// The basket service reaches only the basket join prefix, and
+		// nothing else reaches that prefix.
+		r.Use(h.glovoBasketJoinGate)
 		// A surface principal's ceiling counts every call it makes, so it
 		// runs before the gate: the gate turns a relay call into the linked
 		// human, and a refused relay still costs a link lookup.
@@ -685,12 +693,12 @@ func NewRouter(opts Options) http.Handler {
 		// not used on this group; Traefik cannot spoof RemoteAddr as loopback.
 		// The write 20/min group below does NOT skip loopback — MCP deploys
 		// must still be throttled.
-		r.Use(skipGlovoFacadeRateLimit(skipLoopbackRateLimit(httprate.Limit(300, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+		r.Use(h.skipGlovoBasketServiceRateLimit(skipGlovoFacadeRateLimit(skipLoopbackRateLimit(httprate.Limit(300, 1*time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
 			if user := auth.UserFromContext(r.Context()); user != nil {
 				return "user:" + rateLimitSubject(r, user), nil
 			}
 			return keyByTrustedIP(r)
-		})))))
+		}))))))
 		// Shadow comparison of tenant authorization (mctl-api#377). After
 		// every gate that substitutes a relayed or delegated human, so the
 		// caller compared is the one the handlers authorize, and after the
@@ -977,6 +985,13 @@ func NewRouter(opts Options) http.Handler {
 			// per-principal limiter above skips the facade.
 			if opts.GlovoJoin.mounted() {
 				r.Mount(glovoJoinMount, opts.GlovoJoin.handler())
+			}
+			// Glovo basket join (the basket service split): dark. Mounted
+			// only when GLOVO_BASKET_JOIN_ENABLED and the one service
+			// identity are configured; glovoBasketJoinGate confines both
+			// directions, the routes carry their own limiters.
+			if opts.GlovoBasketJoin.mounted() {
+				r.Mount(glovoBasketJoinMount, opts.GlovoBasketJoin.Handler)
 			}
 
 			// Glovo pilot allowlist: per (tenant, principal), human admins only.

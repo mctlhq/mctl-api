@@ -343,6 +343,8 @@ var basketTriggers = [][2]string{
 	{"glovo.basket_revisions", "basket_revisions_frozen"},
 	{"glovo.basket_revisions", "basket_revisions_no_truncate"},
 	{"glovo.baskets", "baskets_guard"},
+	// Basket schema 2: fills a binding's frozen snapshot.
+	{"glovo.basket_approval_bindings", "basket_approval_bindings_snapshot"},
 }
 
 func readBasket(ctx context.Context, tx pgx.Tx) (stepState, error) {
@@ -372,6 +374,14 @@ func readBasket(ctx context.Context, tx pgx.Tx) (stepState, error) {
 	}
 	if !fk {
 		s.problems = append(s.problems, "basket_approval_bindings_revision_fk missing or not validated")
+	}
+	var snap bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'basket_approval_bindings_snapshot_chk'
+	  AND conrelid = to_regclass('glovo.basket_approval_bindings') AND convalidated)`).Scan(&snap); err != nil {
+		return s, observeErr("read the basket binding snapshot check", err)
+	}
+	if !snap {
+		s.problems = append(s.problems, "basket_approval_bindings_snapshot_chk missing or not validated")
 	}
 	return s, nil
 }

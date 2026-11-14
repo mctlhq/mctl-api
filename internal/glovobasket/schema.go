@@ -28,7 +28,19 @@ import (
 )
 
 // SchemaVersion is the version recorded in glovo.basket_schema_version.
-const SchemaVersion = 1
+// Version 2 adds the frozen snapshot of the approved revision to
+// glovo.basket_approval_bindings (snapshot_canonical, snapshot_lines), so an
+// approval no longer needs basket_revisions to be shown or re-checked; the
+// foreign key into basket_revisions stays until the basket tables move out
+// of this database.
+const SchemaVersion = 2
+
+// MinVerifiedSchemaVersion is the oldest recorded version VerifySchema still
+// accepts. A build that knows version 2 keeps serving a database that is
+// still at version 1 (it then writes no snapshot itself: the database fills
+// it once migrated), so deploying the binary and running the migrator can
+// happen in either order.
+const MinVerifiedSchemaVersion = 1
 
 // approvalSchemaMin is the glovo approval schema version that has
 // glovo.basket_approval_bindings (internal/workitems).
@@ -151,6 +163,69 @@ END $$;
 ALTER TABLE glovo.basket_revisions ENABLE TRIGGER basket_revisions_frozen;
 ALTER TABLE glovo.basket_revisions ENABLE TRIGGER basket_revisions_no_truncate;
 ALTER TABLE glovo.baskets ENABLE TRIGGER baskets_guard;
+` + basketSnapshotSchema
+
+// basketSnapshotSchema is version 2: every basket approval binding carries
+// the canonical form and the priced lines of the revision it approves, frozen
+// with it. The fingerprint CHECK ties the snapshot to the binding's own
+// basket_fingerprint, so a snapshot that is not the approved content cannot
+// be stored. Existing bindings are backfilled from basket_revisions (the
+// foreign key guarantees the revision exists), and a binding inserted without
+// a snapshot, by a build that does not write one yet, is filled from the same
+// revision by a BEFORE INSERT trigger; a binding whose revision cannot be
+// found keeps a NULL snapshot and the CHECK refuses it.
+//
+// The table is otherwise insert-only (basket_approval_bindings_guard): the
+// backfill disables that guard for its one UPDATE, inside this transaction,
+// under the table lock, and enables it again before the transaction ends, so
+// no other session ever sees it disabled.
+const basketSnapshotSchema = `
+LOCK TABLE glovo.basket_approval_bindings IN SHARE ROW EXCLUSIVE MODE;
+ALTER TABLE glovo.basket_approval_bindings
+  ADD COLUMN IF NOT EXISTS snapshot_canonical BYTEA,
+  ADD COLUMN IF NOT EXISTS snapshot_lines JSONB;
+
+CREATE OR REPLACE FUNCTION glovo.basket_approval_bindings_snapshot() RETURNS trigger
+LANGUAGE plpgsql AS $f$
+BEGIN
+  IF NEW.snapshot_canonical IS NULL AND NEW.snapshot_lines IS NULL THEN
+    SELECT r.canonical, r.lines INTO NEW.snapshot_canonical, NEW.snapshot_lines
+      FROM glovo.basket_revisions r
+     WHERE r.basket_id = NEW.basket_id AND r.revision = NEW.revision AND r.basket_fingerprint = NEW.basket_fingerprint
+       AND r.tenant = NEW.tenant AND r.owner_principal_id = NEW.owner_principal_id;
+  END IF;
+  RETURN NEW;
+END
+$f$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM glovo.basket_approval_bindings WHERE snapshot_canonical IS NULL OR snapshot_lines IS NULL) THEN
+    ALTER TABLE glovo.basket_approval_bindings DISABLE TRIGGER basket_approval_bindings_guard;
+    UPDATE glovo.basket_approval_bindings b SET snapshot_canonical = r.canonical, snapshot_lines = r.lines
+      FROM glovo.basket_revisions r
+     WHERE (b.snapshot_canonical IS NULL OR b.snapshot_lines IS NULL)
+       AND r.basket_id = b.basket_id AND r.revision = b.revision AND r.basket_fingerprint = b.basket_fingerprint
+       AND r.tenant = b.tenant AND r.owner_principal_id = b.owner_principal_id;
+    ALTER TABLE glovo.basket_approval_bindings ENABLE TRIGGER basket_approval_bindings_guard;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'basket_approval_bindings_snapshot_chk'
+                  AND conrelid = 'glovo.basket_approval_bindings'::regclass) THEN
+    ALTER TABLE glovo.basket_approval_bindings ADD CONSTRAINT basket_approval_bindings_snapshot_chk
+      CHECK (snapshot_canonical IS NOT NULL AND snapshot_lines IS NOT NULL
+             AND basket_fingerprint = 'sha256:' || encode(sha256(snapshot_canonical), 'hex')
+             AND jsonb_typeof(snapshot_lines) = 'array'
+             AND jsonb_array_length(snapshot_lines) BETWEEN 1 AND 30) NOT VALID;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'basket_approval_bindings_snapshot'
+                  AND tgrelid = 'glovo.basket_approval_bindings'::regclass) THEN
+    CREATE TRIGGER basket_approval_bindings_snapshot BEFORE INSERT ON glovo.basket_approval_bindings
+      FOR EACH ROW EXECUTE FUNCTION glovo.basket_approval_bindings_snapshot();
+  END IF;
+END $$;
+ALTER TABLE glovo.basket_approval_bindings VALIDATE CONSTRAINT basket_approval_bindings_snapshot_chk;
+ALTER TABLE glovo.basket_approval_bindings ENABLE TRIGGER basket_approval_bindings_guard;
+ALTER TABLE glovo.basket_approval_bindings ENABLE TRIGGER basket_approval_bindings_snapshot;
 `
 
 // ApplySchema creates the basket tables, grants the runtime role exactly the
@@ -265,7 +340,7 @@ SELECT coalesce(array_agg(x ORDER BY x), '{}') FROM (
     WHERE n.nspname = 'glovo' AND c.relname = ANY($1) AND pg_get_userbyid(c.relowner) <> current_user
   UNION ALL
   SELECT 'glovo.' || p.proname || '()' FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-    WHERE n.nspname = 'glovo' AND p.proname IN ('basket_revisions_frozen', 'baskets_guard')
+    WHERE n.nspname = 'glovo' AND p.proname IN ('basket_revisions_frozen', 'baskets_guard', 'basket_approval_bindings_snapshot')
       AND pg_get_userbyid(p.proowner) <> current_user) s`, basketTables).Scan(&out); err != nil {
 		return nil, fmt.Errorf("glovo basket: ownership check: %w", err)
 	}
@@ -287,12 +362,21 @@ func checkOwnership(ctx context.Context, tx pgx.Tx) error {
 // what this build needs.
 var ErrSchemaNotReady = errors.New("glovo basket: schema not ready")
 
-// VerifySchema is the boot check of cmd/api: the recorded version equals the
-// compiled one, every guard trigger is present and enabled, and the binding
-// foreign key exists. A failed read is returned as is, never as "absent".
+// VerifySchema is the boot check of cmd/api; see VerifySchemaVersion.
 func VerifySchema(ctx context.Context, q dbq.Querier) error {
+	_, err := VerifySchemaVersion(ctx, q)
+	return err
+}
+
+// VerifySchemaVersion checks that the recorded version is one this build
+// serves (MinVerifiedSchemaVersion to SchemaVersion), that every guard
+// trigger of that version is present and enabled, and that the binding
+// foreign key exists; at version 2 also that the snapshot trigger is enabled
+// and the snapshot CHECK is validated. It returns the recorded version. A
+// failed read is returned as is, never as "absent" and never as a version.
+func VerifySchemaVersion(ctx context.Context, q dbq.Querier) (int, error) {
 	var version *int
-	var triggers, fk int
+	var triggers, fk, snapTrigger, snapCheck int
 	if err := q.QueryRow(ctx, `
 SELECT (SELECT max(version) FROM glovo.basket_schema_version),
        (SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -300,18 +384,26 @@ SELECT (SELECT max(version) FROM glovo.basket_schema_version),
            AND ((c.relname = 'basket_revisions' AND t.tgname IN ('basket_revisions_frozen', 'basket_revisions_no_truncate'))
              OR (c.relname = 'baskets' AND t.tgname = 'baskets_guard'))),
        (SELECT count(*) FROM pg_constraint WHERE conname = 'basket_approval_bindings_revision_fk'
-         AND conrelid = 'glovo.basket_approval_bindings'::regclass AND convalidated)`).Scan(&version, &triggers, &fk); err != nil {
-		return fmt.Errorf("glovo basket: verify schema: %w", err)
+         AND conrelid = 'glovo.basket_approval_bindings'::regclass AND convalidated),
+       (SELECT count(*) FROM pg_trigger WHERE tgname = 'basket_approval_bindings_snapshot'
+         AND tgrelid = 'glovo.basket_approval_bindings'::regclass AND tgenabled = 'O'),
+       (SELECT count(*) FROM pg_constraint WHERE conname = 'basket_approval_bindings_snapshot_chk'
+         AND conrelid = 'glovo.basket_approval_bindings'::regclass AND convalidated)`).Scan(&version, &triggers, &fk, &snapTrigger, &snapCheck); err != nil {
+		return 0, fmt.Errorf("glovo basket: verify schema: %w", err)
 	}
 	switch {
-	case version == nil || *version != SchemaVersion:
-		return fmt.Errorf("%w: schema version is not %d", ErrSchemaNotReady, SchemaVersion)
+	case version == nil || *version < MinVerifiedSchemaVersion || *version > SchemaVersion:
+		return 0, fmt.Errorf("%w: schema version is not %d to %d", ErrSchemaNotReady, MinVerifiedSchemaVersion, SchemaVersion)
 	case triggers != 3:
-		return fmt.Errorf("%w: a guard trigger is missing or disabled", ErrSchemaNotReady)
+		return 0, fmt.Errorf("%w: a guard trigger is missing or disabled", ErrSchemaNotReady)
 	case fk != 1:
-		return fmt.Errorf("%w: the approval binding foreign key is missing", ErrSchemaNotReady)
+		return 0, fmt.Errorf("%w: the approval binding foreign key is missing", ErrSchemaNotReady)
+	case *version >= 2 && snapTrigger != 1:
+		return 0, fmt.Errorf("%w: the binding snapshot trigger is missing or disabled", ErrSchemaNotReady)
+	case *version >= 2 && snapCheck != 1:
+		return 0, fmt.Errorf("%w: the binding snapshot check is missing or not validated", ErrSchemaNotReady)
 	}
-	return nil
+	return *version, nil
 }
 
 // TxSetup runs first inside the schema transaction, before any lock is taken

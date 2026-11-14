@@ -135,40 +135,11 @@ func (v *SubjectVerifier) Verify(r *http.Request) (Subject, *Refusal) {
 	if v == nil || v.Tokens == nil || v.Resolver == nil || v.Installs == nil {
 		return Subject{}, refusal(glovo.CodeNotReady, "not_ready:subject_verifier")
 	}
-	now := time.Now
-	if v.Now != nil {
-		now = v.Now
+	tok, rf := VerifySubjectToken(r, v.Tokens, v.Now)
+	if rf != nil {
+		return Subject{}, rf
 	}
-	for name := range r.URL.Query() {
-		if queryTokenNames[strings.ToLower(name)] {
-			r.Header.Del(SubjectTokenHeader)
-			return Subject{}, unauthenticated("subject_token_invalid:in_query")
-		}
-	}
-	vals := r.Header.Values(SubjectTokenHeader)
-	r.Header.Del(SubjectTokenHeader)
-	if len(vals) != 1 {
-		return Subject{}, unauthenticated("subject_token_invalid:header")
-	}
-	token := strings.TrimSpace(vals[0])
-	if token == "" || strings.ContainsAny(token, " \t\r\n") {
-		return Subject{}, unauthenticated("subject_token_invalid:header")
-	}
-	user, err := v.Tokens.ValidateJWT(token)
-	if err != nil || user == nil {
-		return Subject{}, unauthenticated("subject_token_invalid:verify")
-	}
-	if !user.IsGlovoAudience() {
-		return Subject{}, unauthenticated("subject_token_invalid:audience")
-	}
-	exp, ok := tokenExpiry(token)
-	if !ok || !exp.After(now()) {
-		return Subject{}, unauthenticated("subject_token_invalid:exp")
-	}
-	_, stn, hasGrant := user.TeamGrant()
-	if h := strings.TrimSpace(r.Header.Get(SelectedTenantHeader)); h != "" && hasGrant && h != stn {
-		return Subject{}, refusal(glovo.CodeNotAuthorized, "tenant_mismatch")
-	}
+	user, exp := tok.User, tok.ExpiresAt
 	sc, ge := v.Resolver.Resolve(r.Context(), user)
 	if ge != nil {
 		return Subject{}, &Refusal{Err: ge, Reason: "resolver:" + string(ge.Code)}
@@ -186,13 +157,71 @@ func (v *SubjectVerifier) Verify(r *http.Request) (Subject, *Refusal) {
 		}
 		return Subject{}, refusal(glovo.CodeUnavailable, "dependency_unavailable:install")
 	}
-	sum := sha256.Sum256([]byte(token))
 	return Subject{
 		PrincipalID: sc.PrincipalID, Tenant: sc.Tenant, GrantID: sc.GrantID, FamilyID: sc.RefreshFamilyID,
 		InstallID: inst.InstallID, InstallRevision: inst.InstallRevision,
 		Scopes:    []string{ScopeRead, ScopeBasketPrepare},
-		TokenHash: hex.EncodeToString(sum[:]), ExpiresAt: exp, User: user,
+		TokenHash: tok.TokenHash, ExpiresAt: exp, User: user,
 	}, nil
+}
+
+// SubjectToken is a subject token that VerifySubjectToken accepted: the user
+// it stands for (not yet resolved to a scope), its expiry and the hex sha256
+// of the token, the only form of it that may reach a log or a cache key.
+type SubjectToken struct {
+	User      *auth.User
+	ExpiresAt time.Time
+	TokenHash string
+}
+
+// VerifySubjectToken is the token half of Verify, shared by every join
+// surface that takes the end user's token in X-Mctl-Subject-Token: a token in
+// the query string is refused, exactly one header value is required, the
+// token must verify (signature, issuer, expiry, audience precedence), carry
+// exactly the Glovo audience and not be expired, and a selected-tenant header
+// must agree with the token's team. It deletes the subject header from r.
+// Every failure is a *Refusal; nothing here resolves a scope.
+func VerifySubjectToken(r *http.Request, tokens TokenValidator, nowFn func() time.Time) (SubjectToken, *Refusal) {
+	if tokens == nil {
+		r.Header.Del(SubjectTokenHeader)
+		return SubjectToken{}, refusal(glovo.CodeNotReady, "not_ready:subject_verifier")
+	}
+	now := time.Now
+	if nowFn != nil {
+		now = nowFn
+	}
+	for name := range r.URL.Query() {
+		if queryTokenNames[strings.ToLower(name)] {
+			r.Header.Del(SubjectTokenHeader)
+			return SubjectToken{}, unauthenticated("subject_token_invalid:in_query")
+		}
+	}
+	vals := r.Header.Values(SubjectTokenHeader)
+	r.Header.Del(SubjectTokenHeader)
+	if len(vals) != 1 {
+		return SubjectToken{}, unauthenticated("subject_token_invalid:header")
+	}
+	token := strings.TrimSpace(vals[0])
+	if token == "" || strings.ContainsAny(token, " \t\r\n") {
+		return SubjectToken{}, unauthenticated("subject_token_invalid:header")
+	}
+	user, err := tokens.ValidateJWT(token)
+	if err != nil || user == nil {
+		return SubjectToken{}, unauthenticated("subject_token_invalid:verify")
+	}
+	if !user.IsGlovoAudience() {
+		return SubjectToken{}, unauthenticated("subject_token_invalid:audience")
+	}
+	exp, ok := tokenExpiry(token)
+	if !ok || !exp.After(now()) {
+		return SubjectToken{}, unauthenticated("subject_token_invalid:exp")
+	}
+	_, stn, hasGrant := user.TeamGrant()
+	if h := strings.TrimSpace(r.Header.Get(SelectedTenantHeader)); h != "" && hasGrant && h != stn {
+		return SubjectToken{}, refusal(glovo.CodeNotAuthorized, "tenant_mismatch")
+	}
+	sum := sha256.Sum256([]byte(token))
+	return SubjectToken{User: user, ExpiresAt: exp, TokenHash: hex.EncodeToString(sum[:])}, nil
 }
 
 // tokenExpiry reads exp from a token the validator has already verified. It
