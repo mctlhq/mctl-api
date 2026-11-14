@@ -248,7 +248,8 @@ func (h *Handlers) GetServiceStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ArgoCD app naming convention: {team}-{app} (or preview-{team}-{app}).
+	// ArgoCD app naming convention: {team}-{app} (or preview-{team}-{app}),
+	// generated into AppProject tenantAppProject.
 	// The name alone does not say whose application it is: tenant "acme"
 	// asking for app "beta-web" builds the name "acme-beta-web", which is
 	// tenant "acme-beta"'s app "web". Ownership is the destination namespace,
@@ -282,18 +283,29 @@ func (h *Handlers) GetServiceStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// tenantAppStatus reads one ArgoCD application and returns it only when it
-// deploys into one of namespaces.
+// tenantAppProject is the AppProject the services ApplicationSet generates
+// tenant applications into (mctl-gitops
+// platform-gitops/bootstrap/templates/bootstrap/applicationset-apps.yaml).
+const tenantAppProject = "apps"
+
+// tenantAppStatus reads one ArgoCD application in tenantAppProject and
+// returns it only when it deploys into one of namespaces.
+//
+// The read names the project on purpose. Without one ArgoCD answers 403 for
+// an application that does not exist, so it hides absence behind the same
+// code as a denied read (argo-cd server/application getAppEnforceRBAC). With
+// the project, 404 is the absence signal, also for an application that
+// exists in another project, and 403 means the read itself was denied.
 //
 // found=false with a nil error is an observed absence for this tenant:
 // ArgoCD answered 404, or the application exists and deploys into another
 // namespace (it belongs to someone else, so for this caller it is not
 // there). Everything that is not an observation is an error, never "not
-// found": a 401/403, a transport failure, a malformed answer, and an
-// application whose destination namespace is empty, whose owner is therefore
-// unknown.
+// found": a 401/403, a transport failure, a malformed answer, an answer from
+// another project, and an application whose destination namespace is empty,
+// whose owner is therefore unknown.
 func (h *Handlers) tenantAppStatus(name string, namespaces ...string) (*argocd.AppStatus, bool, error) {
-	status, err := h.opts.ArgoCD.GetAppStatus(name)
+	status, err := h.opts.ArgoCD.GetProjectAppStatus(tenantAppProject, name)
 	if err != nil {
 		if errors.Is(err, argocd.ErrNotFound) {
 			return nil, false, nil
@@ -302,6 +314,9 @@ func (h *Handlers) tenantAppStatus(name string, namespaces ...string) (*argocd.A
 	}
 	if status == nil || status.Name != name {
 		return nil, false, fmt.Errorf("argocd application %s: malformed answer", name)
+	}
+	if status.Project != tenantAppProject {
+		return nil, false, fmt.Errorf("argocd application %s: answer is from project %q, asked for %q", name, status.Project, tenantAppProject)
 	}
 	if status.DestNamespace == "" {
 		return nil, false, fmt.Errorf("argocd application %s: no destination namespace, owner unknown", name)

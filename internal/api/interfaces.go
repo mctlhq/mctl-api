@@ -81,6 +81,7 @@ type GitReader interface {
 // ArgoStatusClient is the subset of argocd.Client used by API handlers.
 type ArgoStatusClient interface {
 	GetAppStatus(name string) (*argocd.AppStatus, error)
+	GetProjectAppStatus(project, name string) (*argocd.AppStatus, error)
 	ListApps(project string) ([]argocd.AppStatus, error)
 	ListWorkloads() ([]argocd.Workload, error)
 }

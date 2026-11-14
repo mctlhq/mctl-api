@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -30,20 +31,44 @@ import (
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
-// scriptedArgo answers GetAppStatus from a per-name table of apps and
-// errors; a name in neither is the real client's 404.
+// scriptedArgo answers from a per-name table of apps and errors the way
+// ArgoCD 3.3 does (argo-cd server/application getAppEnforceRBAC): without a
+// project a missing application is a 403, indistinguishable from a denied
+// read; with a project it is a 404, and so is an application that lives in
+// another project.
 type scriptedArgo struct {
 	fakeArgoCD
 	errs  map[string]error
 	asked []string
+	// ignoreProject answers as if no project had been given in the query
+	// beyond the 403-for-missing rule, standing in for a server that drops
+	// the parameter.
+	ignoreProject bool
 }
 
 func (s *scriptedArgo) GetAppStatus(name string) (*argocd.AppStatus, error) {
-	s.asked = append(s.asked, name)
+	s.asked = append(s.asked, "/"+name)
 	if err, ok := s.errs[name]; ok {
 		return nil, err
 	}
+	if _, ok := s.apps[name]; !ok {
+		return nil, fmt.Errorf("%w: permission denied", argocd.ErrForbidden)
+	}
 	return s.fakeArgoCD.GetAppStatus(name)
+}
+
+func (s *scriptedArgo) GetProjectAppStatus(project, name string) (*argocd.AppStatus, error) {
+	if project == "" {
+		return s.GetAppStatus(name)
+	}
+	s.asked = append(s.asked, project+"/"+name)
+	if err, ok := s.errs[name]; ok {
+		return nil, err
+	}
+	if s.ignoreProject {
+		return s.fakeArgoCD.GetAppStatus(name)
+	}
+	return s.fakeArgoCD.GetProjectAppStatus(project, name)
 }
 
 func statusRouter(t *testing.T, argo *scriptedArgo) http.Handler {
@@ -74,9 +99,9 @@ var acmeUser = &auth.User{ID: "acme-dev", Groups: []string{"acme"}}
 // which is tenant "acme-beta"'s app "web". Its status must not come back.
 func TestServiceStatus_DoesNotReadAnotherTenantsApp(t *testing.T) {
 	foreign := &argocd.AppStatus{Name: "acme-beta-web", Health: "Degraded", SyncStatus: "OutOfSync",
-		Revision: "beta-secret-rev", Message: "beta internal message", DestNamespace: "acme-beta"}
+		Revision: "beta-secret-rev", Message: "beta internal message", Project: "apps", DestNamespace: "acme-beta"}
 	foreignPreview := &argocd.AppStatus{Name: "preview-acme-beta-web", Health: "Degraded", SyncStatus: "OutOfSync",
-		Revision: "beta-preview-rev", DestNamespace: "acme-beta-preview"}
+		Revision: "beta-preview-rev", Project: "apps", DestNamespace: "acme-beta-preview"}
 	argo := &scriptedArgo{fakeArgoCD: fakeArgoCD{apps: map[string]*argocd.AppStatus{
 		"acme-beta-web":         foreign,
 		"preview-acme-beta-web": foreignPreview,
@@ -100,8 +125,8 @@ func TestServiceStatus_ReturnsOwnApp(t *testing.T) {
 		name string
 		app  *argocd.AppStatus
 	}{
-		{"production app", &argocd.AppStatus{Name: "acme-web", Health: "Healthy", SyncStatus: "Synced", DestNamespace: "acme"}},
-		{"preview app in the preview namespace", &argocd.AppStatus{Name: "preview-acme-web", Health: "Healthy", SyncStatus: "Synced", DestNamespace: "acme-preview"}},
+		{"production app", &argocd.AppStatus{Name: "acme-web", Health: "Healthy", SyncStatus: "Synced", Project: "apps", DestNamespace: "acme"}},
+		{"preview app in the preview namespace", &argocd.AppStatus{Name: "preview-acme-web", Health: "Healthy", SyncStatus: "Synced", Project: "apps", DestNamespace: "acme-preview"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -116,12 +141,48 @@ func TestServiceStatus_ReturnsOwnApp(t *testing.T) {
 	}
 }
 
+// TestServiceStatus_AbsentAppIsANote: missing in both legs. ArgoCD only
+// says 404 when the read names the project; unscoped it says 403 for a
+// missing application, which must not be what the handler relies on.
 func TestServiceStatus_AbsentAppIsANote(t *testing.T) {
-	argo := &scriptedArgo{fakeArgoCD: fakeArgoCD{apps: map[string]*argocd.AppStatus{}}}
+	cases := map[string]map[string]*argocd.AppStatus{
+		"missing in both legs": {},
+		// ArgoCD hides an application of another project behind a 404 when
+		// the read names the project, so it is absent for this read.
+		"exists only in another project": {
+			"acme-web": {Name: "acme-web", Health: "Healthy", SyncStatus: "Synced", Project: "erpact", DestNamespace: "acme"},
+		},
+	}
+	for name, apps := range cases {
+		t.Run(name, func(t *testing.T) {
+			argo := &scriptedArgo{fakeArgoCD: fakeArgoCD{apps: apps}}
+			w := getAs(t, statusRouter(t, argo), "/api/v1/status/acme/web", acmeUser)
+			assertStatus(t, w, http.StatusOK)
+			if !strings.Contains(w.Body.String(), "ArgoCD application not found") || strings.Contains(w.Body.String(), "Healthy") {
+				t.Fatalf("want the not-found note, got %s", w.Body.String())
+			}
+			want := []string{"apps/acme-web", "apps/preview-acme-web"}
+			if !slices.Equal(argo.asked, want) {
+				t.Errorf("reads = %v, want both legs scoped to the project: %v", argo.asked, want)
+			}
+		})
+	}
+}
+
+// TestServiceStatus_MissingProdFallsThroughToPreview: the first leg's
+// absence must be a 404, or the preview leg is never reached.
+func TestServiceStatus_MissingProdFallsThroughToPreview(t *testing.T) {
+	argo := &scriptedArgo{fakeArgoCD: fakeArgoCD{apps: map[string]*argocd.AppStatus{
+		"preview-acme-web": {Name: "preview-acme-web", Health: "Healthy", SyncStatus: "Synced", Project: "apps", DestNamespace: "acme-preview"},
+	}}}
 	w := getAs(t, statusRouter(t, argo), "/api/v1/status/acme/web", acmeUser)
 	assertStatus(t, w, http.StatusOK)
-	if !strings.Contains(w.Body.String(), "ArgoCD application not found") {
-		t.Fatalf("want the not-found note on a 404 from ArgoCD, got %s", w.Body.String())
+	got, _ := decodeJSON(t, w)["argocd"].(map[string]interface{})
+	if got == nil || got["name"] != "preview-acme-web" {
+		t.Fatalf("argocd = %v, want the preview application after a 404 on acme-web", got)
+	}
+	if want := []string{"apps/acme-web", "apps/preview-acme-web"}; !slices.Equal(argo.asked, want) {
+		t.Errorf("reads = %v, want %v", argo.asked, want)
 	}
 }
 
@@ -134,14 +195,18 @@ func TestServiceStatus_UnreadableOwnershipFailsClosed(t *testing.T) {
 		argo *scriptedArgo
 	}{
 		{"destination namespace missing", &scriptedArgo{fakeArgoCD: fakeArgoCD{apps: map[string]*argocd.AppStatus{
-			"acme-web": {Name: "acme-web", Health: "Healthy", SyncStatus: "Synced"},
+			"acme-web": {Name: "acme-web", Health: "Healthy", SyncStatus: "Synced", Project: "apps"},
 		}}}},
 		{"preview destination namespace missing", &scriptedArgo{fakeArgoCD: fakeArgoCD{apps: map[string]*argocd.AppStatus{
-			"preview-acme-web": {Name: "preview-acme-web", Health: "Healthy", SyncStatus: "Synced"},
+			"preview-acme-web": {Name: "preview-acme-web", Health: "Healthy", SyncStatus: "Synced", Project: "apps"},
 		}}}},
 		{"answer names another application", &scriptedArgo{fakeArgoCD: fakeArgoCD{apps: map[string]*argocd.AppStatus{
-			"acme-web": {Name: "acme-beta-web", Health: "Healthy", SyncStatus: "Synced", DestNamespace: "acme"},
+			"acme-web": {Name: "acme-beta-web", Health: "Healthy", SyncStatus: "Synced", Project: "apps", DestNamespace: "acme"},
 		}}}},
+		{"answer is from another project", &scriptedArgo{ignoreProject: true, fakeArgoCD: fakeArgoCD{apps: map[string]*argocd.AppStatus{
+			"acme-web": {Name: "acme-web", Health: "Healthy", SyncStatus: "Synced", Project: "erpact", DestNamespace: "acme"},
+		}}}},
+		{"forbidden on the preview read", &scriptedArgo{errs: map[string]error{"preview-acme-web": fmt.Errorf("%w: denied", argocd.ErrForbidden)}}},
 		{"forbidden", &scriptedArgo{errs: map[string]error{"acme-web": fmt.Errorf("%w: denied", argocd.ErrForbidden)}}},
 		{"transport failure", &scriptedArgo{errs: map[string]error{"acme-web": errors.New("argocd request failed: connection refused")}}},
 		{"preview read fails after a 404", &scriptedArgo{errs: map[string]error{"preview-acme-web": errors.New("argocd returned 502")}}},
