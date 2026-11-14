@@ -306,3 +306,11 @@ usagePricingConfigMapKey: ""
 # Optional refs, so absent keys leave the page off (logged) rather than
 # failing the pod. Empty by default: renders nothing.
 glovoBasketUISecret: ""
+
+# Optional: Secret holding DEPLOY_APPROVAL_UI_CLIENT_ID and
+# DEPLOY_APPROVAL_UI_CLIENT_SECRET, the confidential ZITADEL client of the
+# deploy approval page (mctlhq/mctl-api#1026). In production the zitadel-iac
+# Job writes both into the same Secret as MCTL_OIDC_PROVIDERS. The page also
+# needs DEPLOY_APPROVAL_UI_ENABLED="true", SELF_URL and /deploy in
+# ingress.extraPaths. Empty by default: renders nothing.
+deployApprovalUISecret: ""

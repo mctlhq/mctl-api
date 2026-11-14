@@ -61,8 +61,12 @@ spec:
             {{- if and .Values.glovoBasketUISecret (or .Values.env.GLOVO_BASKET_UI_CLIENT_ID .Values.env.GLOVO_BASKET_UI_CLIENT_SECRET) }}
             {{- fail "set GLOVO_BASKET_UI_CLIENT_ID and GLOVO_BASKET_UI_CLIENT_SECRET either in env or through glovoBasketUISecret, not both" }}
             {{- end }}
+            {{- if and .Values.deployApprovalUISecret (or .Values.env.DEPLOY_APPROVAL_UI_CLIENT_ID .Values.env.DEPLOY_APPROVAL_UI_CLIENT_SECRET) }}
+            {{- fail "set DEPLOY_APPROVAL_UI_CLIENT_ID and DEPLOY_APPROVAL_UI_CLIENT_SECRET either in env or through deployApprovalUISecret, not both" }}
+            {{- end }}
             {{- range $key, $value := .Values.env }}
-            {{- /* oidcProvidersSecret, zitadelLinkSecret, oauthZitadelSecret and devLoopDecideSecret
+            {{- /* oidcProvidersSecret, zitadelLinkSecret, oauthZitadelSecret, devLoopDecideSecret,
+                   glovoBasketUISecret and deployApprovalUISecret
                    supply these below; a literal entry (even an empty one)
                    would otherwise render a second entry with the same name,
                    which server-side apply refuses. */}}
@@ -70,7 +74,8 @@ spec:
                            (and $.Values.zitadelLinkSecret (or (eq $key "ZITADEL_LINK_CLIENT_ID") (eq $key "ZITADEL_LINK_CLIENT_SECRET")))
                            (and $.Values.oauthZitadelSecret (or (eq $key "OAUTH_ZITADEL_CLIENT_ID") (eq $key "OAUTH_ZITADEL_CLIENT_SECRET")))
                            (and $.Values.devLoopDecideSecret (or (eq $key "DEVLOOP_DECIDE_CLIENT_ID") (eq $key "DEVLOOP_DECIDE_CLIENT_SECRET")))
-                           (and $.Values.glovoBasketUISecret (or (eq $key "GLOVO_BASKET_UI_CLIENT_ID") (eq $key "GLOVO_BASKET_UI_CLIENT_SECRET")))) }}
+                           (and $.Values.glovoBasketUISecret (or (eq $key "GLOVO_BASKET_UI_CLIENT_ID") (eq $key "GLOVO_BASKET_UI_CLIENT_SECRET")))
+                           (and $.Values.deployApprovalUISecret (or (eq $key "DEPLOY_APPROVAL_UI_CLIENT_ID") (eq $key "DEPLOY_APPROVAL_UI_CLIENT_SECRET")))) }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
@@ -277,6 +282,25 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.glovoBasketUISecret }}
                   key: GLOVO_BASKET_UI_CLIENT_SECRET
+                  optional: true
+            {{- end }}
+            {{- if .Values.deployApprovalUISecret }}
+            # The confidential ZITADEL client of the deploy approval page
+            # (mctlhq/mctl-api#1026), written by the zitadel-iac Job.
+            # Optional refs: with DEPLOY_APPROVAL_UI_ENABLED unset the page
+            # stays off; with it "true" and a key missing, cmd/api refuses to
+            # start rather than serve a page that cannot sign anyone in.
+            - name: DEPLOY_APPROVAL_UI_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.deployApprovalUISecret }}
+                  key: DEPLOY_APPROVAL_UI_CLIENT_ID
+                  optional: true
+            - name: DEPLOY_APPROVAL_UI_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.deployApprovalUISecret }}
+                  key: DEPLOY_APPROVAL_UI_CLIENT_SECRET
                   optional: true
             {{- end }}
             {{- if .Values.usagePricingConfigMap }}
