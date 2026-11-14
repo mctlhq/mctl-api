@@ -69,6 +69,22 @@ func CheckSupport(in SupportInputs) error {
 	return nil
 }
 
+// ttlFromSeconds converts a ttl_seconds value without letting it wrap:
+// time.Duration(n) * time.Second overflows int64 for |n| above ~9.2e9, and a
+// value such as 18446744074 wrapped to 0.29s and passed the 24h limit. An
+// unreadable or non-positive value becomes 0 and one above the limit becomes
+// just over it, so CheckSupport refuses both.
+func ttlFromSeconds(n int64, err error) time.Duration {
+	switch {
+	case err != nil || n <= 0:
+		return 0
+	case n > int64(SupportMaxTTL/time.Second):
+		return SupportMaxTTL + time.Second
+	default:
+		return time.Duration(n) * time.Second
+	}
+}
+
 // supportInputsFromBody derives the body-visible facts. Tenant binding, owner
 // authorization and auth_ref liveness are server facts established at the
 // authority checkpoints; at body-validation time the tenant comes from the
@@ -76,8 +92,7 @@ func CheckSupport(in SupportInputs) error {
 func supportInputsFromBody(obj map[string]any, tmpl Template) SupportInputs {
 	in := SupportInputs{OwnerAuthorized: true, TenantBound: true, Scope: tmpl.Scope}
 	if f, ok := obj["ttl_seconds"].(interface{ Int64() (int64, error) }); ok {
-		n, _ := f.Int64()
-		in.TTL = time.Duration(n) * time.Second
+		in.TTL = ttlFromSeconds(f.Int64())
 	}
 	if f, ok := obj["max_fires"].(interface{ Int64() (int64, error) }); ok {
 		n, _ := f.Int64()

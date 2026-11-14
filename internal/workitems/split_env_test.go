@@ -101,7 +101,7 @@ func newSplitEnv(t *testing.T) *splitEnv {
 // applyGeneric runs the generic ApplySchema under the migration role.
 func (e *splitEnv) applyGeneric() {
 	e.t.Helper()
-	if err := ApplySchema(context.Background(), e.migURL, e.wi); err != nil {
+	if err := ApplySchema(context.Background(), e.migURL, e.wi, WithWorkItemsRole(e.wi)); err != nil {
 		e.t.Fatalf("ApplySchema: %v", err)
 	}
 }

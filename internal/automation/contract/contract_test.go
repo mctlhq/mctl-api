@@ -278,6 +278,27 @@ func TestCheckSupport(t *testing.T) {
 	}
 }
 
+// A ttl_seconds whose conversion to a Duration overflows int64 must not wrap
+// into the allowed (0, 24h] window: 18446744074 s wrapped to ~0.29s and
+// -18446744073 s to ~0.71s, both accepted.
+func TestSupportTTLOverflowIsRefused(t *testing.T) {
+	base := SupportInputs{OwnerAuthorized: true, TenantBound: true, Scope: ScopeSupport, MaxFires: 1}
+	for _, lit := range []string{"18446744074", "-18446744073", "9223372036854775807", "86401", "0", "-1", "1e3", "3600.5"} {
+		in := supportInputsFromBody(map[string]any{"ttl_seconds": json.Number(lit)}, Template{Scope: ScopeSupport})
+		in.OwnerAuthorized, in.TenantBound, in.MaxFires = base.OwnerAuthorized, base.TenantBound, base.MaxFires
+		if CodeOf(CheckSupport(in)) != CodeSupportConstraint {
+			t.Errorf("ttl_seconds %s: accepted as TTL %v", lit, in.TTL)
+		}
+	}
+	for lit, want := range map[string]time.Duration{"1": time.Second, "86400": SupportMaxTTL} {
+		in := supportInputsFromBody(map[string]any{"ttl_seconds": json.Number(lit)}, Template{Scope: ScopeSupport})
+		in.OwnerAuthorized, in.TenantBound, in.MaxFires = base.OwnerAuthorized, base.TenantBound, base.MaxFires
+		if in.TTL != want || CheckSupport(in) != nil {
+			t.Errorf("ttl_seconds %s: TTL %v, err %v; want %v accepted", lit, in.TTL, CheckSupport(in), want)
+		}
+	}
+}
+
 func TestParallelValidation(t *testing.T) {
 	bodies := [][]byte{
 		[]byte(`{"idempotency_key":"k","template_id":"reminder.v1","params":{"text":"hi"},"trigger":{"kind":"at","instant":"2026-12-01T10:00:00Z"}}`),

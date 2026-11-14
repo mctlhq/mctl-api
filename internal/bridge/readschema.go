@@ -233,7 +233,9 @@ func ApplyReadSchemaTx(ctx context.Context, tx pgx.Tx, runtimeRole string) error
 			return fmt.Errorf("bridge: read schema: runtime role %q does not exist", runtimeRole)
 		}
 		role := pgx.Identifier{runtimeRole}.Sanitize()
-		has, err := exists(`SELECT has_table_privilege($1, 'bridge_read_results', 'SELECT,INSERT,DELETE')
+		has, err := exists(`SELECT has_table_privilege($1, 'bridge_read_results', 'SELECT')
+			AND has_table_privilege($1, 'bridge_read_results', 'INSERT')
+			AND has_table_privilege($1, 'bridge_read_results', 'DELETE')
 			AND has_column_privilege($1, 'bridge_read_results', 'data', 'UPDATE')
 			AND has_column_privilege($1, 'bridge_read_results', 'erased_at', 'UPDATE')`, runtimeRole)
 		if err != nil {
