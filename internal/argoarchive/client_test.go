@@ -99,7 +99,7 @@ func TestListStepsFollowsPagination(t *testing.T) {
 			_, _ = fmt.Fprint(w, `<ListBucketResult>
   <IsTruncated>true</IsTruncated>
   <NextContinuationToken>tok2</NextContinuationToken>
-  <Contents><Key>wf/wf-a-1/main.log</Key><Size>1</Size></Contents>
+  <Contents><Key>wf/wf-a-1/main.log</Key><Size>1</Size><LastModified>2026-07-30T08:00:00.000Z</LastModified></Contents>
 </ListBucketResult>`)
 			return
 		}
@@ -108,7 +108,7 @@ func TestListStepsFollowsPagination(t *testing.T) {
 		}
 		_, _ = fmt.Fprint(w, `<ListBucketResult>
   <IsTruncated>false</IsTruncated>
-  <Contents><Key>wf/wf-b-2/main.log</Key><Size>2</Size></Contents>
+  <Contents><Key>wf/wf-b-2/main.log</Key><Size>2</Size><LastModified>2026-07-30T08:01:00.000Z</LastModified></Contents>
 </ListBucketResult>`)
 	})
 
