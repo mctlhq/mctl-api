@@ -1437,6 +1437,10 @@ func main() {
 	}
 	securityProviders := auth.LoadSecurityProviders()
 	codeScanningSecret, codeScanningConfig, codeScanningIngester := codeScanningReceiver(cfg.GitHubWebhookSecret, securityProviders, securityFindingsStore)
+	// Deploy approval page (mctl-api#1026): dark unless
+	// DEPLOY_APPROVAL_UI_ENABLED is true and everything it reads is up.
+	deployApprovalPage := deployApprovalOptions(cfg, deployApprovalUIEnvFromOS(), principalResolver, principalAuthz,
+		oauthFlowStore(oauthServer), workItemsStore != nil, deployPlans != nil)
 	router := mctlapi.NewRouter(mctlapi.Options{
 		Signup:                         signup,
 		Registry:                       registry,
@@ -1467,6 +1471,7 @@ func main() {
 		IdentityLink:                   identityLinkOptions(cfg, principalStore, principalCache, oauthServer, ghValidator),
 		DevLoopDecide:                  devLoopDecideOptions(cfg, principalResolver, principalAuthz),
 		GlovoBasketApproval:            glovoBasketPage,
+		DeployApproval:                 deployApprovalPage,
 		OAuthUpstream:                  cfg.oauthUpstreamMode(),
 		OAuthZitadel:                   oauthZitadelOptions(cfg, principalStore, oauthServer),
 		SurfaceZitadel:                 surfaceZitadelOptions(cfg),
