@@ -295,7 +295,7 @@ func TestGlovoForeignRolesAndExactGrants(t *testing.T) {
 	}
 	// The generic path of the work-items role is unchanged: a generic approval is created and decided.
 	a, created, err := g.store.CreateActionApproval(ctx, ActionApprovalInput{
-		ActionIntent: ActionIntent{ExecutionID: "we_" + splitHex(8), ActionKind: "deploy.apply", Target: "t", ArgsDigest: "d", PolicyRuleID: "r", PolicyVersion: "1"},
+		ActionIntent: ActionIntent{ExecutionID: "we_" + splitHex(8), ActionKind: "mctl-agents-approve", Target: "t", ArgsDigest: "d", PolicyRuleID: "r", PolicyVersion: "1"},
 		RequestedBy:  "agent:x", IdempotencyKey: "k1", ExpiresAt: time.Now().Add(time.Hour),
 	})
 	if err != nil || !created {

@@ -257,6 +257,11 @@ func TestServiceOps_GatingTableCoversRegistry(t *testing.T) {
 		seen++
 		body := map[string]string{}
 		for _, p := range op.Parameters {
+			// preview-deploy's preview_id is server-set from an approved
+			// plan and refused in a request body (mctl-api#1026).
+			if op.Name == "preview-deploy" && p.Name == "preview_id" {
+				continue
+			}
 			if v, ok := fill[p.Name]; ok {
 				body[p.Name] = v
 			}

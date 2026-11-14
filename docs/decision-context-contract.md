@@ -81,7 +81,8 @@ same rule.
 ## Captured and revalidated facts
 
 Captured when a human approves: `decided_context_digest`, `authority_basis`
-(`platform_admin`; `unrecorded` on legacy rows), `authz_mode`, and
+(`platform_admin`; `tenant_owner_fresh_login` for a deploy grant;
+`unrecorded` on legacy rows), `authz_mode`, and
 `fresh_until = min(expires_at, decided_at + ACTION_APPROVAL_MAX_DECISION_AGE)`.
 
 Revalidated when the approval is spent (`POST .../consume`, and the
@@ -102,6 +103,11 @@ approved request the facts are checked in this order, first failure wins:
 
 A decision with no decider principal is refused in principal mode; in other
 modes there is no principal to check and the check is skipped.
+
+For a deploy grant (below), step 4 is instead: the decider is still a live
+`owner` of the plan's tenant, read by principal from the GitOps membership. An
+admin gets no pass, and outside principal mode the check is unavailable, so the
+grant cannot be spent.
 
 A refusal never spends the approval and never reaches the executor. The store's
 compare-and-set also enforces `fresh_until` atomically. Authority and policy are
@@ -153,3 +159,30 @@ previous 7-day horizon.
 | F4 | Expiry and freshness | `fresh_until`, `expires_at`, `approval_stale`, `approval_expired` |
 | F6 | Reviewer context | mandatory `decision_context`, `context_digest` binding, revalidation step 1 |
 | F9 | Policy drift | revalidation step 5, one policy source in `governance.Policies` |
+
+## Deploy grants (`deploy.apply`)
+
+A preview apply of a stored deploy plan (`dpl_`) is authorized by a
+`deploy.apply` grant, never by `confirm` (mctl-api#1026, mctlhq/.github#254).
+
+- `POST /api/v1/deploy/plans/{id}/approval` (MCP `mctl_request_deploy_approval`)
+  opens the pending grant. Any developer of the tenant may ask, an agent
+  session included. The server builds the intent from the stored plan: plan id,
+  plan digest, `tenant/service`, policy `deploy.apply.tenant-owner` v1. The body
+  carries nothing. A repeat returns the same grant.
+- A live owner of the tenant decides it on the fresh sign-in page. No bearer
+  route decides it: the generic `/decision`, `/consume`, `/execute`, reserve and
+  settle paths refuse every `deploy.*` kind, for admins too. An MCP session
+  carries its person's own principal, so the requester's principal is not
+  refused as decider. What tells the person from their agent is the fresh
+  interactive sign-in.
+- `POST /api/v1/deploy/apply` (MCP `mctl_deploy_apply`) takes `plan_id` and
+  `approval_id` only. It re-checks the plan (expiry, stored digest), binds the
+  grant to the plan's intent hash, revalidates the decider, spends the grant
+  once, and submits `preview-deploy` with the plan's preview id and gitops
+  commit. `preview_id` and `gitops_ref` are refused in any execute body.
+- Faithful or refused: `preview-deploy` renders the service's GitOps values,
+  not the intent's runtime changes. A plan whose intent changes the values
+  (`intent_changes_values`, compared before redaction), or builds from a
+  context other than the repository root, is refused with
+  `deploy_apply_not_reproducible`.

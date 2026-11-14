@@ -34,30 +34,38 @@ type Approval struct {
 // CreatedAt, ExpiresAt, CreatedBy, Surface and IdempotencyKey is bound by
 // Digest.
 type Plan struct {
-	ID                 string    `json:"id"`
-	Digest             string    `json:"digest"`
-	SchemaVersion      string    `json:"schema_version"`
-	Tenant             string    `json:"tenant"`
-	Service            string    `json:"service"`
-	Environment        string    `json:"environment"`
-	Intent             []byte    `json:"-"`
-	IntentCanonical    string    `json:"-"`
-	Revision           string    `json:"revision"`
-	GitopsBaseSHA      string    `json:"gitops_base_sha"`
-	Action             Action    `json:"action"`
-	PreviewID          string    `json:"preview_id"`
-	ValuesBeforeSHA256 string    `json:"values_before_sha256"`
-	ValuesAfter        string    `json:"values_after"`
-	Diff               string    `json:"diff"`
-	Host               string    `json:"host"`
-	RequiresApproval   bool      `json:"requires_approval"`
-	RequiredRole       string    `json:"required_role"`
-	ApprovalReason     string    `json:"approval_reason"`
-	CreatedBy          string    `json:"created_by"`
-	Surface            string    `json:"surface"`
-	IdempotencyKey     string    `json:"-"`
-	CreatedAt          time.Time `json:"created_at"`
-	ExpiresAt          time.Time `json:"expires_at"`
+	ID                 string `json:"id"`
+	Digest             string `json:"digest"`
+	SchemaVersion      string `json:"schema_version"`
+	Tenant             string `json:"tenant"`
+	Service            string `json:"service"`
+	Environment        string `json:"environment"`
+	Intent             []byte `json:"-"`
+	IntentCanonical    string `json:"-"`
+	Revision           string `json:"revision"`
+	GitopsBaseSHA      string `json:"gitops_base_sha"`
+	Action             Action `json:"action"`
+	PreviewID          string `json:"preview_id"`
+	ValuesBeforeSHA256 string `json:"values_before_sha256"`
+	ValuesAfter        string `json:"values_after"`
+	Diff               string `json:"diff"`
+	Host               string `json:"host"`
+	RequiresApproval   bool   `json:"requires_approval"`
+	RequiredRole       string `json:"required_role"`
+	ApprovalReason     string `json:"approval_reason"`
+	// IntentChangesValues says whether the intent changes the effective
+	// preview values beyond the base: false only when the unredacted values
+	// with and without the intent are identical. It is derived from fields
+	// the digest binds, and is not itself digested. preview-deploy renders
+	// the base values, so only a plan with false can be applied faithfully
+	// (mctl-api#1026). Nil is a plan stored before the field existed, and
+	// reads as true.
+	IntentChangesValues *bool     `json:"intent_changes_values"`
+	CreatedBy           string    `json:"created_by"`
+	Surface             string    `json:"surface"`
+	IdempotencyKey      string    `json:"-"`
+	CreatedAt           time.Time `json:"created_at"`
+	ExpiresAt           time.Time `json:"expires_at"`
 }
 
 // Approval returns the approval recorded on the plan.

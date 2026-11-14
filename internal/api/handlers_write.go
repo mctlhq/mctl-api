@@ -118,6 +118,23 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	}
 	delete(input, "confirm")
 
+	// The preview id and the pinned gitops commit of a preview are the
+	// approved plan's, set by the deploy apply route alone (mctl-api#1026).
+	// A body naming either is refused, whatever its value: on this path it
+	// would pick another preview's id or deploy an older commit with no
+	// grant behind it.
+	if opName == previewDeployOp {
+		for _, k := range deployServerSetParams {
+			if _, named := input[k]; named {
+				h.logAudit(r, audit.Entry{UserID: user.ID, Operation: opName, Status: "denied",
+					RiskLevel: string(op.RiskLevel), Message: k + " in the request body refused"})
+				writeErrorCode(w, http.StatusBadRequest, wiCodeActorNotAccepted,
+					k+" is set from an approved deploy plan (POST /api/v1/deploy/apply), not from the request body", nil)
+				return
+			}
+		}
+	}
+
 	// Drop anything the operation does not declare, before RBAC reads the
 	// input and before it reaches Argo — but AFTER the authentication check,
 	// so an unauthenticated caller cannot spend the server's CPU sorting keys

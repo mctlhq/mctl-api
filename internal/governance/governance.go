@@ -58,6 +58,7 @@ var (
 const (
 	AuthorityBasisPlatformAdmin = "platform_admin"
 	AuthorityBasisResourceOwner = workitems.GlovoAuthorityBasis
+	AuthorityBasisTenantOwner   = workitems.DeployAuthorityBasis
 	AuthorityBasisUnrecorded    = "unrecorded"
 )
 
@@ -101,6 +102,14 @@ var Policies = PolicySet{
 		Decision:   "require_approval",
 		Reasons:    []string{workitems.GlovoBasketPolicyRuleID},
 		SideEffect: "none",
+	},
+	// A live owner of the plan's tenant grants one preview apply of one
+	// stored deploy plan (mctl-api#1026).
+	workitems.DeployApplyPolicyRuleID: {
+		Version:    workitems.DeployApplyPolicyVersion,
+		Decision:   "require_approval",
+		Reasons:    []string{workitems.DeployApplyPolicyRuleID},
+		SideEffect: "write",
 	},
 }
 
@@ -405,6 +414,12 @@ type LiveAuthority struct {
 	StrictPolicy bool
 	Registry     *operations.Registry
 	Now          time.Time
+	// TenantOwner re-checks a tenant-owner decision (AuthorityBasisTenantOwner):
+	// nil when the decider still owns the approval's tenant, otherwise an
+	// error wrapping ErrAuthorityRevoked (not an owner) or
+	// ErrAuthorityUnavailable (could not be read). Nil refuses every such
+	// decision.
+	TenantOwner func(ctx context.Context, principalID string) error
 }
 
 // Result records what Revalidate established, for the audit.
@@ -439,6 +454,14 @@ func Revalidate(ctx context.Context, a *workitems.ActionApprovalRequest, live Li
 
 	// F3: the decider still holds authority.
 	prn := a.DecidedByPrincipalID
+	if a.AuthorityBasis == AuthorityBasisTenantOwner {
+		if err := revalidateTenantOwner(ctx, a, live); err != nil {
+			return res, err
+		}
+		status, err := live.Policies.Admit(a.PolicyRuleID, a.PolicyVersion, live.StrictPolicy)
+		res.PolicyStatus = status
+		return res, err
+	}
 	switch {
 	case prn == "" && live.PrincipalMode:
 		return res, fmt.Errorf("%w: %s records no decider principal", ErrAuthorityRevoked, a.ID)
@@ -474,4 +497,31 @@ func Revalidate(ctx context.Context, a *workitems.ActionApprovalRequest, live Li
 		return res, err
 	}
 	return res, nil
+}
+
+// revalidateTenantOwner is F3 for a tenant-owner decision (a deploy grant):
+// the decider is still an active human and still an owner of the tenant,
+// re-read now. It never depends on the authz mode: an owner decision with no
+// principal, or with no way to read the ownership, is refused, not skipped.
+func revalidateTenantOwner(ctx context.Context, a *workitems.ActionApprovalRequest, live LiveAuthority) error {
+	prn := a.DecidedByPrincipalID
+	if prn == "" {
+		return fmt.Errorf("%w: %s records no decider principal", ErrAuthorityRevoked, a.ID)
+	}
+	checker, ok := live.Checker.(auth.HumanPrincipalChecker)
+	if !ok {
+		return fmt.Errorf("%w: the principal store cannot check a principal's kind", ErrAuthorityUnavailable)
+	}
+	switch err := checker.CheckHumanPrincipal(ctx, prn); {
+	case err == nil:
+	case errors.Is(err, auth.ErrPrincipalDisabled), errors.Is(err, auth.ErrIdentityRefused):
+		return fmt.Errorf("%w: %s", ErrDeciderDisabled, a.ID)
+	default:
+		return fmt.Errorf("%w: %v", ErrAuthorityUnavailable, err)
+	}
+	if live.TenantOwner == nil {
+		return fmt.Errorf("%w: no tenant ownership reader is configured", ErrAuthorityUnavailable)
+	}
+	// TenantOwner answers ErrAuthorityRevoked or ErrAuthorityUnavailable.
+	return live.TenantOwner(ctx, prn)
 }

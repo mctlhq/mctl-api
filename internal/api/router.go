@@ -711,6 +711,8 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/deploy/bindings", h.DeployBindings)
 			r.Post("/deploy/plan", h.DeployPlan)
 			r.Get("/deploy/plans/{id}", h.GetDeployPlan)
+			r.Post("/deploy/plans/{id}/approval", h.RequestDeployApproval)
+			r.Post("/deploy/apply", h.DeployApply)
 			r.Get("/status/{team}/{app}", h.GetServiceStatus)
 			r.Get("/workflows", h.ListWorkflows)
 			r.Get("/workflows/{name}", h.GetWorkflow)

@@ -151,3 +151,25 @@ func TestCWFTCorrelationParamsAreOmitWhenEmptyWithPattern(t *testing.T) {
 		}
 	}
 }
+
+// The deploy-apply parameters reach Argo only when the apply route sets them:
+// a generic preview-deploy submit carries neither key (mctl-api#1026).
+func TestPreviewDeployApplyParamsOmittedUnlessSet(t *testing.T) {
+	registry := NewRegistry()
+	op, ok := registry.Get("preview-deploy")
+	if !ok {
+		t.Fatal("preview-deploy not in the registry")
+	}
+	generic := registry.ApplyDefaults(op, map[string]string{"team_name": "acme", "component_name": "web", "image_tag": "1.0.0"})
+	for _, k := range []string{"preview_id", "gitops_ref"} {
+		if v, present := generic[k]; present {
+			t.Errorf("generic preview-deploy submit carries %s=%q", k, v)
+		}
+	}
+	sha := "0123456789abcdef0123456789abcdef01234567"
+	applied := registry.ApplyDefaults(op, map[string]string{"team_name": "acme", "component_name": "web",
+		"image_tag": "1.0.0", "preview_id": "abc123", "gitops_ref": sha})
+	if applied["preview_id"] != "abc123" || applied["gitops_ref"] != sha {
+		t.Errorf("apply submit lost its server-set params: %v", applied)
+	}
+}
