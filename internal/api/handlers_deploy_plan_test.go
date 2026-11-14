@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -483,5 +484,28 @@ func TestDeployPlan_NoSecretsAnywhere(t *testing.T) {
 	}
 	if !strings.Contains(responses[0], "redacted:sha256:") {
 		t.Errorf("remoteKey is not shown redacted:\n%s", responses[0])
+	}
+}
+
+// A stray '}' or ']' after the envelope is trailing data: dec.More() let
+// it through because it is false before a closing delimiter.
+func TestDeployPlan_RefusesTrailingData(t *testing.T) {
+	for _, suffix := range []string{"}", "]"} {
+		f := newPlanFixture(t)
+		b, err := json.Marshal(map[string]any{"intent": planIntent(nil)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/deploy/plan", bytes.NewReader(append(b, suffix...)))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(auth.WithUser(req.Context(), planDev))
+		w := httptest.NewRecorder()
+		f.router.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest || codeOf(t, w) != "deploy_plan_invalid_input" {
+			t.Fatalf("trailing %q: status %d, body %s; want 400 deploy_plan_invalid_input", suffix, w.Code, w.Body.String())
+		}
+		if f.store.inserts != 0 {
+			t.Fatalf("trailing %q: a plan was stored", suffix)
+		}
 	}
 }

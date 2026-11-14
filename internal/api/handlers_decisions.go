@@ -165,7 +165,7 @@ func decodeDecisionBody(w http.ResponseWriter, r *http.Request, v any) bool {
 		writeErrorCode(w, http.StatusBadRequest, codeDecisionInvalid, "invalid JSON body: "+err.Error(), nil)
 		return false
 	}
-	if dec.More() {
+	if jsonHasTrailingData(dec) {
 		writeErrorCode(w, http.StatusBadRequest, codeDecisionInvalid, "trailing data after JSON object", nil)
 		return false
 	}

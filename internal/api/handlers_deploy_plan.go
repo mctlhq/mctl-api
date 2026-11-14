@@ -95,7 +95,7 @@ func (h *Handlers) DeployPlan(w http.ResponseWriter, r *http.Request) {
 	var req deployPlanRequest
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil || len(req.Intent) == 0 || dec.More() {
+	if err := dec.Decode(&req); err != nil || len(req.Intent) == 0 || jsonHasTrailingData(dec) {
 		a.refuse(w, http.StatusBadRequest, "deploy_plan_invalid_input",
 			"the body must be a JSON object with intent, and optionally idempotency_key and ttl_seconds")
 		return

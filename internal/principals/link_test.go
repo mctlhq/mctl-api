@@ -397,6 +397,28 @@ func TestDisablePrincipalRefusesNonHumansAndUnknowns(t *testing.T) {
 	}
 }
 
+// An already disabled principal is a no-op whoever it is, as DisablePrincipal
+// documents: a retried disable of a non-human principal that is already off
+// answers AlreadyDisabled, not ErrNotHuman.
+func TestDisablePrincipalAlreadyDisabledNonHumanIsANoOp(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	agent, err := s.Provision(ctx, auth.Identity{Provider: auth.ProviderAgent, Subject: "agent:off", Kind: auth.KindAgent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE principals SET status=$2 WHERE id=$1`, agent.ID, StatusDisabled); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.DisablePrincipal(ctx, agent.ID, nil)
+	if err != nil {
+		t.Fatalf("disable of an already disabled agent: err = %v, want AlreadyDisabled", err)
+	}
+	if !res.AlreadyDisabled {
+		t.Fatalf("disable of an already disabled agent: %+v, want AlreadyDisabled", res)
+	}
+}
+
 // The last active ADMIN_PRINCIPALS principal is never disabled; an admin
 // that is disabled, not human, or does not exist does not count as another.
 func TestDisablePrincipalKeepsTheLastAdmin(t *testing.T) {
