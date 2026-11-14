@@ -21,6 +21,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -258,5 +260,106 @@ func TestSuccessBodyReadFailureIsReported(t *testing.T) {
 	}
 	if !body.closed {
 		t.Error("the response body must be closed")
+	}
+}
+
+// selectorMatcher is one `label op "value"` term of a LogQL stream selector.
+var selectorMatcher = regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*)\s*(=~|!~|!=|=)\s*"((?:[^"\\]|\\.)*)"`)
+
+// selectorMatches evaluates a LogQL stream selector against one stream's
+// labels the way Loki does: every matcher must hold, regex matchers are
+// fully anchored, and a missing label reads as "".
+func selectorMatches(t *testing.T, selector string, labels map[string]string) bool {
+	t.Helper()
+	terms := selectorMatcher.FindAllStringSubmatch(selector, -1)
+	if len(terms) == 0 {
+		t.Fatalf("selector %q has no matchers", selector)
+	}
+	for _, m := range terms {
+		value, err := strconv.Unquote(`"` + m[3] + `"`)
+		if err != nil {
+			t.Fatalf("selector %q: bad value %q: %v", selector, m[3], err)
+		}
+		got := labels[m[1]]
+		var ok bool
+		switch m[2] {
+		case "=":
+			ok = got == value
+		case "!=":
+			ok = got != value
+		case "=~", "!~":
+			re, err := regexp.Compile("^(?:" + value + ")$")
+			if err != nil {
+				t.Fatalf("selector %q: bad regex %q: %v", selector, value, err)
+			}
+			ok = re.MatchString(got) == (m[2] == "=~")
+		}
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// TestQueryRangeSelectsOnlyTheNamedService pins the exact-app match: the
+// streams of a sibling service whose name extends the requested one
+// ("api-gateway" next to "api") in the same tenant must not be selected, and
+// neither must the same service name in another tenant.
+func TestQueryRangeSelectsOnlyTheNamedService(t *testing.T) {
+	var queries []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.Query().Get("query"))
+		_, _ = io.WriteString(w, `{"status":"success","data":{"resultType":"streams","result":[]}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	if _, err := NewClient(srv.URL).QueryRange(context.Background(), "acme", "api", 10, time.Hour); err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+
+	streams := []struct {
+		name   string
+		labels map[string]string
+		want   bool
+	}{
+		{"own service", map[string]string{"namespace": "acme", "instance": "acme-api", "pod": "acme-api-base-service-7d9f8-x2x1z"}, true},
+		{"sibling api-gateway", map[string]string{"namespace": "acme", "instance": "acme-api-gateway", "pod": "acme-api-gateway-base-service-5c4b-k9q2w"}, false},
+		{"sibling api-worker", map[string]string{"namespace": "acme", "instance": "acme-api-worker", "pod": "acme-api-worker-base-service-6f7c-abcde"}, false},
+		{"other tenant", map[string]string{"namespace": "beta", "instance": "acme-api", "pod": "acme-api-base-service-7d9f8-x2x1z"}, false},
+		{"other tenant, unlabelled", map[string]string{"namespace": "beta", "pod": "acme-api-7d9f8-x2x1z"}, false},
+		// A pod outside a Helm release (no instance label), named after the
+		// workload, is the case ListServicePods falls back to.
+		{"own service, unlabelled pod", map[string]string{"namespace": "acme", "pod": "acme-api-7d9f8-x2x1z"}, true},
+		{"pod named acme-api with no suffix", map[string]string{"namespace": "acme", "pod": "acme-apix-1"}, false},
+	}
+	if len(queries) != 2 {
+		t.Fatalf("queries = %q, want the exact selector and, after it found nothing, the unlabelled fallback", queries)
+	}
+	for _, s := range streams {
+		matched := false
+		for _, q := range queries {
+			matched = matched || selectorMatches(t, q, s.labels)
+		}
+		if matched != s.want {
+			t.Errorf("%s: selectors %q matched=%v, want %v", s.name, queries, matched, s.want)
+		}
+	}
+}
+
+// TestQueryRangeFallsBackOnlyWhenTheReleaseHasNoStreams: lines from the
+// exact selector are the answer; the unlabelled fallback is not asked.
+func TestQueryRangeFallsBackOnlyWhenTheReleaseHasNoStreams(t *testing.T) {
+	var queries []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.Query().Get("query"))
+		_, _ = io.WriteString(w, `{"status":"success","data":{"resultType":"streams","result":[{"stream":{"pod":"acme-api-1"},"values":[["1700000000000000000","hello"]]}]}}`)
+	}))
+	t.Cleanup(srv.Close)
+	got, err := NewClient(srv.URL).QueryRange(context.Background(), "acme", "api", 10, time.Hour)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("QueryRange: %d lines, %v", len(got), err)
+	}
+	if len(queries) != 1 || queries[0] != serviceSelector("acme", "api") {
+		t.Errorf("queries = %q, want only the exact selector", queries)
 	}
 }

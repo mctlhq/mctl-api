@@ -235,7 +235,21 @@ func (f *fakeArgoCD) GetAppStatus(name string) (*argocd.AppStatus, error) {
 	if s, ok := f.apps[name]; ok {
 		return s, nil
 	}
-	return nil, fmt.Errorf("app not found: %s", name)
+	// The real client's documented absence signal (HTTP 404).
+	return nil, fmt.Errorf("%w: %s", argocd.ErrNotFound, name)
+}
+
+// GetProjectAppStatus behaves like ArgoCD with a project given: an
+// application in another project is a 404, exactly as a missing one.
+func (f *fakeArgoCD) GetProjectAppStatus(project, name string) (*argocd.AppStatus, error) {
+	s, err := f.GetAppStatus(name)
+	if err != nil {
+		return nil, err
+	}
+	if project != "" && s.Project != project {
+		return nil, fmt.Errorf("%w: %s not in project %s", argocd.ErrNotFound, name, project)
+	}
+	return s, nil
 }
 
 func (f *fakeArgoCD) ListApps(_ string) ([]argocd.AppStatus, error) {
@@ -326,7 +340,7 @@ func newTestRouter(t *testing.T) (http.Handler, *fakeExecutor) {
 	}
 	argoClient := &fakeArgoCD{
 		apps: map[string]*argocd.AppStatus{
-			"admins-mctl-web": {Name: "admins-mctl-web", Health: "Healthy", SyncStatus: "Synced"},
+			"admins-mctl-web": {Name: "admins-mctl-web", Health: "Healthy", SyncStatus: "Synced", Project: "apps", DestNamespace: "admins"},
 		},
 	}
 	exec := &fakeExecutor{}

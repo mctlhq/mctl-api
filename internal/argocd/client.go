@@ -53,6 +53,10 @@ type AppStatus struct {
 	UpdatedAt  time.Time `json:"updatedAt"`
 	Namespace  string    `json:"namespace"`
 	Project    string    `json:"project"`
+	// DestNamespace is spec.destination.namespace: the namespace the
+	// application deploys into, which is what ties it to a tenant. Namespace
+	// above is where the Application object itself lives (argocd).
+	DestNamespace string `json:"destNamespace,omitempty"`
 }
 
 // AppList is a list of ArgoCD applications.
@@ -72,9 +76,25 @@ func NewClient(baseURL, token string) *Client {
 }
 
 // GetAppStatus returns the status of a specific ArgoCD application.
+//
+// Without a project ArgoCD cannot tell "missing" from "not allowed", so it
+// answers 403 for an application that does not exist (argo-cd
+// server/application getAppEnforceRBAC). Callers that need 404 as the
+// absence signal use GetProjectAppStatus.
 func (c *Client) GetAppStatus(appName string) (*AppStatus, error) {
-	url := fmt.Sprintf("%s/api/v1/applications/%s", c.baseURL, appName)
-	body, err := c.doGet(url)
+	return c.GetProjectAppStatus("", appName)
+}
+
+// GetProjectAppStatus returns the status of an ArgoCD application in one
+// AppProject. With the project given, ArgoCD answers 404 (ErrNotFound) both
+// for an application that does not exist and for one that exists in another
+// project, and 403 only when RBAC denies the read itself.
+func (c *Client) GetProjectAppStatus(project, appName string) (*AppStatus, error) {
+	u := fmt.Sprintf("%s/api/v1/applications/%s", c.baseURL, neturl.PathEscape(appName))
+	if project != "" {
+		u += "?" + neturl.Values{"projects": {project}}.Encode()
+	}
+	body, err := c.doGet(u)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +105,10 @@ func (c *Client) GetAppStatus(appName string) (*AppStatus, error) {
 			Namespace string `json:"namespace"`
 		} `json:"metadata"`
 		Spec struct {
-			Project string `json:"project"`
+			Project     string `json:"project"`
+			Destination struct {
+				Namespace string `json:"namespace"`
+			} `json:"destination"`
 		} `json:"spec"`
 		Status struct {
 			Health struct {
@@ -114,6 +137,8 @@ func (c *Client) GetAppStatus(appName string) (*AppStatus, error) {
 		UpdatedAt:  updatedAt,
 		Namespace:  raw.Metadata.Namespace,
 		Project:    raw.Spec.Project,
+
+		DestNamespace: raw.Spec.Destination.Namespace,
 	}, nil
 }
 

@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"time"
@@ -60,10 +61,38 @@ func NewClient(baseURL string) *Client {
 
 // QueryRange fetches log lines for a namespace/app in the given time window.
 // namespace corresponds to the team name; app is the service name.
-// Uses pod label regex to match the ArgoCD naming convention: {team}-{app}-{chart}-.
+//
+// The stream is selected by the exact Helm release, {team}-{app}, which
+// Promtail copies from the pod's app.kubernetes.io/instance label into the
+// `instance` stream label (the same label k8s.ListServicePods selects on).
+// A pod-name match cannot be exact: pods are named
+// {team}-{app}-{chart}-<hash>, so a prefix or regex on "{team}-{app}-" also
+// takes the pods of a sibling service whose name extends app ("api" would
+// read "api-gateway"'s logs).
+//
+// When the exact selector finds nothing, QueryRange falls back the way
+// ListServicePods does: to pods with no instance label at all whose name
+// starts with "{team}-{app}-". A labelled pod belongs to its own release and
+// is never taken by the fallback, so the sibling services above stay out.
 func (c *Client) QueryRange(ctx context.Context, namespace, app string, lines int, since time.Duration) ([]LogLine, error) {
-	query := fmt.Sprintf(`{namespace=%q, pod=~"%s-%s-.+"}`, namespace, namespace, app)
-	return c.query(ctx, query, lines, since)
+	out, err := c.query(ctx, serviceSelector(namespace, app), lines, since)
+	if err != nil || len(out) > 0 {
+		return out, err
+	}
+	return c.query(ctx, unlabelledPodSelector(namespace, app), lines, since)
+}
+
+// serviceSelector is the LogQL stream selector for one tenant service. Both
+// matchers are equality matchers, so neither value is read as a regex.
+func serviceSelector(namespace, app string) string {
+	return fmt.Sprintf(`{namespace=%q, instance=%q}`, namespace, namespace+"-"+app)
+}
+
+// unlabelledPodSelector selects the streams of pods that carry no instance
+// label (instance="" matches an absent label in LogQL) and are named after
+// the workload. The workload name is quoted, so it matches literally.
+func unlabelledPodSelector(namespace, app string) string {
+	return fmt.Sprintf(`{namespace=%q, instance="", pod=~%q}`, namespace, regexp.QuoteMeta(namespace+"-"+app+"-")+".+")
 }
 
 // QueryNamespace fetches all logs for a namespace (any app).

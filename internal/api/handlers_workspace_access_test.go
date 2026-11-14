@@ -65,6 +65,9 @@ func (a *workspaceArgo) GetAppStatus(name string) (*argocd.AppStatus, error) {
 	}
 	return app, nil
 }
+func (a *workspaceArgo) GetProjectAppStatus(string, string) (*argocd.AppStatus, error) {
+	return nil, errors.New("unused")
+}
 func (a *workspaceArgo) ListApps(string) ([]argocd.AppStatus, error) {
 	return nil, errors.New("unused")
 }
