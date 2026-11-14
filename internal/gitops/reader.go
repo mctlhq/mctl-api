@@ -94,6 +94,10 @@ type Tenant struct {
 	Networking   map[string]bool   `json:"networking,omitempty"`
 	Members      []TenantMember    `json:"members,omitempty"`
 	Teams        []Team            `json:"teams,omitempty"` // optional: multi-team support
+	// Profile is tenant.profile as written: "" for an ordinary tenant, or
+	// AgentDeployProfile (mctl-api#1031). Any other value is refused by
+	// NamespaceProfile rather than read as ordinary.
+	Profile string `json:"profile,omitempty"`
 
 	// principalErr is why this tenant's principal-keyed membership cannot
 	// be read (mctl-api#377): a malformed or duplicate principalId, or a
@@ -750,6 +754,91 @@ func (r *Reader) TenantExists(name string) (bool, error) {
 	return false, fmt.Errorf("checking tenant %q: %w", name, err)
 }
 
+// AgentDeployProfile is the tenant.profile of a tenant whose deploys go
+// through a stored plan and a human grant only (mctl-api#1031,
+// mctl-api#1026). The same field selects the egress-off default in the
+// tenant chart (mctl-gitops#2624).
+const AgentDeployProfile = "agent-deploy"
+
+// profileCovers reports whether the tenant's profile applies to namespace:
+// the tenant's own name, and {tenant}-{team} for each of its teams. It is
+// wider than the membership ownership of memberRolesFor on purpose: a
+// multi-team tenant's own name grants no membership there, but an
+// agent-deploy profile must not be escaped by naming it.
+func (t *Tenant) profileCovers(namespace string) bool {
+	if t.Name == namespace {
+		return true
+	}
+	for _, team := range t.Teams {
+		if t.Name+"-"+team.Name == namespace {
+			return true
+		}
+	}
+	return false
+}
+
+// NamespaceProfile returns tenant.profile of the tenant whose profile covers
+// namespace (profileCovers: its own name or one of its {tenant}-{team}
+// namespaces). owned=false with a nil error means every tenant was read and
+// none covers namespace.
+//
+// Anything it could not read is an error, never "ordinary": a stale
+// checkout, an unreadable tenants directory, a values file that is missing
+// or malformed in a directory that could own namespace, two owners, or a
+// profile it does not know. A security gate rests on the answer.
+func (r *Reader) NamespaceProfile(namespace string) (profile string, owned bool, err error) {
+	if namespace == "" {
+		return "", false, errors.New("namespace profile: namespace is required")
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if err := r.checkFreshLocked(); err != nil {
+		return "", false, err
+	}
+
+	tenantsDir := filepath.Join(r.localPath, "platform-gitops", "tenants")
+	entries, err := os.ReadDir(tenantsDir)
+	if err != nil {
+		return "", false, fmt.Errorf("reading tenants dir: %w", err)
+	}
+
+	owner := ""
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		t, err := r.readTenant(entry.Name())
+		if err != nil {
+			// A directory with no values file is skipped elsewhere, but here
+			// it could be the owner we cannot see: refuse when its name could
+			// own namespace, as the tenant itself or as {tenant}-{team}.
+			name := entry.Name()
+			if !errors.Is(err, fs.ErrNotExist) || name == namespace || strings.HasPrefix(namespace, name+"-") {
+				return "", false, fmt.Errorf("reading tenant %q: %w", name, err)
+			}
+			continue
+		}
+		if !t.profileCovers(namespace) {
+			continue
+		}
+		if owner != "" {
+			return "", false, fmt.Errorf("namespace %q is claimed by tenants %q and %q", namespace, owner, entry.Name())
+		}
+		owner = entry.Name()
+		profile = t.Profile
+	}
+	if owner == "" {
+		return "", false, nil
+	}
+	switch profile {
+	case "", AgentDeployProfile:
+		return profile, true, nil
+	default:
+		return "", false, fmt.Errorf("tenant %q has an unknown profile %q", owner, profile)
+	}
+}
+
 // checkFreshLocked returns an error unless the checkout has synced within
 // CheckoutMaxAge. An answer from a checkout that never synced, or that
 // stopped refreshing, is not one a security decision may rest on.
@@ -958,6 +1047,7 @@ func (r *Reader) readTenant(name string) (*Tenant, error) {
 			DisplayName  string `yaml:"displayName"`
 			Description  string `yaml:"description"`
 			ContactEmail string `yaml:"contactEmail"`
+			Profile      string `yaml:"profile"`
 			Members      []struct {
 				UserID      string `yaml:"userId"`
 				PrincipalID string `yaml:"principalId"`
@@ -989,6 +1079,7 @@ func (r *Reader) readTenant(name string) (*Tenant, error) {
 		DisplayName:  raw.Tenant.DisplayName,
 		Description:  raw.Tenant.Description,
 		ContactEmail: raw.Tenant.ContactEmail,
+		Profile:      raw.Tenant.Profile,
 		Quotas:       raw.Tenant.Quotas,
 		Networking: map[string]bool{
 			"allowIntraNamespace": raw.Tenant.Networking.AllowIntraNamespace,

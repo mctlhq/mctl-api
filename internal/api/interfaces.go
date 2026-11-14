@@ -63,6 +63,11 @@ type GitReader interface {
 	// login. Empty with a nil error is "read, and not a member"; anything it
 	// could not read is an error (mctl-api#478).
 	MemberRoles(namespace, login string) ([][]string, error)
+	// NamespaceProfile returns tenant.profile of the tenant covering
+	// namespace: its own name or one of its {tenant}-{team} namespaces. owned=false with a nil
+	// error is "read, and no tenant owns it"; anything it could not read,
+	// or a profile it does not know, is an error (mctl-api#1031).
+	NamespaceProfile(namespace string) (profile string, owned bool, err error)
 	ListServices(teamFilter string) ([]gitops.Service, error)
 	GetService(team, app string) (*gitops.Service, error)
 	ListPlatformSkills() ([]gitops.PlatformSkill, error)

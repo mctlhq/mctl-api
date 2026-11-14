@@ -201,3 +201,16 @@ A preview apply of a stored deploy plan (`dpl_`) is authorized by a
   (`intent_changes_values`, compared before redaction), or builds from a
   context other than the repository root, is refused with
   `deploy_apply_not_reproducible`.
+- Agent-deploy tenants have no other way (mctl-api#1031). A tenant whose
+  values set `tenant.profile: agent-deploy` is refused `deploy-service` (every
+  action: onboard, deploy, update-config, scale) and `preview-deploy` on
+  `POST /api/v1/operations/{name}/execute`, so `mctl_deploy_service`,
+  `mctl_scale_service` and `mctl_create_preview` answer `403
+  agent_deploy_requires_plan`. Admins are refused too. CI OIDC, authorized by
+  its own repository binding, is the one caller that passes, and
+  `rollback-service` stays allowed. The profile is read from a fresh gitops
+  checkout and covers the tenant's own name and each `{tenant}-{team}`
+  namespace. A profile that cannot be read (stale checkout, malformed or
+  missing values that could own the namespace, two owners, an unknown profile)
+  refuses with `503 agent_deploy_profile_unavailable`, never passes as
+  ordinary.

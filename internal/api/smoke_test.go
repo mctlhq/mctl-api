@@ -66,6 +66,22 @@ type fakeGitReader struct {
 	serviceExistsCalls     int
 	memberRolesErr         error
 	memberRolesCalls       int
+	namespaceProfileErr    error
+}
+
+// NamespaceProfile answers from the fake's tenants by name, the way
+// gitops.Reader does for single-team tenants, or fails with
+// namespaceProfileErr.
+func (f *fakeGitReader) NamespaceProfile(namespace string) (string, bool, error) {
+	if f.namespaceProfileErr != nil {
+		return "", false, f.namespaceProfileErr
+	}
+	for i := range f.tenants {
+		if f.tenants[i].Name == namespace {
+			return f.tenants[i].Profile, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 // MemberRoles answers from the fake's tenants the way gitops.Reader does

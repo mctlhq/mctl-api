@@ -18,6 +18,16 @@ type stubRoles struct {
 	roles map[string]map[string][][]string
 	err   error
 	calls atomic.Int64
+	// profiles is tenant -> tenant.profile; a tenant not named is ordinary.
+	profiles   map[string]string
+	profileErr error
+}
+
+func (s *stubRoles) NamespaceProfile(namespace string) (string, bool, error) {
+	if s.profileErr != nil {
+		return "", false, s.profileErr
+	}
+	return s.profiles[namespace], true, nil
 }
 
 func (s *stubRoles) MemberRoles(namespace, login string) ([][]string, error) {
@@ -63,6 +73,9 @@ type ownerEverywhere struct{ GitReader }
 func (ownerEverywhere) MemberRoles(_, _ string) ([][]string, error) {
 	return [][]string{{"owner"}}, nil
 }
+
+// NamespaceProfile reads every tenant as ordinary.
+func (ownerEverywhere) NamespaceProfile(string) (string, bool, error) { return "", true, nil }
 
 // developerByPrincipal is a router option for the surface identity
 // harness: it runs the router in principal mode, the live mode, with each

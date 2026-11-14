@@ -60,6 +60,12 @@ type ciFixture struct {
 
 func newCIFixture(t *testing.T, repos *fakeSourceRepos) *ciFixture {
 	t.Helper()
+	return newCIFixtureFor(t, repos, gitops.Tenant{Name: "labs"})
+}
+
+// newCIFixtureFor is newCIFixture with the labs tenant as given.
+func newCIFixtureFor(t *testing.T, repos *fakeSourceRepos, labs gitops.Tenant) *ciFixture {
+	t.Helper()
 	t.Setenv("AUTH_REQUIRED", "false")
 	f := &ciFixture{exec: &fakeExecutor{}, audit: audit.NewLogger(), repos: repos}
 	// The build gates apply to a CI principal like any non-admin: its
@@ -84,7 +90,7 @@ func newCIFixture(t *testing.T, repos *fakeSourceRepos) *ciFixture {
 		Registry:                       operations.NewRegistry(),
 		// No members at all: a CI deploy must not depend on tenant roles.
 		GitReader: &fakeGitReader{
-			tenants:     []gitops.Tenant{{Name: "labs"}},
+			tenants:     []gitops.Tenant{labs},
 			services:    []gitops.Service{{Team: "labs", Name: "mctl-telegram"}},
 			imagePolicy: policy,
 		},
