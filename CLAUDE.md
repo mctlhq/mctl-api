@@ -15,7 +15,8 @@ Go REST API + MCP server. Control plane for the mctl platform.
 - Package structure: `internal/` with focused packages (api, auth, gitops, mcp, operations, etc.)
 
 ## Testing
-- Unit tests: `go test ./...`
+- Unit tests: `go test -p 1 ./...` (`make test`); `-p 1` because the
+  Postgres-backed tests of several packages share one TEST_DATABASE_URL
 - E2E tests: `cd e2e && go test -v`
 - MCP tool count must match `server_test.go` expectation when adding/removing tools
 

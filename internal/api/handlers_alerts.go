@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -75,6 +76,49 @@ func (h *Handlers) auditIncidentChange(r *http.Request, user *auth.User, op stri
 	})
 }
 
+// createStatuses are the statuses a caller may create an incident in: the
+// working states a producer's own pipeline moves through (mctl-agent creates
+// in `analyzing`). Acknowledged, resolved and suppressed are lifecycle states
+// that only the acknowledge/resolve/update paths may set, because those paths
+// record who made the move and when.
+var createStatuses = map[string]bool{
+	"":                       true,
+	alerts.StatusOpen:        true,
+	alerts.StatusAnalyzing:   true,
+	alerts.StatusFixProposed: true,
+}
+
+// serverOwnedLifecycleOnCreate reports why a create request is refused for
+// carrying server-owned lifecycle state, or "" when it carries none.
+//
+// The request is refused rather than silently corrected: an incident created
+// as already resolved would never page anyone, and answering 201 with a
+// different status than requested would let the caller believe it succeeded.
+// No known producer sends these fields on create (mctl-agent sends
+// resolved_at only when set, and it is never set before the first publish).
+func serverOwnedLifecycleOnCreate(a *alerts.Alert) string {
+	if !createStatuses[a.Status] {
+		return fmt.Sprintf("status %q cannot be set on create; use the acknowledge, resolve or update endpoints", a.Status)
+	}
+	var fields []string
+	if a.AcknowledgedBy != "" {
+		fields = append(fields, "acknowledged_by")
+	}
+	if a.AcknowledgedAt != nil {
+		fields = append(fields, "acknowledged_at")
+	}
+	if a.ResolvedBy != "" {
+		fields = append(fields, "resolved_by")
+	}
+	if a.ResolvedAt != nil {
+		fields = append(fields, "resolved_at")
+	}
+	if len(fields) > 0 {
+		return "server-owned lifecycle fields cannot be set on create: " + strings.Join(fields, ", ")
+	}
+	return ""
+}
+
 // CreateIncident handles POST /api/v1/incidents.
 func (h *Handlers) CreateIncident(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
@@ -122,6 +166,12 @@ func (h *Handlers) CreateIncident(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !h.requireTenantRole(w, r, user, a.Tenant, incidentWriteRole, "incident-create", operations.RiskLow) {
+			return
+		}
+		// The support producer path above already forces these fields;
+		// every other caller is refused rather than silently corrected.
+		if msg := serverOwnedLifecycleOnCreate(&a); msg != "" {
+			writeError(w, http.StatusBadRequest, msg)
 			return
 		}
 	}

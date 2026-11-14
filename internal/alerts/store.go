@@ -152,8 +152,17 @@ func (s *Store) Create(ctx context.Context, a *Alert) (*Alert, error) {
 		a.OccurrenceCount = 1
 	}
 
+	// The alert row and its evidence are written in one transaction: evidence
+	// that failed to insert used to be logged and dropped while the caller
+	// was told the incident was stored with it.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("alerts store: create: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	stored := &Alert{}
-	row := s.pool.QueryRow(ctx,
+	row := tx.QueryRow(ctx,
 		`INSERT INTO alerts (id, source, type, tenant, service, summary, severity, status,
 		 analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at,
 		 acknowledged_by, acknowledged_at, fingerprint, occurrence_count, last_seen_at,
@@ -177,8 +186,11 @@ func (s *Store) Create(ctx context.Context, a *Alert) (*Alert, error) {
 		a.CreatedAt, a.UpdatedAt, a.ResolvedAt, a.AcknowledgedBy, a.AcknowledgedAt,
 		a.Fingerprint, a.OccurrenceCount, a.LastSeenAt, a.TraceID, a.WorkflowName,
 	)
-	err := scanAlert(row, stored)
+	err = scanAlert(row, stored)
 	if err != nil {
+		// The failed INSERT aborted the transaction; read the existing row
+		// outside it.
+		_ = tx.Rollback(ctx)
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "alerts_pkey" {
 			// Same-id retry (e.g. a network retry of the same POST): treat as
@@ -201,15 +213,8 @@ func (s *Store) Create(ctx context.Context, a *Alert) (*Alert, error) {
 		return nil, fmt.Errorf("alerts store: create: %w", err)
 	}
 
-	for _, ev := range a.Evidence {
-		_, err := s.pool.Exec(ctx,
-			`INSERT INTO alert_evidence (alert_id, type, content, collected_at)
-			 VALUES ($1, $2, $3, $4)`,
-			stored.ID, ev.Type, ev.Content, ev.CollectedAt,
-		)
-		if err != nil {
-			slog.Error("alerts store: insert evidence failed", "alert_id", stored.ID, "error", err)
-		}
+	if err := insertEvidence(ctx, tx, stored.ID, a.Evidence); err != nil {
+		return nil, fmt.Errorf("alerts store: create: %w", err)
 	}
 
 	if stored.ID == a.ID {
@@ -218,16 +223,43 @@ func (s *Store) Create(ctx context.Context, a *Alert) (*Alert, error) {
 		// Dedup hit: stored.ID is the original alert's ID, so a.Evidence (just
 		// the newly submitted evidence) would be an incomplete picture. Return
 		// the full accumulated evidence list instead.
-		stored.Evidence, _ = s.getEvidence(ctx, stored.ID)
+		if stored.Evidence, err = s.getEvidence(ctx, tx, stored.ID); err != nil {
+			return nil, fmt.Errorf("alerts store: create: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("alerts store: create: commit: %w", err)
 	}
 	return stored, nil
+}
+
+// insertEvidence writes evidence rows for alertID. Any failure is returned:
+// the caller runs it inside the alert's transaction so a failed evidence row
+// rolls the whole write back instead of leaving it silently incomplete.
+func insertEvidence(ctx context.Context, tx pgx.Tx, alertID string, evidence []Evidence) error {
+	for _, ev := range evidence {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO alert_evidence (alert_id, type, content, collected_at)
+			 VALUES ($1, $2, $3, $4)`,
+			alertID, ev.Type, ev.Content, ev.CollectedAt,
+		); err != nil {
+			return fmt.Errorf("insert evidence: %w", err)
+		}
+	}
+	return nil
 }
 
 // Update patches an existing alert (status, analysis, pr_url, etc).
 func (s *Store) Update(ctx context.Context, a *Alert) error {
 	a.UpdatedAt = time.Now().UTC()
 
-	_, err := s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("alerts store: update: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	_, err = tx.Exec(ctx,
 		`UPDATE alerts SET status=$2, analysis=$3, proposed_fix=$4, pr_url=$5, pr_number=$6,
 		 confidence=$7, updated_at=$8, resolved_at=$9, acknowledged_by=$10, acknowledged_at=$11,
 		 trace_id=CASE WHEN $12::text <> '' THEN $12::text ELSE trace_id END,
@@ -241,17 +273,12 @@ func (s *Store) Update(ctx context.Context, a *Alert) error {
 		return fmt.Errorf("alerts store: update: %w", err)
 	}
 
-	for _, ev := range a.Evidence {
-		_, err := s.pool.Exec(ctx,
-			`INSERT INTO alert_evidence (alert_id, type, content, collected_at)
-			 VALUES ($1, $2, $3, $4)`,
-			a.ID, ev.Type, ev.Content, ev.CollectedAt,
-		)
-		if err != nil {
-			slog.Error("alerts store: insert evidence failed", "alert_id", a.ID, "error", err)
-		}
+	if err := insertEvidence(ctx, tx, a.ID, a.Evidence); err != nil {
+		return fmt.Errorf("alerts store: update: %w", err)
 	}
-
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("alerts store: update: commit: %w", err)
+	}
 	return nil
 }
 
@@ -272,7 +299,9 @@ func (s *Store) Get(ctx context.Context, id string) (*Alert, error) {
 		return nil, fmt.Errorf("alerts store: get: %w", err)
 	}
 
-	a.Evidence, _ = s.getEvidence(ctx, a.ID)
+	if a.Evidence, err = s.getEvidence(ctx, s.pool, a.ID); err != nil {
+		return nil, fmt.Errorf("alerts store: get: %w", err)
+	}
 	return a, nil
 }
 
@@ -324,7 +353,9 @@ func (s *Store) GetByPrefix(ctx context.Context, prefix string) (*Alert, error) 
 	case 0:
 		return nil, ErrNotFound
 	case 1:
-		found[0].Evidence, _ = s.getEvidence(ctx, found[0].ID)
+		if found[0].Evidence, err = s.getEvidence(ctx, s.pool, found[0].ID); err != nil {
+			return nil, fmt.Errorf("alerts store: get by prefix: %w", err)
+		}
 		return found[0], nil
 	default:
 		return nil, ErrAmbiguousPrefix
@@ -353,22 +384,38 @@ func (s *Store) ResolveByFingerprint(ctx context.Context, tenant, fingerprint, r
 	return ids, nil
 }
 
-func (s *Store) getEvidence(ctx context.Context, alertID string) ([]Evidence, error) {
-	rows, err := s.pool.Query(ctx,
+// evidenceQuerier is the part of a pool or transaction getEvidence needs.
+type evidenceQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// getEvidence reads every evidence row of alertID. A row that fails to scan,
+// or a stream that ends in error, fails the whole read: a partial evidence
+// list is reported as an error, never as the complete list.
+func (s *Store) getEvidence(ctx context.Context, q evidenceQuerier, alertID string) ([]Evidence, error) {
+	rows, err := q.Query(ctx,
 		`SELECT id, alert_id, type, content, collected_at FROM alert_evidence
 		 WHERE alert_id=$1 ORDER BY collected_at`, alertID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get evidence: %w", err)
 	}
-	defer rows.Close()
+	return collectEvidence(rows)
+}
 
+// collectEvidence drains rows into evidence, failing on the first scan error
+// and on a stream error reported after the last row.
+func collectEvidence(rows pgx.Rows) ([]Evidence, error) {
+	defer rows.Close()
 	var evidence []Evidence
 	for rows.Next() {
 		var ev Evidence
 		if err := rows.Scan(&ev.ID, &ev.AlertID, &ev.Type, &ev.Content, &ev.CollectedAt); err != nil {
-			continue
+			return nil, fmt.Errorf("get evidence: scan: %w", err)
 		}
 		evidence = append(evidence, ev)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("get evidence: %w", err)
 	}
 	return evidence, nil
 }

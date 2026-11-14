@@ -17,8 +17,11 @@ run: build-api
 run-mcp: build-mcp
 	MCTL_API_URL=http://localhost:8080 bin/mctl-mcp
 
+# -p 1: the Postgres-backed tests of several packages share one
+# TEST_DATABASE_URL and wipe tables in setup/cleanup, so package test
+# binaries must not run in parallel (same reason as validate.yml).
 test:
-	go test ./... -v
+	go test -p 1 ./... -v
 
 clean:
 	rm -rf bin/
