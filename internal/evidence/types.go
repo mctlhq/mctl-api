@@ -574,11 +574,10 @@ func canonicalNumber(lit string) (string, error) {
 		}
 		return n.String(), nil
 	}
+	// Overflow comes back as ±Inf with ErrRange and is refused. Underflow
+	// rounds to 0 without an error, which is Python's 0.0 too.
 	f, err := strconv.ParseFloat(lit, 64)
-	if err != nil && !(errors.Is(err, strconv.ErrRange) && f == 0) {
-		return "", fmt.Errorf("evidence: canonical json: number %q is out of range", lit)
-	}
-	if math.IsInf(f, 0) || math.IsNaN(f) {
+	if err != nil {
 		return "", fmt.Errorf("evidence: canonical json: number %q is out of range", lit)
 	}
 	return pythonFloatRepr(f), nil
