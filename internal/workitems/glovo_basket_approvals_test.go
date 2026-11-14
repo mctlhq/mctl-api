@@ -2,6 +2,8 @@ package workitems
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
@@ -218,5 +220,31 @@ func TestGlovoBasketApprovalDatabaseGuards(t *testing.T) {
 		VALUES ('aar_wirole', $1, 'glovo.basket_approval', 't', 'd', 'glovo.basket.owner-approval', '1', 'k-wi',
 		'service:glovo-basket', 'h', 'pending', now() + interval '1 hour', now(), 'actionapproval/v1')`, testBasket); err == nil {
 		t.Fatal("the work-items role wrote a basket approval")
+	}
+}
+
+// A snapshot must hash to the binding's fingerprint and carry 1 to 30 lines;
+// the store refuses anything else before it reaches the database CHECK.
+func TestGlovoBasketSnapshotValidation(t *testing.T) {
+	canonical := []byte(`{"v":"x"}`)
+	fp := "sha256:" + func() string { s := sha256.Sum256(canonical); return hex.EncodeToString(s[:]) }()
+	good := basketInput(1, fp)
+	good.Snapshot = &GlovoBasketSnapshot{Canonical: canonical, Lines: []byte(`[{"item_code":"A"}]`)}
+	if err := good.validate(); err != nil {
+		t.Fatalf("good: %v", err)
+	}
+	for name, s := range map[string]*GlovoBasketSnapshot{
+		"empty canonical": {Lines: []byte(`[{}]`)},
+		"other content":   {Canonical: []byte(`{"v":"y"}`), Lines: []byte(`[{}]`)},
+		"lines not array": {Canonical: canonical, Lines: []byte(`{}`)},
+		"no lines":        {Canonical: canonical, Lines: []byte(`[]`)},
+		"too many lines":  {Canonical: canonical, Lines: []byte("[" + strings.Repeat("{},", maxSnapshotLines) + "{}]")},
+		"lines not json":  {Canonical: canonical, Lines: []byte(`[`)},
+	} {
+		in := good
+		in.Snapshot = s
+		if err := in.validate(); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }

@@ -2,6 +2,9 @@ package workitems
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -10,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/mctlhq/mctl-api/internal/glovo"
 	"github.com/mctlhq/mctl-api/internal/glovo/dbq"
@@ -78,6 +82,37 @@ type GlovoBasketApprovalInput struct {
 	// ExpiresIn: 0 < ExpiresIn <= MaxApprovalTTL; the stored expires_at is
 	// clock_timestamp() + ExpiresIn.
 	ExpiresIn time.Duration
+	// Snapshot is the frozen content of the revision, stored with the
+	// binding (basket schema version 2). Nil writes no snapshot column, for
+	// a database still at basket schema version 1; at version 2 the database
+	// then fills it from basket_revisions.
+	Snapshot *GlovoBasketSnapshot
+}
+
+// GlovoBasketSnapshot is the frozen content an approval binds: the canonical
+// form (mctl-approval-basket/v1) whose sha256 is the basket fingerprint, and
+// the priced lines shown to the owner, as a JSON array.
+type GlovoBasketSnapshot struct {
+	Canonical []byte
+	Lines     []byte
+}
+
+// maxSnapshotLines is the most lines a basket revision holds.
+const maxSnapshotLines = 30
+
+func (s *GlovoBasketSnapshot) validate(fingerprint string) error {
+	if len(s.Canonical) == 0 {
+		return invalid("snapshot canonical form is empty")
+	}
+	sum := sha256.Sum256(s.Canonical)
+	if "sha256:"+hex.EncodeToString(sum[:]) != fingerprint {
+		return invalid("snapshot does not hash to basket_fingerprint")
+	}
+	var lines []json.RawMessage
+	if err := json.Unmarshal(s.Lines, &lines); err != nil || len(lines) == 0 || len(lines) > maxSnapshotLines {
+		return invalid("snapshot lines must be a JSON array of 1 to %d lines", maxSnapshotLines)
+	}
+	return nil
 }
 
 func (in GlovoBasketApprovalInput) validate() error {
@@ -101,6 +136,9 @@ func (in GlovoBasketApprovalInput) validate() error {
 	}
 	if in.ExpiresIn <= 0 || in.ExpiresIn > MaxApprovalTTL {
 		return invalid("expires_in must be positive and at most %s", MaxApprovalTTL)
+	}
+	if in.Snapshot != nil {
+		return in.Snapshot.validate(in.BasketFingerprint)
 	}
 	return nil
 }
@@ -218,12 +256,44 @@ func CreateGlovoBasketApprovalTx(ctx context.Context, tx pgx.Tx, in GlovoBasketA
 	if err != nil {
 		return nil, false, mapGlovoPgErr("insert glovo basket approval", err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO glovo.basket_approval_bindings (`+glovoBasketBindingColumns+`)
+	var err2 error
+	if in.Snapshot == nil {
+		_, err2 = tx.Exec(ctx, `INSERT INTO glovo.basket_approval_bindings (`+glovoBasketBindingColumns+`)
 		VALUES ($1,$2,$3,$4,$5,$6,clock_timestamp())`,
-		id, in.Tenant, in.OwnerPrincipalID, in.BasketID, in.Revision, in.BasketFingerprint); err != nil {
-		return nil, false, mapGlovoPgErr("insert glovo basket binding", err)
+			id, in.Tenant, in.OwnerPrincipalID, in.BasketID, in.Revision, in.BasketFingerprint)
+	} else {
+		_, err2 = tx.Exec(ctx, `INSERT INTO glovo.basket_approval_bindings (`+glovoBasketBindingColumns+`,
+			snapshot_canonical, snapshot_lines)
+		VALUES ($1,$2,$3,$4,$5,$6,clock_timestamp(),$7,$8::jsonb)`,
+			id, in.Tenant, in.OwnerPrincipalID, in.BasketID, in.Revision, in.BasketFingerprint,
+			in.Snapshot.Canonical, string(in.Snapshot.Lines))
+	}
+	if err2 != nil {
+		return nil, false, mapBasketBindingErr(err2)
 	}
 	return a, true, nil
+}
+
+// ErrGlovoBasketRevisionUnknown: the binding names no stored revision of the
+// owner's basket with that fingerprint (the foreign key into
+// basket_revisions refused it). The caller maps it to a refusal; it is never
+// a store failure.
+var ErrGlovoBasketRevisionUnknown = errors.New("workitems: no such basket revision for this owner and fingerprint")
+
+// mapBasketBindingErr maps the binding insert's errors: the foreign key into
+// basket_revisions (23503) is ErrGlovoBasketRevisionUnknown, the snapshot
+// CHECK (23514) is invalid input; everything else is mapGlovoPgErr's.
+func mapBasketBindingErr(err error) error {
+	var pg *pgconn.PgError
+	if errors.As(err, &pg) {
+		switch {
+		case pg.Code == "23503" && pg.ConstraintName == "basket_approval_bindings_revision_fk":
+			return ErrGlovoBasketRevisionUnknown
+		case pg.Code == "23514" && pg.ConstraintName == "basket_approval_bindings_snapshot_chk":
+			return invalid("snapshot does not match the approved revision")
+		}
+	}
+	return mapGlovoPgErr("insert glovo basket binding", err)
 }
 
 // GlovoBasketApprovalForDecision is the pre-read of the decision route and

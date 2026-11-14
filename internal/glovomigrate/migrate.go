@@ -141,7 +141,7 @@ type Config struct {
 const (
 	StepBase     = "glovo-base"
 	StepApproval = "approval-v2"
-	StepBasket   = "basket-v1"
+	StepBasket   = "basket-v2"
 )
 
 // StepNames is the enforced order.

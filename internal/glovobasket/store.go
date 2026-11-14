@@ -84,6 +84,10 @@ type PGStore struct {
 	Pool *pgxpool.Pool
 	// Now is the clock of the revision timestamps; nil is time.Now.
 	Now func() time.Time
+	// SchemaVersion is the basket schema version VerifySchemaVersion read at
+	// boot. At 2 or later the store writes the binding snapshot itself; below
+	// it writes none and the database fills it once migrated.
+	SchemaVersion int
 }
 
 var _ Store = (*PGStore)(nil)
@@ -309,9 +313,19 @@ func (s *PGStore) RequestApproval(ctx context.Context, o Owner, id string, expec
 		if err := verifyFrozen(b.Current); err != nil {
 			return err
 		}
-		a, created, err := workitems.CreateGlovoBasketApprovalTx(ctx, tx, workitems.GlovoBasketApprovalInput{
+		in := workitems.GlovoBasketApprovalInput{
 			Tenant: o.Tenant, OwnerPrincipalID: o.PrincipalID, BasketID: id, Revision: b.Current.Revision,
-			BasketFingerprint: b.Current.Fingerprint, ExpiresIn: ttl})
+			BasketFingerprint: b.Current.Fingerprint, ExpiresIn: ttl}
+		if s.writesSnapshots() {
+			// The re-checked canonical form and the priced lines of the
+			// revision, frozen with the binding.
+			snap, err := ledgerSnapshot(b.Current.Canonical, b.Current.Lines)
+			if err != nil {
+				return unavailable("snapshot", err)
+			}
+			in.Snapshot = snap
+		}
+		a, created, err := workitems.CreateGlovoBasketApprovalTx(ctx, tx, in)
 		if err != nil {
 			return mapApprovalErr(err)
 		}

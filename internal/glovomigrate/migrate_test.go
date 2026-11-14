@@ -655,7 +655,7 @@ func TestDryRunChangesNothingAndPrintsThePlan(t *testing.T) {
 		t.Fatal("dry-run changed the database")
 	}
 	out := e.buf.String()
-	for _, want := range []string{"step glovo-base", "step approval-v2", "step basket-v1", "would create", "dry-run: nothing was applied"} {
+	for _, want := range []string{"step glovo-base", "step approval-v2", "step basket-v2", "would create", "dry-run: nothing was applied"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("dry-run output lacks %q:\n%s", want, out)
 		}
@@ -855,7 +855,7 @@ func TestConfigValidation(t *testing.T) {
 // The apply functions are the code boot's counterparts verify: the compiled
 // versions the migrator reports are the ones the packages record.
 func TestCompiledVersionsMatchThePackages(t *testing.T) {
-	if glovo.CompiledSchemaVersion() < 1 || workitems.CompiledGlovoApprovalSchemaVersion() != 2 || glovobasket.SchemaVersion != 1 {
+	if glovo.CompiledSchemaVersion() < 1 || workitems.CompiledGlovoApprovalSchemaVersion() != 2 || glovobasket.SchemaVersion != 2 {
 		t.Fatalf("versions: glovo=%d approval=%d basket=%d", glovo.CompiledSchemaVersion(), workitems.CompiledGlovoApprovalSchemaVersion(), glovobasket.SchemaVersion)
 	}
 }
