@@ -93,6 +93,19 @@ spec:
         value: ""
         # Container port override. Leave empty to use the value from the service values.yaml.
         # Use when the image being previewed listens on a different port than production.
+      - name: preview_id
+        # Server-set preview id ([a-z0-9]{6}) from an approved deploy plan
+        # (mctl-api deploy_plan, .github#254). The plan digest binds the
+        # preview id and host, so the workflow must render exactly that id
+        # rather than derive one from its own name. Empty keeps the old
+        # behaviour: the last six [a-z0-9] of the workflow name.
+        value: ""
+      - name: gitops_ref
+        # 40-hex mctl-gitops commit the plan was computed against
+        # (gitops_base_sha). When set, the service values are read at that
+        # commit, so the values the plan digest binds are the values that
+        # deploy. Empty reads the default branch, as before.
+        value: ""
 
   templates:
     - name: preview-pipeline
@@ -151,6 +164,10 @@ spec:
                   value: "{{workflow.parameters.ttl_hours}}"
                 - name: port
                   value: "{{workflow.parameters.port}}"
+                - name: preview_id
+                  value: "{{workflow.parameters.preview_id}}"
+                - name: gitops_ref
+                  value: "{{workflow.parameters.gitops_ref}}"
 
     # ── Build: trigger build-image.yaml in mctl-gitops, poll until done ─────────
     - name: trigger-github-build
@@ -306,6 +323,10 @@ spec:
             value: "{{workflow.parameters.ttl_hours}}"
           - name: port
             value: "{{workflow.parameters.port}}"
+          - name: preview_id
+            value: "{{workflow.parameters.preview_id}}"
+          - name: gitops_ref
+            value: "{{workflow.parameters.gitops_ref}}"
       outputs:
         parameters:
           - name: preview_id
@@ -328,6 +349,10 @@ spec:
             value: "{{inputs.parameters.ttl_hours}}"
           - name: PARAM_PORT
             value: "{{inputs.parameters.port}}"
+          - name: PARAM_PREVIEW_ID
+            value: "{{inputs.parameters.preview_id}}"
+          - name: PARAM_GITOPS_REF
+            value: "{{inputs.parameters.gitops_ref}}"
           - name: ARGO_WORKFLOW_NAME
             value: "{{workflow.name}}"
         envFrom:
@@ -393,7 +418,40 @@ spec:
           TTL_HOURS="${TTL_HOURS:-0}"
           EXPIRES_AT=$(( $(date +%s) + TTL_HOURS * 3600 ))
 
-          PREVIEW_ID=$(echo "${ARGO_WORKFLOW_NAME}" | tr -cd 'a-z0-9' | tail -c 6)
+          # A server-set id comes from an approved deploy plan whose digest
+          # binds it; it is asserted, never trusted. Without one, the id is
+          # derived from the workflow name as before.
+          PREVIEW_ID="$PARAM_PREVIEW_ID"
+          case "$PREVIEW_ID" in
+            "")
+              PREVIEW_ID=$(echo "${ARGO_WORKFLOW_NAME}" | tr -cd 'a-z0-9' | tail -c 6)
+              ;;
+            ?????? )
+              case "$PREVIEW_ID" in
+                *[!a-z0-9]* )
+                  echo "❌ preview_id must be exactly 6 characters [a-z0-9]; got: ${PREVIEW_ID}" >&2
+                  exit 1
+                  ;;
+              esac
+              ;;
+            * )
+              echo "❌ preview_id must be exactly 6 characters [a-z0-9]; got: ${PREVIEW_ID}" >&2
+              exit 1
+              ;;
+          esac
+          GITOPS_REF="$PARAM_GITOPS_REF"
+          case "$GITOPS_REF" in
+            "") ;;
+            *[!0-9a-f]* )
+              echo "❌ gitops_ref must be a 40-character lowercase hex commit SHA; got: ${GITOPS_REF}" >&2
+              exit 1
+              ;;
+            ???????????????????????????????????????? ) ;;
+            * )
+              echo "❌ gitops_ref must be a 40-character lowercase hex commit SHA; got: ${GITOPS_REF}" >&2
+              exit 1
+              ;;
+          esac
           RELEASE="preview-${COMPONENT}-${PREVIEW_ID}"
           HOST="${COMPONENT}-${PREVIEW_ID}.${PLATFORM_DOMAIN}"
 
@@ -403,6 +461,18 @@ spec:
           # Read only, and the repository is public, so no credential: this step
           # also runs a Helm release of tenant-chosen values in a tenant namespace.
           git clone --depth=1 "https://github.com/${GITOPS_ORG}/${GITOPS_REPO}.git" /tmp/mctl-gitops
+          if [ -n "$GITOPS_REF" ]; then
+            # Pin the values to the commit the plan was computed against. A
+            # commit that cannot be fetched fails the step: deploying the
+            # default branch instead would deploy values nobody approved.
+            git -C /tmp/mctl-gitops fetch --depth=1 origin "$GITOPS_REF"
+            git -C /tmp/mctl-gitops checkout --quiet --detach FETCH_HEAD
+            HEAD_SHA=$(git -C /tmp/mctl-gitops rev-parse HEAD)
+            if [ "$HEAD_SHA" != "$GITOPS_REF" ]; then
+              echo "❌ mctl-gitops checkout is ${HEAD_SHA}, expected ${GITOPS_REF}" >&2
+              exit 1
+            fi
+          fi
 
           CHART_PATH="/tmp/mctl-gitops/platform-gitops/helm-charts/base-service"
           SERVICE_VALUES="/tmp/mctl-gitops/platform-gitops/services/${TEAM}/${COMPONENT}/values.yaml"
