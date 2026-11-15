@@ -1957,9 +1957,8 @@ func loadConfig() config {
 		for _, u := range strings.Split(raw, ",") {
 			if u = strings.TrimSpace(u); u != "" {
 				if strings.HasSuffix(u, "*") {
-					pu, err := url.Parse(strings.TrimSuffix(u, "*"))
-					if err != nil || pu.Scheme != "https" || pu.Host == "" || pu.Path == "" {
-						slog.Error("OAUTH_ALLOWED_REDIRECT_URIS entry with wildcard must be an https URL with a non-empty path prefix", "entry", u)
+					if err := auth.ValidateRedirectPrefix(u); err != nil {
+						slog.Error("OAUTH_ALLOWED_REDIRECT_URIS: invalid wildcard entry", "entry", u, "error", err)
 						os.Exit(1)
 					}
 				}

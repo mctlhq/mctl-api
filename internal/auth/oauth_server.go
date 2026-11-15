@@ -1196,6 +1196,36 @@ func (s *OAuthServer) awaitBusyResolver(login string) ([]string, error) {
 	}
 }
 
+// ValidateRedirectPrefix reports whether a wildcard OAUTH_ALLOWED_REDIRECT_URIS
+// entry (one ending in "*") is well formed: an https URL with a host and a
+// path, the "*" only as the last character, and no userinfo, query or
+// fragment. The matcher compares scheme, host and path only, so a query or
+// fragment in an entry would be silently dropped and the entry would admit
+// more than it reads; such entries are refused instead. Exact entries (no
+// trailing "*") are not checked here.
+func ValidateRedirectPrefix(entry string) error {
+	_, err := parseRedirectPrefix(entry)
+	return err
+}
+
+func parseRedirectPrefix(entry string) (*url.URL, error) {
+	prefix, ok := strings.CutSuffix(entry, "*")
+	if !ok {
+		return nil, fmt.Errorf("wildcard entry must end in *")
+	}
+	if strings.ContainsAny(prefix, "*?#\\") {
+		return nil, fmt.Errorf("wildcard entry may contain * only as its last character and no ?, # or backslash")
+	}
+	pu, err := url.Parse(prefix)
+	if err != nil {
+		return nil, fmt.Errorf("wildcard entry is not a URL: %w", err)
+	}
+	if pu.Scheme != "https" || pu.Host == "" || !strings.HasPrefix(pu.Path, "/") || pu.User != nil || pu.Opaque != "" {
+		return nil, fmt.Errorf("wildcard entry must be an https URL with a host, no userinfo and a non-empty path prefix")
+	}
+	return pu, nil
+}
+
 // IsRedirectURIAllowed returns true if uri is in the static whitelist, is a
 // loopback callback, or was registered by the client identified by clientID.
 // Allowlist entries ending with "/*" are treated as prefix matches
@@ -1244,8 +1274,8 @@ func (s *OAuthServer) IsRedirectURIAllowedCtx(ctx context.Context, clientID, uri
 	}
 	for _, allowed := range s.AllowedRedirectURIs {
 		if strings.HasSuffix(allowed, "*") {
-			allowedParsed, err := url.Parse(strings.TrimSuffix(allowed, "*"))
-			if err != nil || allowedParsed.Scheme == "" || allowedParsed.Host == "" || allowedParsed.Path == "" {
+			allowedParsed, err := parseRedirectPrefix(allowed)
+			if err != nil {
 				continue
 			}
 			u, err := url.Parse(uri)
@@ -1253,7 +1283,7 @@ func (s *OAuthServer) IsRedirectURIAllowedCtx(ctx context.Context, clientID, uri
 				continue
 			}
 			// Reject dot-segments and URL-encoded dots in the path to prevent traversal evasion.
-			if strings.Contains(u.Path, "..") || strings.Contains(u.Path, "/.") || strings.Contains(u.RawPath, "%2e") || strings.Contains(u.RawPath, "%2E") {
+			if strings.Contains(u.Path, "..") || strings.Contains(u.Path, "/.") || strings.Contains(u.RawPath, "%2e") || strings.Contains(u.RawPath, "%2E") || strings.ContainsRune(u.Path, '\\') {
 				continue
 			}
 			if !strings.HasPrefix(u.Path, allowedParsed.Path) {

@@ -137,9 +137,9 @@ func TestIsRedirectURIAllowedWildcardPrefixes(t *testing.T) {
 	// Rejected URIs: host suffix evasion, empty remainder on delimiter-terminated prefix, dot-traversals, fragments, userinfo, non-matching hosts.
 	rejected := []string{
 		"https://claude.ai/somewhere/else",
-		"https://app.example.com.evil.net/cb", // host-suffix evasion rejected
-		"https://app.example.com/cb",          // entry had no path prefix, rejected
-		"https://chatgpt.com:8080/connector/oauth/cb", // port mismatch rejected
+		"https://app.example.com.evil.net/cb",                                   // host-suffix evasion rejected
+		"https://app.example.com/cb",                                            // entry had no path prefix, rejected
+		"https://chatgpt.com:8080/connector/oauth/cb",                           // port mismatch rejected
 		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-", // empty remainder on "-" rejected
 		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-../evil",
 		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-%2e%2e/evil",
@@ -152,5 +152,44 @@ func TestIsRedirectURIAllowedWildcardPrefixes(t *testing.T) {
 		if s.IsRedirectURIAllowed("any-client", uri) {
 			t.Errorf("IsRedirectURIAllowed(%q) = true, want false", uri)
 		}
+	}
+}
+
+func TestValidateRedirectPrefix(t *testing.T) {
+	valid := []string{
+		"https://chatgpt.com/connector/oauth/*",
+		"https://antigravity.google/*",
+		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-*",
+	}
+	for _, e := range valid {
+		if err := ValidateRedirectPrefix(e); err != nil {
+			t.Errorf("ValidateRedirectPrefix(%q) = %v, want nil", e, err)
+		}
+	}
+	invalid := []string{
+		"https://app.example.com*", // prefix ends inside the host
+		"http://example.com/cb/*",  // not https
+		"https://x.com/cb?a=*",     // query would be ignored by the matcher
+		"https://x.com/cb#f*",      // fragment
+		"https://u@x.com/cb/*",     // userinfo
+		"https://x.com/*/cb/*",     // inner *
+		"https://x.com/a\\b/*",     // backslash
+		"https://x.com/cb",         // no trailing *
+	}
+	for _, e := range invalid {
+		if err := ValidateRedirectPrefix(e); err == nil {
+			t.Errorf("ValidateRedirectPrefix(%q) = nil, want an error", e)
+		}
+	}
+}
+
+func TestIsRedirectURIAllowedIgnoresMalformedWildcardEntries(t *testing.T) {
+	s := &OAuthServer{AllowedRedirectURIs: []string{"https://x.com/cb?a=*"}}
+	if s.IsRedirectURIAllowed("any-client", "https://x.com/cbevil") {
+		t.Error("a wildcard entry with a query admitted a path it does not name")
+	}
+	s = &OAuthServer{AllowedRedirectURIs: []string{"https://x.com/cb/*"}}
+	if s.IsRedirectURIAllowed("any-client", "https://x.com/cb/a%5Cb") {
+		t.Error("a backslash in the path was accepted on a prefix match")
 	}
 }
