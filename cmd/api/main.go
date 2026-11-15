@@ -1956,6 +1956,13 @@ func loadConfig() config {
 	if raw := os.Getenv("OAUTH_ALLOWED_REDIRECT_URIS"); raw != "" {
 		for _, u := range strings.Split(raw, ",") {
 			if u = strings.TrimSpace(u); u != "" {
+				if strings.HasSuffix(u, "*") {
+					pu, err := url.Parse(strings.TrimSuffix(u, "*"))
+					if err != nil || pu.Scheme != "https" || pu.Host == "" || pu.Path == "" {
+						slog.Error("OAUTH_ALLOWED_REDIRECT_URIS entry with wildcard must be an https URL with a non-empty path prefix", "entry", u)
+						os.Exit(1)
+					}
+				}
 				oauthRedirectURIs = append(oauthRedirectURIs, u)
 			}
 		}
