@@ -288,8 +288,9 @@ spec:
             # The confidential ZITADEL client of the deploy approval page
             # (mctlhq/mctl-api#1026), written by the zitadel-iac Job.
             # Optional refs: with DEPLOY_APPROVAL_UI_ENABLED unset the page
-            # stays off; with it "true" and a key missing, cmd/api refuses to
-            # start rather than serve a page that cannot sign anyone in.
+            # stays off; with it "true" and a key missing, cmd/api still
+            # starts, leaves the page unmounted and logs "deploy approval
+            # page disabled" at Error level (cmd/api/deploy_approval_ui_options.go).
             - name: DEPLOY_APPROVAL_UI_CLIENT_ID
               valueFrom:
                 secretKeyRef:
