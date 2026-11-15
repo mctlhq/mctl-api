@@ -1243,10 +1243,27 @@ func (s *OAuthServer) IsRedirectURIAllowedCtx(ctx context.Context, clientID, uri
 		return true
 	}
 	for _, allowed := range s.AllowedRedirectURIs {
-		if strings.HasSuffix(allowed, "/*") {
-			if strings.HasPrefix(uri, strings.TrimSuffix(allowed, "*")) {
-				return true
+		if strings.HasSuffix(allowed, "*") {
+			allowedParsed, err := url.Parse(strings.TrimSuffix(allowed, "*"))
+			if err != nil || allowedParsed.Scheme == "" || allowedParsed.Host == "" || allowedParsed.Path == "" {
+				continue
 			}
+			u, err := url.Parse(uri)
+			if err != nil || u.Scheme != allowedParsed.Scheme || !strings.EqualFold(u.Host, allowedParsed.Host) || u.User != nil || u.Fragment != "" {
+				continue
+			}
+			// Reject dot-segments and URL-encoded dots in the path to prevent traversal evasion.
+			if strings.Contains(u.Path, "..") || strings.Contains(u.Path, "/.") || strings.Contains(u.RawPath, "%2e") || strings.Contains(u.RawPath, "%2E") {
+				continue
+			}
+			if !strings.HasPrefix(u.Path, allowedParsed.Path) {
+				continue
+			}
+			// A delimiter-terminated prefix like "-" requires a non-empty remainder.
+			if strings.HasSuffix(allowedParsed.Path, "-") && u.Path == allowedParsed.Path {
+				continue
+			}
+			return true
 		} else if allowed == uri {
 			return true
 		}
