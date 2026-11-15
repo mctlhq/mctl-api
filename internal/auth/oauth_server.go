@@ -1243,8 +1243,21 @@ func (s *OAuthServer) IsRedirectURIAllowedCtx(ctx context.Context, clientID, uri
 		return true
 	}
 	for _, allowed := range s.AllowedRedirectURIs {
-		if strings.HasSuffix(allowed, "/*") {
-			if strings.HasPrefix(uri, strings.TrimSuffix(allowed, "*")) {
+		if strings.HasSuffix(allowed, "*") {
+			prefix := strings.TrimSuffix(allowed, "*")
+			if strings.HasPrefix(uri, prefix) {
+				// Reject dot-segments and URL-encoded dots to prevent path-traversal evasion.
+				if strings.Contains(uri, "..") || strings.Contains(uri, "/.") || strings.Contains(uri, "%2e") || strings.Contains(uri, "%2E") {
+					continue
+				}
+				// Reject fragment, backslash, or userinfo.
+				if strings.Contains(uri, "#") || strings.ContainsRune(uri, '\\') || strings.Contains(uri, "@") {
+					continue
+				}
+				// A delimiter-terminated prefix like "-" or "/" requires a non-empty remainder.
+				if (strings.HasSuffix(prefix, "-") || strings.HasSuffix(prefix, "/")) && uri == prefix {
+					continue
+				}
 				return true
 			}
 		} else if allowed == uri {

@@ -108,3 +108,44 @@ func TestIsRedirectURIAllowedScopesRegistrationToItsClient(t *testing.T) {
 		t.Error("a registered URI was accepted under an unknown client_id")
 	}
 }
+
+func TestIsRedirectURIAllowedWildcardPrefixes(t *testing.T) {
+	s := &OAuthServer{AllowedRedirectURIs: []string{
+		"https://claude.ai/api/mcp/auth_callback",
+		"https://chatgpt.com/connector/oauth/*",
+		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-*",
+		"https://oauth-redirect-sandbox.googleusercontent.com/r/user_bound_custom-mcp-*",
+	}}
+
+	// Legitimate matching URIs.
+	accepted := []string{
+		"https://claude.ai/api/mcp/auth_callback",
+		"https://chatgpt.com/connector/oauth/callback",
+		"https://chatgpt.com/connector/oauth/v2/cb",
+		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-281712b859b6752b580bc9da",
+		"https://oauth-redirect-sandbox.googleusercontent.com/r/user_bound_custom-mcp-abc123",
+	}
+	for _, uri := range accepted {
+		if !s.IsRedirectURIAllowed("any-client", uri) {
+			t.Errorf("IsRedirectURIAllowed(%q) = false, want true", uri)
+		}
+	}
+
+	// Rejected URIs: empty remainder on delimiter-terminated prefix, dot-traversals, fragments, userinfo, non-matching hosts.
+	rejected := []string{
+		"https://claude.ai/somewhere/else",
+		"https://chatgpt.com/connector/oauth/", // empty remainder on "/*"
+		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-", // empty remainder on "-"
+		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-../evil",
+		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-%2e%2e/evil",
+		"https://oauth-redirect.googleusercontent.com/r/other_project_id",
+		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-123#frag",
+		"https://user@oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-123",
+		"https://evil.com/r/user_bound_custom-mcp-123",
+	}
+	for _, uri := range rejected {
+		if s.IsRedirectURIAllowed("any-client", uri) {
+			t.Errorf("IsRedirectURIAllowed(%q) = true, want false", uri)
+		}
+	}
+}
