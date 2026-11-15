@@ -143,6 +143,7 @@ func (h *Handlers) finishAuthorization(w http.ResponseWriter, r *http.Request, c
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return "internal_error"
 	}
+	w.Header().Del("Content-Security-Policy")
 	http.Redirect(w, r, loc, http.StatusFound)
 	return "issued"
 }
@@ -226,7 +227,13 @@ func consentFormTarget(u *url.URL) string {
 	if u.Host == "" || !consentSourceChars(u.Host, true) {
 		return ""
 	}
-	return " " + scheme + "://" + u.Host
+	res := " " + scheme + "://" + u.Host
+	hostname := strings.ToLower(u.Hostname())
+	if hostname == "oauth-redirect.googleusercontent.com" || hostname == "oauth-redirect-sandbox.googleusercontent.com" ||
+		strings.HasSuffix(hostname, ".google.com") || hostname == "google.com" {
+		res += " https://*.google.com"
+	}
+	return res
 }
 
 func consentSourceChars(s string, host bool) bool {
@@ -326,6 +333,7 @@ func (h *Handlers) takeConsentDecision(w http.ResponseWriter, r *http.Request) s
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return "internal_error"
 	}
+	w.Header().Del("Content-Security-Policy")
 	http.Redirect(w, r, loc, http.StatusFound)
 	return "approve"
 }
@@ -417,9 +425,9 @@ type teamConsentPageData struct {
 // teamConsentPage lists the eligible teams as radio buttons, none checked.
 var teamConsentPage = shellPage("team-consent", `<form class="actions" method="post" action="/oauth/consent">
 <input type="hidden" name="token" value="{{.Token}}">
-{{range .Teams}}<label><input type="radio" name="tenant" value="{{.}}"> {{.}}</label>
+{{range .Teams}}<label><input type="radio" name="tenant" value="{{.}}" required> {{.}}</label>
 {{end}}<button type="submit" name="decision" value="approve">Allow</button>
-<button class="secondary" type="submit" name="decision" value="deny">Deny</button>
+<button class="secondary" type="submit" name="decision" value="deny" formnovalidate>Deny</button>
 </form>`)
 
 // selectTeam turns an approved Glovo consent into a pending team grant bound
