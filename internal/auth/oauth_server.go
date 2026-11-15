@@ -1867,8 +1867,9 @@ func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refresh
 		var refused error
 		downgrade, revokeGrant := false, false
 		var grant teamgrant.Grant
+		var aud string
 		accept := func(ctx context.Context, tx pgx.Tx, sess refreshstore.Session) error {
-			refused, downgrade, revokeGrant, grant = nil, false, false, teamgrant.Grant{}
+			refused, downgrade, revokeGrant, grant, aud = nil, false, false, teamgrant.Grant{}, ""
 			if err := checkSessionAuthMethod(sess.AuthMethod, method); err != nil {
 				refused, downgrade = err, true
 				return err
@@ -1877,6 +1878,20 @@ func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refresh
 				refused = err
 				return err
 			}
+			// The audience is re-resolved and the downstream principal
+			// checked here too, before the successor is written: a registry
+			// entry removed, or a principal dropped from the admins of an
+			// admin-only resource, refuses without spending the token.
+			a, err := s.sessionAudience(sess.Resource)
+			if err != nil {
+				refused = err
+				return err
+			}
+			if _, err := s.checkDownstreamPrincipal(a, sess.PrincipalID); err != nil {
+				refused = err
+				return err
+			}
+			aud = a
 			if err := s.refreshablePrincipal(sess.Login, sess.PrincipalID); err != nil {
 				refused = err
 				return err
@@ -1945,10 +1960,6 @@ func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refresh
 		if !s.PrincipalMode {
 			groups = s.groupsForSession(sess.Login, sess.Groups)
 		}
-		aud, err := s.sessionAudience(sess.Resource)
-		if err != nil {
-			return "", "", err
-		}
 		accessToken, err := s.issueJWTWithGrant(sess.Login, sess.PrincipalID, groups, aud, clientID, sess.TeamGrantID, grant.Tenant)
 		if err != nil {
 			return "", "", err
@@ -1964,6 +1975,15 @@ func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refresh
 	if peeked, found := s.refreshTokens.peek(refreshToken); found && peeked.ClientID == clientID &&
 		checkSessionAuthMethod(peeked.AuthMethod, method) == nil {
 		if err := resourceRefused(peeked.Resource); err != nil {
+			return "", "", err
+		}
+		// Likewise a removed registry entry or a principal no longer
+		// allowed on a downstream resource: refused before the delete.
+		aud, err := s.sessionAudience(peeked.Resource)
+		if err != nil {
+			return "", "", err
+		}
+		if _, err := s.checkDownstreamPrincipal(aud, peeked.PrincipalID); err != nil {
 			return "", "", err
 		}
 	}

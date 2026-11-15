@@ -307,6 +307,13 @@ func TestDownstreamAdminOnly(t *testing.T) {
 			if _, _, err := o.RefreshAccessTokenForResource(ctx, refresh, "c", ClientAssertion{}, nil); !errors.Is(err, ErrDownstreamPrincipal) {
 				t.Fatalf("refresh after admin removal: %v", err)
 			}
+			// The refusal did not spend the token: re-added, the same
+			// token refreshes. Spent, it would read as a replay and
+			// revoke the family.
+			admins[testAdminPID] = true
+			if _, _, err := o.RefreshAccessTokenForResource(ctx, refresh, "c", ClientAssertion{}, nil); err != nil {
+				t.Fatalf("refresh after the refusal: the token was spent: %v", err)
+			}
 		})
 	}
 }
@@ -338,6 +345,13 @@ func TestSessionResourceRemoved(t *testing.T) {
 			if _, _, err := o.RefreshAccessTokenForResource(ctx, refresh, "c", ClientAssertion{}, nil); !errors.Is(err, ErrInvalidTarget) {
 				t.Fatalf("refresh for a removed resource: %v", err)
 			}
+			// Not spent by the refusal: with the entry back, it refreshes.
+			saved := o.DownstreamResources
+			o.DownstreamResources = []DownstreamResource{{Resource: testTGRes}}
+			if _, _, err := o.RefreshAccessTokenForResource(ctx, refresh, "c", ClientAssertion{}, nil); err != nil {
+				t.Fatalf("refresh after the refusal: the token was spent: %v", err)
+			}
+			o.DownstreamResources = saved
 			if _, _, err := o.ExchangeCodeForResource(ctx, pending, "v", "c", testRedirect, ClientAssertion{}, nil); !errors.Is(err, ErrInvalidTarget) {
 				t.Fatalf("code for a removed resource: %v", err)
 			}
