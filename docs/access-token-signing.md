@@ -17,6 +17,7 @@ optional and publishes a JWKS at `/.well-known/jwks.json`, advertised as
 | `OAUTH_JWT_REQUIRE_AUD` | `false` | `true` ends the grace for aud-less HS256 tokens |
 | `OAUTH_SUPPORT_RESOURCE` | `https://support.mctl.ai` | RFC 8707 resource of the support agent; set empty to disable it; refused at boot unless an absolute https URL that is not the API audience, base URL or `/mcp` |
 | `GLOVO_MCP_RESOURCE` | empty (disabled) | RFC 8707 resource of the Glovo MCP facade (intended `https://glovo.mctl.ai/mcp`); refused at boot unless an absolute https URL that is neither the API nor `OAUTH_SUPPORT_RESOURCE`. No Glovo token is minted yet; see `docs/glovo-auth.md` |
+| `OAUTH_MCP_RESOURCES` | empty (none) | JSON array of downstream MCP resources that trust this server, `[{"resource":"https://tg.mctl.ai/mcp"},{"resource":"https://alice.mctl.ai/mcp","admin_only":true}]`; see "Downstream MCP resources" below. Refused at boot when malformed, unknown fields included, when an entry is not an absolute https URL, names this API, the support or Glovo resource, or repeats; when signing is HS256; or when an `admin_only` entry has no `ADMIN_PRINCIPALS` |
 
 `OAUTH_JWT_SECRET` stays required even after HS256 is drained: refresh-token
 derivation (`deriveSuccessorRefreshToken`) uses it as key material.
@@ -137,6 +138,41 @@ disables these tools (`support_audience_not_configured`).
 other credential. mctl-support uses it to refuse tokens minted for the API.
 Setting `OAUTH_SUPPORT_RESOURCE=""` makes the support resource
 `invalid_target` and refuses support-audience tokens at verification.
+
+## Downstream MCP resources
+
+`OAUTH_MCP_RESOURCES` registers MCP servers that use this server as their
+authorization server instead of running their own (mctl-api#1062, line I of
+mctlhq/.github#236). A client asks `/oauth/authorize` and `/oauth/token` for
+`resource=<entry>` and gets an access token that:
+
+- has `aud` equal to exactly that resource, serialized as a string;
+- has `sub` and `pid` both set to the caller's principal (`prn_...`). Neither
+  the GitHub login nor `groups` leave this server;
+- is signed with the active asymmetric key, so the downstream verifies it
+  offline through `/.well-known/jwks.json` with `iss` = this server's base
+  URL. HS256 cannot serve a downstream, and the boot is refused if one is
+  configured.
+
+Rules:
+
+- A downstream token is minted only for a principal. A caller without one is
+  refused (`ErrDownstreamPrincipal`), at code issue and again on every token,
+  refresh included.
+- `admin_only: true` restricts minting to `ADMIN_PRINCIPALS`. The check runs
+  on every refresh, so a principal removed from the admins gets no new token
+  after its current one expires.
+- **This API never accepts a downstream token.** An `aud` that contains any
+  registered downstream resource is `aud_mismatch` on every route, even when
+  it also names the API or the support resource.
+- Removing an entry makes the resource `invalid_target` for new flows.
+  Tokens already minted for it stay valid at the downstream until they
+  expire; a downstream that must cut off sooner revokes on its side.
+- Support and Glovo keep their own variables and gates. Folding them into
+  the registry is a later slice.
+
+The registry is empty by default, so deploying this changes nothing until an
+entry is set.
 
 ## The `client_id` claim
 

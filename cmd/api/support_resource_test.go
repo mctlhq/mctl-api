@@ -15,6 +15,11 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
 	"testing"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
@@ -81,5 +86,60 @@ func TestConfigureGlovoResource(t *testing.T) {
 		if err := configureGlovoResource(o, look(bad, true)); err == nil {
 			t.Fatalf("%q accepted", bad)
 		}
+	}
+}
+
+// mctl-api#1062: OAUTH_MCP_RESOURCES is parsed, validated and wired with
+// the admin predicate; unset changes nothing.
+func TestConfigureDownstreamResources(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, _ := json.Marshal(map[string]any{"active": "k1", "keys": []map[string]string{{
+		"kid": "k1", "alg": auth.JWTAlgEdDSA, "private_key_pem": string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})),
+	}}})
+	newServer := func(t *testing.T, alg string) *auth.OAuthServer {
+		t.Helper()
+		o := auth.NewOAuthServer("https://api.example", "", "", []byte("secret"), nil, nil)
+		c := auth.JWTSigningConfig{Alg: alg, AcceptHS256: true}
+		if alg == auth.JWTAlgEdDSA {
+			c.KeysJSON = string(keys)
+		}
+		if err := o.ConfigureSigning(c); err != nil {
+			t.Fatal(err)
+		}
+		return o
+	}
+	const admin = "prn_01JZZZZZZZZZZZZZZZZZZZZZZZ"
+	admins := map[string]bool{admin: true}
+
+	o := newServer(t, auth.JWTAlgHS256)
+	if err := configureDownstreamResources(o, "", nil); err != nil || len(o.DownstreamResources) != 0 {
+		t.Fatalf("unset: %v %v", err, o.DownstreamResources)
+	}
+	if err := configureDownstreamResources(o, `[{"resource":"https://tg.mctl.ai/mcp"}]`, admins); err == nil {
+		t.Fatal("registry accepted with HS256 signing")
+	}
+
+	o = newServer(t, auth.JWTAlgEdDSA)
+	raw := `[{"resource":"https://tg.mctl.ai/mcp"},{"resource":"https://alice.mctl.ai/mcp","admin_only":true}]`
+	if err := configureDownstreamResources(o, raw, admins); err != nil {
+		t.Fatal(err)
+	}
+	if len(o.DownstreamResources) != 2 || o.IsAdminPrincipal == nil || !o.IsAdminPrincipal(admin) || o.IsAdminPrincipal("prn_01JBBBBBBBBBBBBBBBBBBBBBBB") {
+		t.Fatalf("wiring: %v, admin predicate set=%v", o.DownstreamResources, o.IsAdminPrincipal != nil)
+	}
+	for _, bad := range []string{`not json`, `[{"resource":"https://api.example/mcp"}]`, `[{"resource":"https://alice.mctl.ai/mcp","adminOnly":true}]`} {
+		if err := configureDownstreamResources(o, bad, admins); err == nil {
+			t.Fatalf("%q accepted", bad)
+		}
+	}
+	if err := configureDownstreamResources(o, `[{"resource":"https://alice.mctl.ai/mcp","admin_only":true}]`, nil); err == nil {
+		t.Fatal("admin_only accepted with no admins")
 	}
 }

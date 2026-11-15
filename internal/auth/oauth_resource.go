@@ -42,7 +42,8 @@ var ErrGlovoNotReady = fmt.Errorf("%w: glovo resource not ready", ErrInvalidTarg
 // audience to mint. No value, or one naming this API (the audience, the base
 // URL or its /mcp endpoint), is the default audience; those match exactly,
 // so a local http base URL resolves too. The configured support resource is
-// minted as itself and must be https. Anything else is ErrInvalidTarget.
+// minted as itself and must be https, and so is a registered downstream
+// resource (DownstreamResources). Anything else is ErrInvalidTarget.
 func (s *OAuthServer) ResolveResource(values []string) (string, error) {
 	if len(values) == 0 {
 		return s.accessAudience(), nil
@@ -72,6 +73,9 @@ func (s *OAuthServer) ResolveResource(values []string) (string, error) {
 			return "", ErrGlovoNotReady
 		}
 		return s.GlovoResource, nil
+	}
+	if d, ok := s.downstreamResource(n); ok {
+		return d.Resource, nil
 	}
 	return "", ErrInvalidTarget
 }
@@ -141,10 +145,19 @@ func (s *OAuthServer) FlowResource(values []string) (string, error) {
 	return aud, nil
 }
 
-// audienceForResource is the aud to mint for a stored flow resource.
-func (s *OAuthServer) audienceForResource(resource string) string {
+// sessionAudience is the aud to mint for a code or refresh session's stored
+// resource, re-resolved now rather than trusted from issue time: a resource
+// removed from the registry, or disabled, since the session began is
+// ErrInvalidTarget and mints nothing. Without this a session would keep
+// minting for a resource no longer served, and for a removed downstream
+// entry it would do so with the login and groups in the token.
+func (s *OAuthServer) sessionAudience(resource string) (string, error) {
 	if resource == "" {
-		return s.accessAudience()
+		return s.accessAudience(), nil
 	}
-	return resource
+	aud, err := s.ResolveResource([]string{resource})
+	if err != nil {
+		return "", fmt.Errorf("%w: the session's resource is no longer served", err)
+	}
+	return aud, nil
 }
