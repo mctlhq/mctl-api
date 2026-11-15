@@ -1,5 +1,19 @@
 # Changelog
 
+## [4.161.0](https://github.com/mctlhq/mctl-api/compare/4.160.0...4.161.0) (2026-11-15)
+
+
+### Features
+
+* **auth:** registry of downstream MCP resources (OAUTH_MCP_RESOURCES) ([d63340f](https://github.com/mctlhq/mctl-api/commit/d63340f19dea4403f86494213fdbeee6f903adc4))
+* **auth:** registry of downstream MCP resources (OAUTH_MCP_RESOURCES) ([de8982c](https://github.com/mctlhq/mctl-api/commit/de8982cf7ceb646e5d61071025360bf646ae894f))
+
+
+### Bug Fixes
+
+* **auth:** refuse downstream refreshes before rotating the token ([aae2ae2](https://github.com/mctlhq/mctl-api/commit/aae2ae21eb30c367f17876e3a9a6dd9553016586))
+* **oauth:** refuse wildcard redirect entries the matcher would widen ([89f8320](https://github.com/mctlhq/mctl-api/commit/89f8320384f736b595c3bbb53a6da18caab48747))
+
 ## [4.160.0](https://github.com/mctlhq/mctl-api/compare/4.159.0...4.160.0) (2026-11-15)
 
 
