@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.160.0](https://github.com/mctlhq/mctl-api/compare/4.159.0...4.160.0) (2026-11-15)
+
+
+### Features
+
+* **oauth:** support wildcard redirect prefixes in AllowedRedirectURIs ([64e44c9](https://github.com/mctlhq/mctl-api/commit/64e44c9aff36bea74190a882f5605631fa0baa92))
+* **oauth:** support wildcard redirect prefixes in AllowedRedirectURIs ([08b4560](https://github.com/mctlhq/mctl-api/commit/08b456015a28d8b7c36b6f24e0169bd07bb67a01))
+
+
+### Bug Fixes
+
+* **api:** log unreadable agent-deploy profile at Error ([8f40c71](https://github.com/mctlhq/mctl-api/commit/8f40c71900d987fd4ae45b79e3f04e382e2e532e))
+* **api:** log unreadable agent-deploy profile at Error ([1eac6df](https://github.com/mctlhq/mctl-api/commit/1eac6df05890704a446e94b235bf1ed383c8aefd))
+* **oauth:** bind wildcard redirect matching to URL path ([f467f4b](https://github.com/mctlhq/mctl-api/commit/f467f4b69d80b8d33325a10246c63bebfcf907e6))
+
 ## [4.159.0](https://github.com/mctlhq/mctl-api/compare/4.158.1...4.159.0) (2026-11-14)
 
 
