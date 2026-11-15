@@ -258,6 +258,7 @@ func postConsent(h *Handlers, token, decision string, cookies ...*http.Cookie) *
 		}
 	}
 	rec := httptest.NewRecorder()
+	rec.Header().Set("Content-Security-Policy", "default-src 'none'; form-action 'none'")
 	h.handleOAuthConsent(rec, req)
 	return rec
 }
@@ -277,6 +278,9 @@ func TestConsentApproveIssuesCodeAndAudits(t *testing.T) {
 	loc := rec.Header().Get("Location")
 	if rec.Code != http.StatusFound || !strings.HasPrefix(loc, cbURL+"?") || !strings.Contains(loc, "code=") || !strings.Contains(loc, "state=st") {
 		t.Fatalf("%d %q", rec.Code, loc)
+	}
+	if csp := rec.Header().Get("Content-Security-Policy"); csp != "" {
+		t.Errorf("redirect response must not carry Content-Security-Policy, got %q", csp)
 	}
 	entries := log.List(10)
 	if len(entries) != 1 {
@@ -300,6 +304,9 @@ func TestConsentDeny(t *testing.T) {
 	rec := postConsent(h, token, "deny", cookie)
 	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "error=access_denied") || strings.Contains(loc, "code=") {
 		t.Fatalf("%q", loc)
+	}
+	if csp := rec.Header().Get("Content-Security-Policy"); csp != "" {
+		t.Errorf("redirect response must not carry Content-Security-Policy, got %q", csp)
 	}
 	if len(log.List(10)) != 0 {
 		t.Fatal("a denial issues nothing")
@@ -432,8 +439,9 @@ func TestConsentFormTarget(t *testing.T) {
 		"cursor://anysphere.cursor-mcp/oauth/callback":                             " cursor:",
 		"https://a.example/cb;x":                                                   " https://a.example",
 		"/relative":                                                                "",
-		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-123": " https://oauth-redirect.googleusercontent.com https://*.googleusercontent.com https://*.google.com",
-		"https://oauth-redirect-sandbox.googleusercontent.com/r/123":                " https://oauth-redirect-sandbox.googleusercontent.com https://*.googleusercontent.com https://*.google.com",
+		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-123": " https://oauth-redirect.googleusercontent.com https://*.google.com",
+		"https://oauth-redirect-sandbox.googleusercontent.com/r/123":                " https://oauth-redirect-sandbox.googleusercontent.com https://*.google.com",
+		"https://oauth-redirect.googleusercontent.com:443/cb":                      " https://oauth-redirect.googleusercontent.com:443 https://*.google.com",
 	} {
 		u, err := url.Parse(raw)
 		if err != nil {

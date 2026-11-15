@@ -228,10 +228,10 @@ func consentFormTarget(u *url.URL) string {
 		return ""
 	}
 	res := " " + scheme + "://" + u.Host
-	hostLower := strings.ToLower(u.Host)
-	if strings.HasSuffix(hostLower, ".googleusercontent.com") || hostLower == "googleusercontent.com" ||
-		strings.HasSuffix(hostLower, ".google.com") || hostLower == "google.com" {
-		res += " https://*.googleusercontent.com https://*.google.com"
+	hostname := strings.ToLower(u.Hostname())
+	if hostname == "oauth-redirect.googleusercontent.com" || hostname == "oauth-redirect-sandbox.googleusercontent.com" ||
+		strings.HasSuffix(hostname, ".google.com") || hostname == "google.com" {
+		res += " https://*.google.com"
 	}
 	return res
 }
@@ -427,7 +427,7 @@ var teamConsentPage = shellPage("team-consent", `<form class="actions" method="p
 <input type="hidden" name="token" value="{{.Token}}">
 {{range .Teams}}<label><input type="radio" name="tenant" value="{{.}}" required> {{.}}</label>
 {{end}}<button type="submit" name="decision" value="approve">Allow</button>
-<button class="secondary" type="submit" name="decision" value="deny">Deny</button>
+<button class="secondary" type="submit" name="decision" value="deny" formnovalidate>Deny</button>
 </form>`)
 
 // selectTeam turns an approved Glovo consent into a pending team grant bound

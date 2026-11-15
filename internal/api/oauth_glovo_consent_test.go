@@ -114,6 +114,7 @@ func (e *glovoConsentEnv) decide(token, decision string, cookie *http.Cookie, te
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.AddCookie(cookie)
 	rec := httptest.NewRecorder()
+	rec.Header().Set("Content-Security-Policy", "default-src 'none'; form-action 'none'")
 	e.h.handleOAuthConsent(rec, req)
 	return rec
 }
@@ -134,8 +135,11 @@ func TestGlovoConsentListsEligibleUnselected(t *testing.T) {
 	if rec.Code != http.StatusOK || token == "" || cookie == nil {
 		t.Fatalf("%d", rec.Code)
 	}
-	if !strings.Contains(body, `type="radio" name="tenant" value="alpha"`) || strings.Contains(body, "checked") {
+	if !strings.Contains(body, `type="radio" name="tenant" value="alpha" required`) || strings.Contains(body, "checked") {
 		t.Fatalf("one eligible team must be listed and not preselected: %s", body)
+	}
+	if !strings.Contains(body, `name="decision" value="deny" formnovalidate`) {
+		t.Fatalf("deny button must carry formnovalidate: %s", body)
 	}
 	// T1: approve without a team is refused, no code.
 	p := locationParams(t, e.decide(token, "approve", cookie))
@@ -163,7 +167,11 @@ func TestGlovoConsentSelection(t *testing.T) {
 			if strings.Contains(rec.Body.String(), "gamma") {
 				t.Fatal("a non-eligible team was listed")
 			}
-			p := locationParams(t, e.decide(token, "approve", cookie, tc.tenants...))
+			decRec := e.decide(token, "approve", cookie, tc.tenants...)
+			p := locationParams(t, decRec)
+			if csp := decRec.Header().Get("Content-Security-Policy"); csp != "" {
+				t.Fatalf("redirect must not carry Content-Security-Policy: %q", csp)
+			}
 			if tc.ok {
 				if p.Get("code") == "" {
 					t.Fatalf("no code: %v", p)
