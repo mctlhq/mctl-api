@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.161.1](https://github.com/mctlhq/mctl-api/compare/4.161.0...4.161.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **oauth:** address review comments on consent form-action and deny button ([15f29d1](https://github.com/mctlhq/mctl-api/commit/15f29d1e6456b850d9afd72f19818363ccab1c03))
+* **oauth:** allow google redirect origins in consent form-action and strip CSP on redirect ([8210506](https://github.com/mctlhq/mctl-api/commit/821050688b36e3f0ec0d14ba2db7bc4c19e4bde5))
+* **oauth:** allow google redirect origins in consent form-action and strip CSP on redirect ([33fd3df](https://github.com/mctlhq/mctl-api/commit/33fd3df2c3f50d4453395deea1ace0539df0ce06))
+
 ## [4.161.0](https://github.com/mctlhq/mctl-api/compare/4.160.0...4.161.0) (2026-11-15)
 
 
