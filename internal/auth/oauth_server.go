@@ -177,6 +177,13 @@ type OAuthServer struct {
 	// Verification accepts it only as the single aud of a token and confines
 	// it to no route yet (see internal/api).
 	GlovoResource string
+	// DownstreamResources are the MCP servers that trust this server's
+	// tokens (OAUTH_MCP_RESOURCES, mctl-api#1062). A token for one of them
+	// is minted only for a principal and never accepted by this API.
+	DownstreamResources []DownstreamResource
+	// IsAdminPrincipal reports a platform admin (ADMIN_PRINCIPALS); it gates
+	// admin-only downstream resources. Nil means no principal is an admin.
+	IsAdminPrincipal func(principalID string) bool
 	// GlovoEnabled is the kill switch (GLOVO_ENABLED, default false). The
 	// Glovo resource is admitted only while it is on and GlovoReady holds;
 	// GlovoResource alone never opens it.
@@ -1514,6 +1521,11 @@ func (s *OAuthServer) IssueCodeForTeamGrant(ctx context.Context, login, principa
 	if principalID != "" && !ValidPrincipalID(principalID) {
 		return "", fmt.Errorf("malformed principal id %q", principalID)
 	}
+	// Refused before a code exists, so a non-admin is told at sign-in rather
+	// than by the token endpoint.
+	if _, err := s.checkDownstreamPrincipal(resource, principalID); err != nil {
+		return "", err
+	}
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generate code: %w", err)
@@ -1661,7 +1673,11 @@ func (s *OAuthServer) ExchangeCodeForResource(ctx context.Context, code, codeVer
 	if s.isGlovoFlow(entry.Resource) {
 		return s.exchangeGlovoCode(ctx, entry, clientID, bound)
 	}
-	accessToken, err := s.issueJWTFor(entry.Login, entry.PrincipalID, entry.Groups, s.audienceForResource(entry.Resource), entry.ClientID)
+	aud, err := s.sessionAudience(entry.Resource)
+	if err != nil {
+		return "", "", err
+	}
+	accessToken, err := s.issueJWTFor(entry.Login, entry.PrincipalID, entry.Groups, aud, entry.ClientID)
 	if err != nil {
 		return "", "", err
 	}
@@ -1725,12 +1741,21 @@ func (s *OAuthServer) issueJWTWithGrant(login, principalID string, groups []stri
 	if principalID != "" && !ValidPrincipalID(principalID) {
 		return "", fmt.Errorf("issue token: %q is not a principal id", principalID)
 	}
+	downstream, err := s.checkDownstreamPrincipal(aud, principalID)
+	if err != nil {
+		return "", err
+	}
 	subject := login
 	if subject == "" {
 		if principalID == "" {
 			return "", errors.New("issue token: neither a login nor a principal")
 		}
 		subject = principalID
+	}
+	if downstream {
+		// A downstream keys its user by principal: sub is the principal,
+		// and neither the GitHub login nor the groups leave this server.
+		subject, groups = principalID, nil
 	}
 	ttl := s.AccessTokenTTL
 	if ttl == 0 {
@@ -1872,8 +1897,9 @@ func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refresh
 		var refused error
 		downgrade, revokeGrant := false, false
 		var grant teamgrant.Grant
+		var aud string
 		accept := func(ctx context.Context, tx pgx.Tx, sess refreshstore.Session) error {
-			refused, downgrade, revokeGrant, grant = nil, false, false, teamgrant.Grant{}
+			refused, downgrade, revokeGrant, grant, aud = nil, false, false, teamgrant.Grant{}, ""
 			if err := checkSessionAuthMethod(sess.AuthMethod, method); err != nil {
 				refused, downgrade = err, true
 				return err
@@ -1882,6 +1908,20 @@ func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refresh
 				refused = err
 				return err
 			}
+			// The audience is re-resolved and the downstream principal
+			// checked here too, before the successor is written: a registry
+			// entry removed, or a principal dropped from the admins of an
+			// admin-only resource, refuses without spending the token.
+			a, err := s.sessionAudience(sess.Resource)
+			if err != nil {
+				refused = err
+				return err
+			}
+			if _, err := s.checkDownstreamPrincipal(a, sess.PrincipalID); err != nil {
+				refused = err
+				return err
+			}
+			aud = a
 			if err := s.refreshablePrincipal(sess.Login, sess.PrincipalID); err != nil {
 				refused = err
 				return err
@@ -1950,7 +1990,7 @@ func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refresh
 		if !s.PrincipalMode {
 			groups = s.groupsForSession(sess.Login, sess.Groups)
 		}
-		accessToken, err := s.issueJWTWithGrant(sess.Login, sess.PrincipalID, groups, s.audienceForResource(sess.Resource), clientID, sess.TeamGrantID, grant.Tenant)
+		accessToken, err := s.issueJWTWithGrant(sess.Login, sess.PrincipalID, groups, aud, clientID, sess.TeamGrantID, grant.Tenant)
 		if err != nil {
 			return "", "", err
 		}
@@ -1965,6 +2005,15 @@ func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refresh
 	if peeked, found := s.refreshTokens.peek(refreshToken); found && peeked.ClientID == clientID &&
 		checkSessionAuthMethod(peeked.AuthMethod, method) == nil {
 		if err := resourceRefused(peeked.Resource); err != nil {
+			return "", "", err
+		}
+		// Likewise a removed registry entry or a principal no longer
+		// allowed on a downstream resource: refused before the delete.
+		aud, err := s.sessionAudience(peeked.Resource)
+		if err != nil {
+			return "", "", err
+		}
+		if _, err := s.checkDownstreamPrincipal(aud, peeked.PrincipalID); err != nil {
 			return "", "", err
 		}
 	}
@@ -2001,7 +2050,11 @@ func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refresh
 	if !s.PrincipalMode {
 		groups, fresh = s.sessionGroups(entry.Login, entry.Groups)
 	}
-	accessToken, err := s.issueJWTFor(entry.Login, entry.PrincipalID, groups, s.audienceForResource(entry.Resource), clientID)
+	aud, err := s.sessionAudience(entry.Resource)
+	if err != nil {
+		return "", "", err
+	}
+	accessToken, err := s.issueJWTFor(entry.Login, entry.PrincipalID, groups, aud, clientID)
 	if err != nil {
 		return "", "", err
 	}
@@ -2386,6 +2439,10 @@ func (s *OAuthServer) verifyAccessToken(token string) (*jwtPayload, error) {
 	}
 	if len(payload.Audience) > 0 {
 		switch {
+		case s.audNamesDownstream(payload.Audience):
+			// First, so a mixed [downstream, api] aud is refused as well: a
+			// token minted for a downstream MCP server is never an API token.
+			return fail("aud_mismatch", errors.New("JWT audience is a downstream resource, not this API"))
 		case s.GlovoResource != "" && payload.Audience.contains(s.GlovoResource):
 			// First, so a mixed [glovo, api] or [glovo, support] aud is
 			// refused outright instead of read as another audience.

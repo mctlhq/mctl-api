@@ -223,6 +223,13 @@ func main() {
 			stopSignals()
 			os.Exit(1)
 		}
+		// Downstream MCP servers that trust this server's tokens
+		// (mctl-api#1062). Empty: none, exactly as before.
+		if err := configureDownstreamResources(oauthServer, os.Getenv("OAUTH_MCP_RESOURCES"), cfg.adminPrincipals()); err != nil {
+			slog.Error("invalid configuration", "error", err)
+			stopSignals()
+			os.Exit(1)
+		}
 		// Unset/0 = strict mode off: a stale checkout is used and alerted on
 		// via the gauge above, not failed (mctl-api#411, README.md
 		// "Authorization group freshness"). GroupsDegradedGrace is
@@ -3370,6 +3377,23 @@ func configureSupportResource(o *auth.OAuthServer, lookup func(string) (string, 
 		o.SupportResource = strings.TrimSpace(v)
 	}
 	return o.ValidateSupportResource()
+}
+
+// configureDownstreamResources sets the registry of downstream MCP
+// resources from OAUTH_MCP_RESOURCES and the admin predicate admin-only
+// entries need, and refuses an invalid registry. Call it after
+// configureGlovoResource and ConfigureSigning.
+func configureDownstreamResources(o *auth.OAuthServer, raw string, admins map[string]bool) error {
+	res, err := auth.ParseDownstreamResources(raw)
+	if err != nil {
+		return err
+	}
+	o.DownstreamResources = res
+	o.IsAdminPrincipal = nil
+	if len(admins) > 0 {
+		o.IsAdminPrincipal = func(pid string) bool { return admins[pid] }
+	}
+	return o.ValidateDownstreamResources()
 }
 
 // configureGlovoResource sets the Glovo facade's RFC 8707 resource from
