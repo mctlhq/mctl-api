@@ -426,12 +426,14 @@ func TestConsentPageInShellNamesPrincipalWithoutLogin(t *testing.T) {
 // nothing when the URI is not a plain origin.
 func TestConsentFormTarget(t *testing.T) {
 	for raw, want := range map[string]string{
-		"https://chatgpt.com/connector/oauth/O5rDjGVhvXke": " https://chatgpt.com",
-		"http://127.0.0.1:33418/callback":                  " http://127.0.0.1:33418",
-		"HTTPS://Example.COM/cb":                           " https://Example.COM",
-		"cursor://anysphere.cursor-mcp/oauth/callback":     " cursor:",
-		"https://a.example/cb;x":                           " https://a.example",
-		"/relative":                                        "",
+		"https://chatgpt.com/connector/oauth/O5rDjGVhvXke":                         " https://chatgpt.com",
+		"http://127.0.0.1:33418/callback":                                          " http://127.0.0.1:33418",
+		"HTTPS://Example.COM/cb":                                                   " https://Example.COM",
+		"cursor://anysphere.cursor-mcp/oauth/callback":                             " cursor:",
+		"https://a.example/cb;x":                                                   " https://a.example",
+		"/relative":                                                                "",
+		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-123": " https://oauth-redirect.googleusercontent.com https://*.googleusercontent.com https://*.google.com",
+		"https://oauth-redirect-sandbox.googleusercontent.com/r/123":                " https://oauth-redirect-sandbox.googleusercontent.com https://*.googleusercontent.com https://*.google.com",
 	} {
 		u, err := url.Parse(raw)
 		if err != nil {

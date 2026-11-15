@@ -826,6 +826,7 @@ func oauthError(w http.ResponseWriter, redirectURI, state, errCode, errDesc stri
 		q.Set("state", state)
 	}
 	target.RawQuery = q.Encode()
+	w.Header().Del("Content-Security-Policy")
 	w.Header().Set("Location", target.String())
 	w.WriteHeader(http.StatusFound)
 }
