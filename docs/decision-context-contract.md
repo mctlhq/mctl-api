@@ -214,3 +214,13 @@ A preview apply of a stored deploy plan (`dpl_`) is authorized by a
   missing values that could own the namespace, two owners, an unknown profile)
   refuses with `503 agent_deploy_profile_unavailable`, never passes as
   ordinary.
+- Operators: the profile read covers every tenant directory, so one values
+  file under `platform-gitops/tenants/` that fails to parse makes every direct
+  `deploy-service` and `preview-deploy` on the platform answer `503
+  agent_deploy_profile_unavailable`, ordinary tenants included. mctl-api logs
+  `agent-deploy profile unreadable; direct deploy refused` at Error level, and
+  its `error` field names the tenant directory. Fix or revert that file in
+  mctl-gitops. The refusal clears once mctl-api's checkout picks up the fix;
+  nothing needs restarting. CI OIDC deploys skip this gate and are not
+  affected. A stale checkout produces the same log line with a freshness
+  error instead of a directory name.

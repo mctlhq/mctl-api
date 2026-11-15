@@ -62,7 +62,10 @@ func (h *Handlers) refuseAgentDeployDirect(w http.ResponseWriter, r *http.Reques
 	}
 	profile, _, err := h.opts.GitReader.NamespaceProfile(namespace)
 	if err != nil {
-		slog.Warn("agent-deploy profile unreadable; direct deploy refused",
+		// Error, not Warn: one unparseable values file under tenants/ fails
+		// this read for every namespace, so ordinary tenants see the 503 too.
+		// The error names the tenant directory to fix.
+		slog.Error("agent-deploy profile unreadable; direct deploy refused",
 			"operation", op.Name, "namespace", namespace, "error", err)
 		deny("failed", "agent-deploy profile of "+namespace+" unreadable")
 		writeErrorCode(w, http.StatusServiceUnavailable, codeAgentDeployProfileUnavailable,
