@@ -281,9 +281,12 @@ type fakeExecutor struct {
 	submittedParams      []map[string]string
 	cronAgentRuns        []map[string]interface{}
 	getWorkflowStatusErr error
+	// presetNames makes Submit honour a name preset with
+	// operations.WithWorkflowRequestID, as the real executor does.
+	presetNames bool
 }
 
-func (f *fakeExecutor) Submit(_ context.Context, op operations.Operation, params map[string]string, userID, namespace string) (*operations.SubmitResult, error) {
+func (f *fakeExecutor) Submit(ctx context.Context, op operations.Operation, params map[string]string, userID, namespace string) (*operations.SubmitResult, error) {
 	f.submitted = append(f.submitted, op.Name)
 	if params != nil {
 		cp := make(map[string]string, len(params))
@@ -293,6 +296,9 @@ func (f *fakeExecutor) Submit(_ context.Context, op operations.Operation, params
 		f.submittedParams = append(f.submittedParams, cp)
 	} else {
 		f.submittedParams = append(f.submittedParams, nil)
+	}
+	if id, ok := operations.WorkflowRequestIDFrom(ctx); ok && f.presetNames {
+		return &operations.SubmitResult{WorkflowName: operations.WorkflowNameFor(op, id), Namespace: namespace, RequestID: id, Status: "Pending"}, nil
 	}
 	return &operations.SubmitResult{
 		WorkflowName: "smoke-test-workflow-abc123",

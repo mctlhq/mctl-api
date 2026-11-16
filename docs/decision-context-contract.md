@@ -201,7 +201,9 @@ A preview apply of a stored deploy plan (`dpl_`) is authorized by a
   the plan and its digest, revision, gitops commit, preview id and host, the
   grant and the principal who decided it, and who applied it. If that write
   fails, nothing is submitted and the spent grant is not reusable
-  (`503 deploy_apply_unavailable`; request a new grant). A plan applies once:
+  (`503 deploy_apply_unavailable`; create a new plan and request a grant for
+  it, since a requester's grant for a plan is that one spent grant). A plan
+  applies once:
   grants are per requester, so a second holder's apply is refused with
   `409 deploy_plan_already_applied` before their grant is spent (or, if it
   loses a race after that check, after the spend with nothing submitted), and
@@ -210,6 +212,19 @@ A preview apply of a stored deploy plan (`dpl_`) is authorized by a
   name) or to `submit_failed` only when the submit certainly created no
   workflow; an ambiguous submit error leaves it in `submitting` (outcome not
   recorded), since a guess could not be corrected later.
+- Completing the record (mctl-api#1047 slice 2a). The workflow's name is
+  fixed before the submit and kept with the record, and a reconciler in
+  mctl-api reads that workflow from Argo every minute. A `submitting` record
+  becomes `submitted` once its workflow is seen, or `submit_failed` once it
+  has been absent for 10 minutes (and less than Argo's 72 h retention, past
+  which absence proves nothing). A `submitted` record gets `run_result`
+  (`succeeded` for phase Succeeded, `failed` for Failed or Error) and
+  `image_digest` from the workflow output `image_digest`
+  (`wft-preview-deploy`, mctlhq/mctl-gitops#2707) when it is a well-formed
+  `sha256:` digest. Both are written once. A workflow that cannot be read
+  changes nothing; a submitted record whose workflow was collected before it
+  was seen keeps no result. `health` stays `unknown` until the health gate
+  (mctlhq/mctl-gitops#2653) reports it.
   `image_digest`, `argo_revision`, `health` and `health_url` are written once
   when observed; until then health reads `unknown`, which never means healthy.
   Planned and granted fields are immutable and rows are never deleted

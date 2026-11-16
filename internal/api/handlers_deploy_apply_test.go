@@ -136,7 +136,7 @@ func newGrantFixture(t *testing.T, values string, edit ...func(*mctlapi.Options)
 	}
 	f := &grantFixture{
 		planFixture: &planFixture{
-			log: audit.NewLogger(), content: &fakeContent{}, store: newFakePlanStore(), records: newFakeRecordStore(), exec: &fakeExecutor{},
+			log: audit.NewLogger(), content: &fakeContent{}, store: newFakePlanStore(), records: newFakeRecordStore(), exec: &fakeExecutor{presetNames: true},
 			gitops: &fakePlanGitops{data: values, sourceRepo: "acme/web", exists: true, rev: planBaseSHA},
 			now:    time.Now().UTC(),
 		},

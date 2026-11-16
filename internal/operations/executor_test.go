@@ -10,11 +10,14 @@ package operations
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -276,5 +279,40 @@ func TestTrimWorkflowStatusReportsTheTraceID(t *testing.T) {
 				t.Errorf("annotations must stay trimmed: %#v", meta)
 			}
 		})
+	}
+}
+
+// GetWorkflowOutcome returns the phase and workflow-level outputs only;
+// a missing workflow stays the apiserver's NotFound.
+func TestGetWorkflowOutcome(t *testing.T) {
+	scheme := runtime.NewScheme()
+	wf := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "argoproj.io/v1alpha1", "kind": "Workflow",
+		"metadata": map[string]interface{}{"name": "preview-deploy-abcd1234", "namespace": "acme"},
+		"status": map[string]interface{}{
+			"phase": "Succeeded",
+			"outputs": map[string]interface{}{"parameters": []interface{}{
+				map[string]interface{}{"name": "image_digest", "value": "sha256:" + strings.Repeat("a", 64)},
+				map[string]interface{}{"name": "not_a_string", "value": int64(3)},
+			}},
+			"nodes": map[string]interface{}{"n": map[string]interface{}{"outputs": map[string]interface{}{
+				"parameters": []interface{}{map[string]interface{}{"name": "digest", "value": "sha256:node"}},
+			}}},
+		},
+	}}
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme,
+		map[schema.GroupVersionResource]string{workflowGVR: "WorkflowList"}, wf)
+	e := &Executor{dynamicClient: dyn}
+
+	got, err := e.GetWorkflowOutcome(context.Background(), "acme", "preview-deploy-abcd1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"image_digest": "sha256:" + strings.Repeat("a", 64)}
+	if got.Phase != "Succeeded" || !reflect.DeepEqual(got.Outputs, want) {
+		t.Fatalf("outcome = %+v", got)
+	}
+	if _, err := e.GetWorkflowOutcome(context.Background(), "acme", "missing"); !apierrors.IsNotFound(err) {
+		t.Fatalf("missing workflow = %v, want NotFound", err)
 	}
 }
