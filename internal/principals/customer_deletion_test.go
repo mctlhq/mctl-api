@@ -106,7 +106,7 @@ func TestCustomerDeletionRemovesOldIdentityAndPermitsFreshSubject(t *testing.T) 
 	if frozen, err := s.CustomerTenantDeletionPending(ctx, d.Tenant); err != nil || !frozen {
 		t.Fatalf("tenant name was not frozen: %v %v", frozen, err)
 	}
-	pending, err := s.CustomerDeletionPending(ctx, d.GitHubID)
+	pending, err := s.CustomerDeletionPending(ctx, auth.ProviderGitHub, d.GitHubID)
 	if err != nil || !pending {
 		t.Fatalf("pending=%v error=%v", pending, err)
 	}
@@ -182,7 +182,7 @@ func TestCustomerDeletionRemovesOldIdentityAndPermitsFreshSubject(t *testing.T) 
 	if fresh.ID == p.ID {
 		t.Fatal("recreated customer inherited the old principal")
 	}
-	pending, err = s.CustomerDeletionPending(ctx, d.GitHubID)
+	pending, err = s.CustomerDeletionPending(ctx, auth.ProviderGitHub, d.GitHubID)
 	if err != nil || pending {
 		t.Fatalf("completed deletion still blocks fresh signup: %v %v", pending, err)
 	}
@@ -249,7 +249,7 @@ func TestCustomerDeletionPendingReadFailureIsUnknown(t *testing.T) {
 	s := newStoreForTest(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := s.CustomerDeletionPending(ctx, "730003"); err == nil {
+	if _, err := s.CustomerDeletionPending(ctx, auth.ProviderGitHub, "730003"); err == nil {
 		t.Fatal("failed read reported a clean absence")
 	}
 }
@@ -358,7 +358,7 @@ func TestPreparedCustomerDeletionCancellationRestoresExistingIdentity(t *testing
 	if linked, err := s.ResolveCustomer(ctx, id); err != nil || linked.ID != p.ID {
 		t.Fatalf("cancel changed original identity: %+v %v", linked, err)
 	}
-	if pending, err := s.CustomerDeletionPending(ctx, "730004"); err != nil || pending {
+	if pending, err := s.CustomerDeletionPending(ctx, auth.ProviderGitHub, "730004"); err != nil || pending {
 		t.Fatalf("cancelled customer signup still fenced: %v %v", pending, err)
 	}
 	if receipt, err := s.CustomerDeletion(ctx, "cancel-test", p.ID); err != nil || !receipt.Cancelled || receipt.Login != "cancel-customer" {
@@ -536,5 +536,175 @@ func TestCustomerDeletionFinishesWithoutOptionalStoreTables(t *testing.T) {
 				t.Fatalf("fresh signup: %+v %v", fresh, err)
 			}
 		})
+	}
+}
+
+// mctl-api#1079: a Google customer is deleted by its Google subject. The
+// manifest names no GitHub account, the re-registration fence and the
+// signup release are keyed on the subject, and a GitHub customer whose id
+// has the same digits is a different customer throughout.
+func TestCustomerDeletionOfAGoogleCustomer(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	const sub = "7300551234"
+	gc := googleCustomer("delete-google", sub)
+	p, err := s.ResolveCustomer(ctx, gc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	same, err := s.ResolveCustomer(ctx, customer("delete-same-digits", 7300551234, "same-digits"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSignupCapacity(ctx, 3, "admin", "Reviewed test capacity"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClaimPublicSignup(ctx, auth.ProviderGoogle, sub, "delete-google", p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClaimPublicSignup(ctx, auth.ProviderGitHub, sub, "keep-github", same.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err := s.PrepareCustomerDeletion(ctx, "delete-google", p.ID, gc.Issuer, "admin-approval")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.GoogleSub != sub || d.GitHubID != "" || d.Login != "" || d.Subject != gc.Subject {
+		t.Fatalf("wrong frozen Google manifest: %+v", d)
+	}
+	stored, err := s.CustomerDeletion(ctx, "delete-google", p.ID)
+	if err != nil || *stored != *d {
+		t.Fatalf("stored manifest %+v (%v), want %+v", stored, err, d)
+	}
+	for _, tc := range []struct {
+		provider, subject string
+		want              bool
+	}{
+		{auth.ProviderGoogle, sub, true},
+		{auth.ProviderGitHub, sub, false},
+	} {
+		pending, err := s.CustomerDeletionPending(ctx, tc.provider, tc.subject)
+		if err != nil || pending != tc.want {
+			t.Fatalf("%s %s pending=%v (%v), want %v", tc.provider, tc.subject, pending, err, tc.want)
+		}
+	}
+	for _, bad := range [][2]string{{auth.ProviderGoogle, "abc"}, {auth.ProviderGoogle, ""}, {"gitlab", sub}, {auth.ProviderGitHub, ""}, {auth.ProviderGitHub, "google:" + sub}} {
+		if _, err := s.CustomerDeletionPending(ctx, bad[0], bad[1]); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("pending(%q,%q) = %v, want ErrInvalid", bad[0], bad[1], err)
+		}
+	}
+	// One active deletion per Google customer, as for GitHub.
+	if _, err := s.PrepareCustomerDeletion(ctx, "delete-google-2", p.ID, gc.Issuer, "admin-approval"); err == nil {
+		t.Fatal("a second active deletion of the same Google customer was accepted")
+	}
+	// The GitHub customer with the same digits is deletable alongside.
+	other, err := s.PrepareCustomerDeletion(ctx, "keep-github", same.ID, gc.Issuer, "admin-approval")
+	if err != nil {
+		t.Fatalf("GitHub customer with the same digits: %v", err)
+	}
+	if other.GitHubID != sub || other.GoogleSub != "" || other.Login != "same-digits" {
+		t.Fatalf("wrong GitHub manifest: %+v", other)
+	}
+	if err := s.CancelCustomerDeletion(ctx, "keep-github", same.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.BeginCustomerDeletion(ctx, "delete-google", p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishCustomerDeletion(ctx, "delete-google", p.ID); err != nil {
+		t.Fatal(err)
+	}
+	var googleStatus, githubStatus string
+	if err := s.pool.QueryRow(ctx, `SELECT status FROM signup_requests WHERE tenant='delete-google'`).Scan(&googleStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT status FROM signup_requests WHERE tenant='keep-github'`).Scan(&githubStatus); err != nil {
+		t.Fatal(err)
+	}
+	if googleStatus != "released" || githubStatus != "claimed" {
+		t.Fatalf("signup statuses google=%s github=%s, want released and claimed", googleStatus, githubStatus)
+	}
+	if _, err := s.Get(ctx, p.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Google principal survived: %v", err)
+	}
+	// Still fenced until the portal releases it, then free.
+	if pending, err := s.CustomerDeletionPending(ctx, auth.ProviderGoogle, sub); err != nil || !pending {
+		t.Fatalf("unreleased Google deletion pending=%v (%v)", pending, err)
+	}
+	if err := s.ReleaseCustomerDeletion(ctx, "delete-google", p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := s.CustomerDeletionPending(ctx, auth.ProviderGoogle, sub); err != nil || pending {
+		t.Fatalf("released Google deletion pending=%v (%v)", pending, err)
+	}
+}
+
+// A principal holding both a GitHub and a Google identity, or a Google
+// identity that is not a valid subject, is no customer to delete.
+func TestCustomerDeletionRefusesMixedOrMalformedGoogleIdentities(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	gc := googleCustomer("delete-mixed", "7300661234")
+	p, err := s.ResolveCustomer(ctx, gc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `INSERT INTO external_identities (id,principal_id,provider,issuer,subject,display,verified_at) VALUES ('mixed-gh',$1,'github','','7300661235','mixed',now())`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PrepareCustomerDeletion(ctx, "delete-mixed", p.ID, gc.Issuer, "admin-approval"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("mixed principal: %v, want ErrInvalid", err)
+	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM external_identities WHERE id='mixed-gh'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE external_identities SET subject='not-a-sub' WHERE principal_id=$1 AND provider='google'`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PrepareCustomerDeletion(ctx, "delete-mixed", p.ID, gc.Issuer, "admin-approval"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("malformed Google subject: %v, want ErrInvalid", err)
+	}
+}
+
+// A surface may not be named after the Google provider: a mirrored
+// (google, ”, x) identity would be a Google customer key.
+func TestSurfaceCannotTakeTheGoogleProviderName(t *testing.T) {
+	if !reservedProvider(auth.ProviderGoogle) {
+		t.Fatal("google is not a reserved provider name")
+	}
+}
+
+// Begin re-reads the identities: a Google subject swapped after approval is
+// refused, and a GitHub customer still needs its login.
+func TestCustomerDeletionBeginRefusesAChangedGoogleSubjectAndGitHubNeedsALogin(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	gc := googleCustomer("delete-swap", "7300771234")
+	p, err := s.ResolveCustomer(ctx, gc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PrepareCustomerDeletion(ctx, "delete-swap", p.ID, gc.Issuer, "admin-approval"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE external_identities SET subject='7300771299' WHERE principal_id=$1 AND provider='google'`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BeginCustomerDeletion(ctx, "delete-swap", p.ID); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("begin after the Google subject changed: %v, want ErrInvalid", err)
+	}
+
+	cc := customer("delete-nologin", 7300781234, "no-login")
+	q, err := s.ResolveCustomer(ctx, cc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE external_identities SET display='' WHERE principal_id=$1 AND provider='github'`, q.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PrepareCustomerDeletion(ctx, "delete-nologin", q.ID, cc.Issuer, "admin-approval"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("GitHub customer without a login: %v, want ErrInvalid", err)
 	}
 }

@@ -629,8 +629,8 @@ func TestSignupClaimOfAGoogleCustomer(t *testing.T) {
 		"GitHub public flow only": {PublicFlow: true},
 		"Google sub in cohort":    {Cohort: map[string]bool{sub: true}},
 	} {
-		if status, message := claim(o, googler.ID, "google-team"); status != 403 {
-			t.Errorf("%s: Google customer = %d %s, want 403", name, status, message)
+		if status, message := claim(o, googler.ID, "google-team"); status != 403 || message != "Google customers are not admitted to a workspace" {
+			t.Errorf("%s: Google customer = %d %q, want 403 naming Google", name, status, message)
 		}
 	}
 	if status, message := claim(&SignupOptions{GooglePublicFlow: true}, githubber.ID, "github-team"); status != 409 {

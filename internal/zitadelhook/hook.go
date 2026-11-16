@@ -199,11 +199,13 @@ type Config struct {
 	// Empty allows nobody; exactly "*" allows anyone. The signup invitation
 	// store is keyed on GitHub ids and is not consulted for Google.
 	CustomerCreateGoogleSubs []string
-	// CustomerInvitationAllowed and CreationPending are keyed on the GitHub
-	// id and are consulted for GitHub accounts only.
+	// CustomerInvitationAllowed is keyed on the GitHub id and is consulted
+	// for GitHub accounts only.
 	CustomerInvitationAllowed func(context.Context, string) (bool, error)
-	// CreationPending refuses re-registration until a durable deletion completes.
-	CreationPending func(context.Context, string) (bool, error)
+	// CreationPending refuses re-registration until a durable deletion
+	// completes. It takes the provider ("github" or "google") and that
+	// provider's subject: the GitHub id, or the Google subject.
+	CreationPending func(ctx context.Context, provider, subject string) (bool, error)
 	// GitHubAPIURL overrides https://api.github.com (tests only).
 	GitHubAPIURL string
 }
@@ -475,7 +477,7 @@ func (h *Hook) Intent(ctx context.Context, body []byte) Result {
 		return failure("intent_unparsable_idp_information")
 	}
 	if h.isGoogleIdP(info.IDPID) {
-		return h.intentGoogle(p, info)
+		return h.intentGoogle(ctx, p, info)
 	}
 	if info.IDPID != h.cfg.GitHubIdPID {
 		return pass("intent_other_idp")
@@ -527,7 +529,7 @@ func (h *Hook) Intent(ctx context.Context, body []byte) Result {
 			return refuse(http.StatusForbidden, "intent_customer_create_not_allowed:"+info.UserID, msgCreateNotAllowed)
 		}
 		if h.cfg.CreationPending != nil {
-			pending, err := h.cfg.CreationPending(ctx, info.UserID)
+			pending, err := h.cfg.CreationPending(ctx, IdPGitHub, info.UserID)
 			if err != nil {
 				return failure("intent_deletion_unreadable")
 			}
@@ -632,7 +634,7 @@ func withoutUserActions(in map[string]json.RawMessage) map[string]json.RawMessag
 // username google.<sub>@<domain>, one Google IdP link and google_sub
 // metadata, and no GitHub metadata. Reserved logins do not apply: they
 // protect grants keyed on a GitHub login, and a Google account has none.
-func (h *Hook) intentGoogle(p intentPayload, info idpInformation) Result {
+func (h *Hook) intentGoogle(ctx context.Context, p intentPayload, info idpInformation) Result {
 	sub := info.UserID
 	if !googleSubRE.MatchString(sub) {
 		return refuse(http.StatusForbidden, "intent_bad_google_identity", msgGoogleNotAllowed)
@@ -670,6 +672,17 @@ func (h *Hook) intentGoogle(p intentPayload, info idpInformation) Result {
 		}
 		if !hasVerifiedEmail {
 			return refuse(http.StatusPreconditionFailed, "intent_no_verified_email", msgNoVerifiedGoogleEmail)
+		}
+		// As for GitHub: no new account while a deletion of this Google
+		// customer is unfinished. An unreadable probe is a 503, not a pass.
+		if h.cfg.CreationPending != nil {
+			pending, err := h.cfg.CreationPending(ctx, IdPGoogle, sub)
+			if err != nil {
+				return failure("intent_deletion_unreadable")
+			}
+			if pending {
+				return refuse(http.StatusForbidden, "intent_deletion_in_progress", msgNotAllowed)
+			}
 		}
 	}
 
@@ -1052,7 +1065,7 @@ func (h *Hook) gateCreateUser(ctx context.Context, p requestPayload) Result {
 		return no("gate_bad_metadata")
 	}
 	if h.isGoogleIdP(req.Human.IDPLinks[0].IDPID) {
-		return h.gateCreateGoogleUser(req, meta, no)
+		return h.gateCreateGoogleUser(ctx, req, meta, no)
 	}
 	if req.Human.IDPLinks[0].IDPID != h.cfg.GitHubIdPID {
 		return no("gate_idp_links")
@@ -1086,7 +1099,7 @@ func (h *Hook) gateCreateUser(ctx context.Context, p requestPayload) Result {
 		return refuse(http.StatusForbidden, "gate_customer_create_not_allowed:"+link.UserID, msgCreateNotAllowed)
 	}
 	if h.cfg.CreationPending != nil {
-		pending, err := h.cfg.CreationPending(ctx, link.UserID)
+		pending, err := h.cfg.CreationPending(ctx, IdPGitHub, link.UserID)
 		if err != nil {
 			return failure("gate_deletion_unreadable")
 		}
@@ -1108,7 +1121,7 @@ func (h *Hook) gateCreateUser(ctx context.Context, p requestPayload) Result {
 // has already checked the org, the caller, the human shape, the absence of
 // local credentials, exactly one link (to the Google IdP) and the metadata
 // encoding. Every rule mirrors what intentGoogle produces.
-func (h *Hook) gateCreateGoogleUser(req createUserRequest, meta map[string]string, no func(string) Result) Result {
+func (h *Hook) gateCreateGoogleUser(ctx context.Context, req createUserRequest, meta map[string]string, no func(string) Result) Result {
 	link := req.Human.IDPLinks[0]
 	if !googleSubRE.MatchString(link.UserID) {
 		return no("gate_bad_link")
@@ -1132,6 +1145,15 @@ func (h *Hook) gateCreateGoogleUser(req createUserRequest, meta map[string]strin
 	}
 	if !h.mayCreateGoogle(link.UserID) {
 		return refuse(http.StatusForbidden, "gate_customer_create_not_allowed:google:"+link.UserID, msgCreateNotAllowed)
+	}
+	if h.cfg.CreationPending != nil {
+		pending, err := h.cfg.CreationPending(ctx, IdPGoogle, link.UserID)
+		if err != nil {
+			return failure("gate_deletion_unreadable")
+		}
+		if pending {
+			return no("gate_deletion_in_progress")
+		}
 	}
 	return pass("gate_customer_create")
 }

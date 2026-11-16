@@ -111,7 +111,7 @@ func (s *Store) mirrorLink(ctx context.Context, tx pgx.Tx, surface, externalID, 
 // surface may take.
 func reservedProvider(name string) bool {
 	switch name {
-	case auth.ProviderGitHub, auth.ProviderDex, auth.ProviderService, auth.ProviderDev:
+	case auth.ProviderGitHub, auth.ProviderGoogle, auth.ProviderDex, auth.ProviderService, auth.ProviderDev:
 		return true
 	}
 	return false
