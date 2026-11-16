@@ -1961,6 +1961,12 @@ type config struct {
 	// carry a principal id at all; principal mode refuses to boot without.
 	PrincipalsDisabled    bool
 	PrincipalDBConfigured bool
+	// SignupPublicWorkspaces is SIGNUP_PUBLIC_WORKSPACES: exactly "true"
+	// lets the public signup flow reserve a workspace for a customer the
+	// creation allowlist ("*") let in. Off, an open allowlist creates a
+	// ZITADEL account and nothing more: account creation and workspace
+	// admission are separate decisions.
+	SignupPublicWorkspaces bool
 }
 
 func loadConfig() config {
@@ -2100,6 +2106,7 @@ func loadConfig() config {
 		AdminPrincipalsRaw:                  os.Getenv("ADMIN_PRINCIPALS"),
 		PrincipalsDisabled:                  killSwitchOn(os.Getenv("PRINCIPALS_DISABLED")),
 		PrincipalDBConfigured:               postgresURL(os.Getenv("SURFACE_IDENTITY_DB_URL")) != "" || postgresURL(os.Getenv("AUDIT_DB_URL")) != "",
+		SignupPublicWorkspaces:              os.Getenv("SIGNUP_PUBLIC_WORKSPACES") == "true",
 	}
 }
 

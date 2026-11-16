@@ -16,7 +16,10 @@ func signupOptions(cfg config, store *principals.Store) *api.SignupOptions {
 	if !signupConfigured(cfg) {
 		return nil
 	}
-	public := len(cfg.ZitadelHook.CustomerCreateGitHubIDs) == 1 && cfg.ZitadelHook.CustomerCreateGitHubIDs[0] == "*"
+	// An open creation allowlist ("*") only lets anyone create an account.
+	// Reserving a workspace for them through the public flow is a separate,
+	// explicit decision (SIGNUP_PUBLIC_WORKSPACES).
+	public := cfg.SignupPublicWorkspaces && len(cfg.ZitadelHook.CustomerCreateGitHubIDs) == 1 && cfg.ZitadelHook.CustomerCreateGitHubIDs[0] == "*"
 	cohort := map[string]bool{}
 	for _, id := range cfg.ZitadelHook.CustomerCreateGitHubIDs {
 		if id != "*" {
@@ -25,7 +28,7 @@ func signupOptions(cfg config, store *principals.Store) *api.SignupOptions {
 	}
 	p := &customerdelete.Providers{Issuer: cfg.ZitadelHookIssuer(), ClientID: os.Getenv("ZITADEL_CUSTOMER_LIFECYCLE_CLIENT_ID"), ClientSecret: os.Getenv("ZITADEL_CUSTOMER_LIFECYCLE_CLIENT_SECRET"), SiteBase: envOr("CUSTOMER_DELETION_SITE_URL", "https://mctl.ai"), SessionAudience: os.Getenv("ZITADEL_CUSTOMER_LIFECYCLE_PROJECT_ID")}
 	googleSubs := cfg.ZitadelHook.CustomerCreateGoogleSubs
-	googlePublic := cfg.customersGoogleOrgID() != "" && len(googleSubs) == 1 && googleSubs[0] == "*"
+	googlePublic := cfg.SignupPublicWorkspaces && cfg.customersGoogleOrgID() != "" && len(googleSubs) == 1 && googleSubs[0] == "*"
 	return &api.SignupOptions{Store: store, SiteCall: p.SignupSite, Cohort: cohort, PublicFlow: public, GooglePublicFlow: googlePublic}
 }
 func (cfg config) ZitadelHookIssuer() string {
