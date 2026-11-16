@@ -55,7 +55,8 @@ type Plan struct {
 	ApprovalReason     string `json:"approval_reason"`
 	// IntentChangesValues says whether the intent changes the effective
 	// preview values beyond the base: false only when the unredacted values
-	// with and without the intent are identical. It is derived from fields
+	// with and without the intent render the same over the base-service
+	// chart defaults (ChangesRender). It is derived from fields
 	// the digest binds, and is not itself digested. preview-deploy renders
 	// the base values, so only a plan with false can be applied faithfully
 	// (mctl-api#1026). Nil is a plan stored before the field existed, and

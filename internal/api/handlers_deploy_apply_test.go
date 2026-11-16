@@ -458,6 +458,20 @@ func TestDeployApply_UnreproduciblePlanIsRefused(t *testing.T) {
 	}
 }
 
+// mctl-api#1058: values that leave replicaCount and service.port to the
+// chart's defaults are reproducible, so the plan reaches a grant request.
+func TestDeployApply_ChartDefaultsAreReproducible(t *testing.T) {
+	f := newGrantFixture(t, planBaseValues+`
+probes:
+  liveness:
+    path: /healthz
+  readiness:
+    path: /healthz
+`)
+	planID := f.newPlan(t, faithfulIntent())
+	f.request(t, f.dev, planID, http.StatusCreated)
+}
+
 // preview_id and gitops_ref come only from an approved plan.
 func TestPreviewDeploy_ServerSetParamsRefusedInBody(t *testing.T) {
 	f := newGrantFixture(t, faithfulValues)
