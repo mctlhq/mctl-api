@@ -2,8 +2,10 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"html"
+	mrand "math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -105,7 +107,7 @@ func releaseRouter(h *Handlers) http.Handler {
 // pendingRelease publishes a release to the resolver and opens its grant.
 func (e *releasePageEnv) pendingRelease() (string, workitems.ReleaseArtifact) {
 	e.t.Helper()
-	version := fmt.Sprintf("88.%d.%d", time.Now().UnixNano()%1_000_000, releasePageSeq.Add(1))
+	version := fmt.Sprintf("88.%d.%d", mrand.IntN(1_000_000_000), releasePageSeq.Add(1))
 	art := workitems.ReleaseArtifact{Repository: "mctlhq/mctl-api", Version: version,
 		TagCommit: strings.Repeat("a", 40), ImageDigest: "sha256:" + strings.Repeat("b", 64)}
 	e.resolver.set(version, &art, nil)
@@ -435,5 +437,72 @@ func TestReleaseApprovalPage_DarkByDefault(t *testing.T) {
 		if o.enabled() {
 			t.Errorf("%s: enabled", name)
 		}
+	}
+}
+
+func (e *releasePageEnv) asAdmin(h http.HandlerFunc, method, target string, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(auth.WithUser(req.Context(), &auth.User{ID: "test-admin", Groups: []string{"admins"}}))
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	return rec
+}
+
+// A request answers the page's link when the page is on, and says it cannot
+// be decided when it is off.
+func TestReleaseGrantRequestAnswersTheDecideLink(t *testing.T) {
+	e := newReleasePageEnv(t)
+	_, art := e.pendingRelease()
+	body := `{"repository":"mctlhq/mctl-api","version":"` + art.Version + `"}`
+	var out map[string]any
+	rec := e.asAdmin(e.h.RequestReleaseGrant, http.MethodPost, "/api/v1/release/grants", body)
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || rec.Code >= 300 {
+		t.Fatalf("request = %d %s", rec.Code, rec.Body.String())
+	}
+	grant, _ := out["grant"].(map[string]any)
+	approval, _ := grant["approval"].(map[string]any)
+	id, _ := approval["id"].(string)
+	if id == "" || out["decide_url"] != "https://api.example"+releasePagePrefix+id || out["decide_unavailable"] != nil {
+		t.Fatalf("page on: %v", out)
+	}
+	e.h.releaseApproval = nil
+	rec = e.asAdmin(e.h.RequestReleaseGrant, http.MethodPost, "/api/v1/release/grants", body)
+	out = nil
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || rec.Code >= 300 {
+		t.Fatalf("request = %d %s", rec.Code, rec.Body.String())
+	}
+	if out["decide_url"] != nil || out["decide_unavailable"] == nil {
+		t.Fatalf("page off: %v", out)
+	}
+}
+
+// The list carries the verified evidence of a decided grant, and none for a
+// pending one.
+func TestReleaseGrantListCarriesTheDecision(t *testing.T) {
+	e := newReleasePageEnv(t)
+	id, art := e.pendingRelease()
+	list := func() map[string]any {
+		t.Helper()
+		rec := e.asAdmin(e.h.ListReleaseGrants, http.MethodGet,
+			"/api/v1/release/grants?repository=mctlhq/mctl-api&version="+art.Version, "")
+		var out struct {
+			Grants []map[string]any `json:"grants"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || rec.Code != http.StatusOK || len(out.Grants) != 1 {
+			t.Fatalf("list = %d %s", rec.Code, rec.Body.String())
+		}
+		return out.Grants[0]
+	}
+	if g := list(); g["decision"] != nil {
+		t.Fatalf("pending grant has a decision: %v", g)
+	}
+	_, ck, form := e.signIn(id, deciderClaims())
+	if got := e.confirm(ck, form, "approve"); got.Code != http.StatusOK {
+		t.Fatalf("confirm = %d", got.Code)
+	}
+	d, _ := list()["decision"].(map[string]any)
+	if d["client_id"] != "release-client" || d["subject"] != "z-admin" || d["schema"] != workitems.ReleaseEvidenceSchema {
+		t.Fatalf("decision = %v", d)
 	}
 }

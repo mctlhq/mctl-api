@@ -34,7 +34,7 @@ import (
 // its own, and then holds the sign-in to more than the deploy page does:
 //
 //   - the person must be a resolved human admin acting directly AND one of
-//     the configured deciders (RELEASE_GRANT_DECIDERS, principal ids, owner
+//     the configured deciders (RELEASE_APPROVAL_DECIDERS, principal ids, owner
 //     decision 2026-11-16: the owner only);
 //   - the ID token must be issued to this page's client alone (aud is
 //     exactly the client id, azp if present too), so no token minted for an
