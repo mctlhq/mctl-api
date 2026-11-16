@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
@@ -44,8 +45,12 @@ func TestDeployApply_WritesTheDeploymentRecord(t *testing.T) {
 		ID: depID, PlanID: planID, PlanDigest: plan.Digest, Tenant: "acme", Service: "web", Environment: "preview",
 		Revision: deploySHA, GitopsSHA: planBaseSHA, PreviewID: plan.PreviewID, Host: plan.Host,
 		ApprovalID: grant, DecidedByPrincipalID: grantOwnerPRN, AppliedBy: grantDevPRN,
-		Status: deployplan.RecordSubmitted, Workflow: "smoke-test-workflow-abc123", Health: deployplan.HealthUnknown,
+		Status: deployplan.RecordSubmitted, Health: deployplan.HealthUnknown,
 	}
+	if !strings.HasPrefix(rec.WorkflowRef, "preview-deploy-") || rec.Workflow != rec.WorkflowRef {
+		t.Fatalf("workflow %q, ref %q: the record must name the workflow it was submitted under", rec.Workflow, rec.WorkflowRef)
+	}
+	want.Workflow, want.WorkflowRef = rec.Workflow, rec.WorkflowRef
 	rec.CreatedAt, rec.UpdatedAt = want.CreatedAt, want.UpdatedAt
 	if *rec != want {
 		t.Fatalf("record =\n%+v\nwant\n%+v", *rec, want)

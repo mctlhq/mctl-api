@@ -413,6 +413,25 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 	h.auditActionApproval(r, user, "action_approval.consume", spent, operations.RiskMedium,
 		map[string]string{"revalidation": reval.Revalidation, "plan_id": p.ID})
 
+	auditParams := redactSecrets(op, input)
+	auditParams["plan_id"], auditParams["plan_digest"] = p.ID, p.Digest
+	auditParams["grant_ref"], auditParams["subject_principal_id"] = spent.ID, spent.DecidedByPrincipalID
+	submitCtx, executionEnded, prepared := h.prepareSubmitExecution(w, r, user, op, p.Tenant, input)
+	if !prepared {
+		// Nothing recorded yet, so the plan stays appliable with a new grant.
+		h.logAudit(r, audit.Entry{UserID: user.ID, Operation: previewDeployOp, Parameters: auditParams, Status: "failed",
+			RiskLevel: string(op.RiskLevel), Message: "could not create the run's execution; nothing was submitted"})
+		a.set("error", "error:execution_not_prepared")
+		return
+	}
+	// The workflow's name is fixed before the submit and kept in the record,
+	// so an ambiguous submit can be resolved later by looking it up.
+	requestID, preset := operations.WorkflowRequestIDFrom(submitCtx)
+	if !preset {
+		requestID = operations.NewWorkflowRequestID()
+		submitCtx = operations.WithWorkflowRequestID(submitCtx, requestID)
+	}
+
 	// The deployment record, before anything is submitted: an apply that
 	// cannot be recorded does not run (mctl-api#1047). The grant is spent
 	// either way, as for a failed submit.
@@ -420,8 +439,11 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 	if appliedBy == "" {
 		appliedBy = user.ID
 	}
-	rec, err := h.opts.DeployRecords.InsertRecord(r.Context(),
-		deployplan.NewRecord(p, spent.ID, spent.DecidedByPrincipalID, appliedBy, h.deployPlanNow()))
+	rec, err := h.opts.DeployRecords.InsertRecord(r.Context(), deployplan.NewRecord(p, spent.ID,
+		spent.DecidedByPrincipalID, appliedBy, operations.WorkflowNameFor(op, requestID), h.deployPlanNow()))
+	if err != nil {
+		executionEnded(nil, operations.NotCreated(err))
+	}
 	if errors.Is(err, deployplan.ErrRecordExists) {
 		// Another apply of this plan won the race after the check above.
 		a.set("denied", "denied:"+codeDeployPlanAlreadyApplied)
@@ -433,22 +455,11 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 		slog.Error("deploy apply: recording the deployment", "plan", p.ID, "approval", spent.ID, "error", err)
 		a.set("error", "error:record_failed")
 		writeErrorCode(w, http.StatusServiceUnavailable, codeDeployApplyUnavailable,
-			"the grant was spent but the deployment could not be recorded, so nothing was submitted; request a new grant for this plan", nil)
+			"the grant was spent but the deployment could not be recorded, so nothing was submitted; create a new plan and request a grant for it", nil)
 		return
 	}
 	a.params["deployment_id"] = rec.ID
 
-	auditParams := redactSecrets(op, input)
-	auditParams["plan_id"], auditParams["plan_digest"] = p.ID, p.Digest
-	auditParams["grant_ref"], auditParams["subject_principal_id"] = spent.ID, spent.DecidedByPrincipalID
-	submitCtx, executionEnded, prepared := h.prepareSubmitExecution(w, r, user, op, p.Tenant, input)
-	if !prepared {
-		h.recordSubmission(r.Context(), rec.ID, nil, operations.NotCreated(errors.New("the run's execution was not prepared")))
-		h.logAudit(r, audit.Entry{UserID: user.ID, Operation: previewDeployOp, Parameters: auditParams, Status: "failed",
-			RiskLevel: string(op.RiskLevel), Message: "could not create the run's execution; nothing was submitted"})
-		a.set("error", "error:execution_not_prepared")
-		return
-	}
 	result, err := h.opts.Executor.Submit(submitCtx, op, input, user.ID, p.Tenant)
 	note := executionEnded(result, err)
 	h.recordSubmission(r.Context(), rec.ID, result, err)

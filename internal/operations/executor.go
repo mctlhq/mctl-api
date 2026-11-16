@@ -513,3 +513,43 @@ func buildArgoParams(params map[string]string) []interface{} {
 	}
 	return result
 }
+
+// WorkflowOutcome is a workflow's phase and its workflow-level output
+// parameters (status.outputs.parameters), nothing else. Node outputs,
+// artifacts and messages are not read.
+type WorkflowOutcome struct {
+	Phase   string
+	Outputs map[string]string
+}
+
+// GetWorkflowOutcome reads a workflow's phase and workflow-level output
+// parameters. A missing workflow is the apiserver's NotFound error,
+// unchanged, so callers can tell it from a failed read. An output whose
+// value is not a string is left out, never read as empty.
+func (e *Executor) GetWorkflowOutcome(ctx context.Context, namespace, name string) (*WorkflowOutcome, error) {
+	if e.dynamicClient == nil {
+		return nil, fmt.Errorf("kubernetes client not available")
+	}
+	wf, err := e.dynamicClient.Resource(workflowGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return workflowOutcome(wf.Object), nil
+}
+
+func workflowOutcome(obj map[string]interface{}) *WorkflowOutcome {
+	out := &WorkflowOutcome{Outputs: map[string]string{}}
+	status, _ := obj["status"].(map[string]interface{})
+	out.Phase, _ = status["phase"].(string)
+	outputs, _ := status["outputs"].(map[string]interface{})
+	params, _ := outputs["parameters"].([]interface{})
+	for _, p := range params {
+		m, _ := p.(map[string]interface{})
+		name, _ := m["name"].(string)
+		value, ok := m["value"].(string)
+		if name != "" && ok {
+			out.Outputs[name] = value
+		}
+	}
+	return out
+}
