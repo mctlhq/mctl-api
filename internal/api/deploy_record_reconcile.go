@@ -15,7 +15,7 @@ import (
 type DeployRecordReconcileStore interface {
 	RecordsToReconcile(ctx context.Context, since, afterCreated time.Time, afterID string, limit int) ([]*deployplan.Record, error)
 	SetRecordSubmission(ctx context.Context, id, status, workflow string) (*deployplan.Record, error)
-	SetRunResult(ctx context.Context, id, result, imageDigest string) (*deployplan.Record, error)
+	SetRunResult(ctx context.Context, id string, o deployplan.RunOutcome) (*deployplan.Record, error)
 }
 
 // workflowOutcomeGetter is the slice of operations.Executor it needs.
@@ -138,25 +138,62 @@ func (r *deployRecordReconciler) reconcileRecord(ctx context.Context, rec *deplo
 		}
 	}
 
-	var result, digest string
-	switch out.Phase {
-	case "Succeeded":
-		result = deployplan.RunSucceeded
-		digest = out.Outputs["image_digest"]
-		if digest != "" && !deployplan.ValidImageDigest(digest) {
-			slog.Error("deploy record reconcile: workflow reported a malformed image digest; not recorded",
-				"deployment", rec.ID, "workflow", name)
-			digest = ""
-		}
-	case "Failed", "Error":
-		result = deployplan.RunFailed
-	default:
+	o, finished := r.outcomeOf(rec.ID, name, out)
+	if !finished {
 		return // still running, or a phase this does not know: not an outcome
 	}
 	r.write("run result", rec.ID, func() error {
-		_, err := r.store.SetRunResult(ctx, rec.ID, result, digest)
+		_, err := r.store.SetRunResult(ctx, rec.ID, o)
 		return err
 	})
+}
+
+// outcomeOf turns a finished workflow into what the record stores. Each
+// output is checked on its own and a malformed or unexpected one is dropped
+// and logged, never taken as a value: the rest of the outcome still lands.
+//   - image_digest only from a run that succeeded (the digest it ran);
+//   - argo_revision and commit_sha are observations that hold whatever the
+//     verdict, so they are kept on a failed run too;
+//   - health: "unhealthy" from any finished run, "healthy" only from one
+//     that succeeded. "idle", "unknown", anything else, or no output at all
+//     leaves health unknown: nothing here reports success it did not see.
+func (r *deployRecordReconciler) outcomeOf(id, name string, out *operations.WorkflowOutcome) (deployplan.RunOutcome, bool) {
+	var o deployplan.RunOutcome
+	switch out.Phase {
+	case "Succeeded":
+		o.Result = deployplan.RunSucceeded
+	case "Failed", "Error":
+		o.Result = deployplan.RunFailed
+	default:
+		return o, false
+	}
+	keep := func(key string, valid func(string) bool) string {
+		v := out.Outputs[key]
+		if v == "" {
+			return ""
+		}
+		if !valid(v) {
+			slog.Error("deploy record reconcile: workflow reported a malformed output; not recorded",
+				"deployment", id, "workflow", name, "output", key)
+			return ""
+		}
+		return v
+	}
+	if o.Result == deployplan.RunSucceeded {
+		o.ImageDigest = keep("image_digest", deployplan.ValidImageDigest)
+	}
+	o.ArgoRevision = keep("argo_revision", deployplan.ValidCommitSHA)
+	o.CommitSHA = keep("commit_sha", deployplan.ValidCommitSHA)
+	switch h := out.Outputs["health"]; {
+	case h == deployplan.HealthUnhealthy:
+		o.Health = h
+	case h == deployplan.HealthHealthy && o.Result == deployplan.RunSucceeded:
+		o.Health = h
+	}
+	if o.Health != "" {
+		o.HealthURL = keep("health_url", deployplan.ValidHealthURL)
+	}
+	return o, true
 }
 
 // write runs one conditional update. Losing to another replica fails the

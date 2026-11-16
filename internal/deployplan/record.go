@@ -74,14 +74,18 @@ type Record struct {
 	Workflow             string `json:"workflow,omitempty"`
 	// WorkflowRef is the name the workflow is submitted under, fixed before
 	// the submit so an ambiguous submit can be resolved by looking it up.
-	WorkflowRef  string    `json:"-"`
-	RunResult    string    `json:"run_result,omitempty"`
-	ImageDigest  string    `json:"image_digest,omitempty"`
-	ArgoRevision string    `json:"argo_revision,omitempty"`
-	Health       string    `json:"health"`
-	HealthURL    string    `json:"health_url,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	WorkflowRef  string `json:"-"`
+	RunResult    string `json:"run_result,omitempty"`
+	ImageDigest  string `json:"image_digest,omitempty"`
+	ArgoRevision string `json:"argo_revision,omitempty"`
+	Health       string `json:"health"`
+	HealthURL    string `json:"health_url,omitempty"`
+	// CommitSHA is the mctl-gitops commit the deploy itself pushed: the state
+	// a rollback restores (mctl-api#1048). Not GitopsSHA, which is the commit
+	// the plan was computed against, before the deploy.
+	CommitSHA string    `json:"commit_sha,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 const recordSchema = `
@@ -109,6 +113,7 @@ CREATE TABLE IF NOT EXISTS deploy_records (
   updated_at              TIMESTAMPTZ NOT NULL
 );
 ALTER TABLE deploy_records ADD COLUMN IF NOT EXISTS workflow_ref TEXT;
+ALTER TABLE deploy_records ADD COLUMN IF NOT EXISTS commit_sha TEXT CHECK (commit_sha ~ '^[0-9a-f]{40}$');
 ALTER TABLE deploy_records ADD COLUMN IF NOT EXISTS run_result TEXT CHECK (run_result IN ('succeeded','failed'));
 CREATE INDEX IF NOT EXISTS deploy_records_tenant ON deploy_records (tenant, service, created_at DESC);
 CREATE OR REPLACE FUNCTION deploy_records_guard() RETURNS trigger
@@ -144,6 +149,9 @@ BEGIN
   IF NEW.argo_revision IS DISTINCT FROM OLD.argo_revision AND OLD.argo_revision IS NOT NULL THEN
     RAISE EXCEPTION 'deploy_records: argo_revision is written once';
   END IF;
+  IF NEW.commit_sha IS DISTINCT FROM OLD.commit_sha AND OLD.commit_sha IS NOT NULL THEN
+    RAISE EXCEPTION 'deploy_records: commit_sha is written once';
+  END IF;
   IF NEW.health IS DISTINCT FROM OLD.health AND OLD.health <> 'unknown' THEN
     RAISE EXCEPTION 'deploy_records: health is written once';
   END IF;
@@ -165,7 +173,7 @@ CREATE TRIGGER deploy_records_no_delete BEFORE DELETE ON deploy_records
 const recordColumns = `id, plan_id, plan_digest, tenant, service, environment, revision, gitops_sha,
 	preview_id, host, approval_id, decided_by_principal_id, applied_by, status,
 	COALESCE(workflow, ''), COALESCE(image_digest, ''), COALESCE(argo_revision, ''), health,
-	COALESCE(health_url, ''), created_at, updated_at, COALESCE(workflow_ref, ''), COALESCE(run_result, '')`
+	COALESCE(health_url, ''), created_at, updated_at, COALESCE(workflow_ref, ''), COALESCE(run_result, ''), COALESCE(commit_sha, '')`
 
 // NewRecord is the record of an apply about to be submitted: the plan's
 // fields, the spent grant and its decider, status submitting, health
@@ -234,21 +242,70 @@ RETURNING `+recordColumns, id, status, wf, s.now().Truncate(time.Microsecond)))
 	return r, nil
 }
 
-// SetRunResult records how a submitted record's workflow ended, and the
-// image digest it ran when one was observed (empty leaves it unset). It
-// applies once: a record that is not submitted, or already has a result,
-// is an error.
-func (s *Store) SetRunResult(ctx context.Context, id, result, imageDigest string) (*Record, error) {
-	if result != RunSucceeded && result != RunFailed {
-		return nil, fmt.Errorf("deployplan: %q is not a run result", result)
+var (
+	commitRE    = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	healthURLRE = regexp.MustCompile(`^https://[a-z0-9.-]+$`)
+)
+
+// ValidCommitSHA reports whether s is a full 40-hex git commit.
+func ValidCommitSHA(s string) bool { return commitRE.MatchString(s) }
+
+// ValidHealthURL reports whether s is a bare https://<host> URL, the only
+// shape the health gate reports.
+func ValidHealthURL(s string) bool { return healthURLRE.MatchString(s) }
+
+// RunOutcome is what a finished workflow showed. Every field except Result
+// is optional: empty leaves the column unset, and a column already set is
+// never overwritten (each is written once).
+type RunOutcome struct {
+	Result       string // RunSucceeded or RunFailed
+	ImageDigest  string
+	ArgoRevision string
+	CommitSHA    string
+	Health       string // HealthHealthy or HealthUnhealthy; empty keeps unknown
+	HealthURL    string
+}
+
+func (o RunOutcome) validate() error {
+	if o.Result != RunSucceeded && o.Result != RunFailed {
+		return fmt.Errorf("deployplan: %q is not a run result", o.Result)
 	}
-	if imageDigest != "" && !digestRE.MatchString(imageDigest) {
-		return nil, fmt.Errorf("deployplan: %q is not an image digest", imageDigest)
+	if o.ImageDigest != "" && !digestRE.MatchString(o.ImageDigest) {
+		return fmt.Errorf("deployplan: %q is not an image digest", o.ImageDigest)
+	}
+	if o.ArgoRevision != "" && !commitRE.MatchString(o.ArgoRevision) {
+		return fmt.Errorf("deployplan: %q is not a commit", o.ArgoRevision)
+	}
+	if o.CommitSHA != "" && !commitRE.MatchString(o.CommitSHA) {
+		return fmt.Errorf("deployplan: %q is not a commit", o.CommitSHA)
+	}
+	if o.Health != "" && o.Health != HealthHealthy && o.Health != HealthUnhealthy {
+		return fmt.Errorf("deployplan: %q is not a recordable health", o.Health)
+	}
+	if o.HealthURL != "" && !healthURLRE.MatchString(o.HealthURL) {
+		return fmt.Errorf("deployplan: %q is not a health url", o.HealthURL)
+	}
+	return nil
+}
+
+// SetRunResult records how a submitted record's workflow ended, plus what it
+// observed (see RunOutcome). It applies once: a record that is not
+// submitted, or already has a result, is an error.
+func (s *Store) SetRunResult(ctx context.Context, id string, o RunOutcome) (*Record, error) {
+	if err := o.validate(); err != nil {
+		return nil, err
 	}
 	r, err := scanRecord(s.pool.QueryRow(ctx, `
-UPDATE deploy_records SET run_result = $2, image_digest = COALESCE(image_digest, NULLIF($3, '')), updated_at = $4
+UPDATE deploy_records SET run_result = $2,
+  image_digest = COALESCE(image_digest, NULLIF($3, '')),
+  argo_revision = COALESCE(argo_revision, NULLIF($4, '')),
+  commit_sha = COALESCE(commit_sha, NULLIF($5, '')),
+  health = CASE WHEN health = 'unknown' AND $6 <> '' THEN $6 ELSE health END,
+  health_url = COALESCE(health_url, NULLIF($7, '')),
+  updated_at = $8
 WHERE id = $1 AND status = 'submitted' AND run_result IS NULL
-RETURNING `+recordColumns, id, result, imageDigest, s.now().Truncate(time.Microsecond)))
+RETURNING `+recordColumns, id, o.Result, o.ImageDigest, o.ArgoRevision, o.CommitSHA, o.Health, o.HealthURL,
+		s.now().Truncate(time.Microsecond)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("deployplan: record %s is not awaiting a run result", id)
 	}
@@ -313,7 +370,7 @@ func scanRecord(row pgx.Row) (*Record, error) {
 	if err := row.Scan(&r.ID, &r.PlanID, &r.PlanDigest, &r.Tenant, &r.Service, &r.Environment, &r.Revision,
 		&r.GitopsSHA, &r.PreviewID, &r.Host, &r.ApprovalID, &r.DecidedByPrincipalID, &r.AppliedBy, &r.Status,
 		&r.Workflow, &r.ImageDigest, &r.ArgoRevision, &r.Health, &r.HealthURL, &r.CreatedAt, &r.UpdatedAt,
-		&r.WorkflowRef, &r.RunResult); err != nil {
+		&r.WorkflowRef, &r.RunResult, &r.CommitSHA); err != nil {
 		return nil, err
 	}
 	r.CreatedAt, r.UpdatedAt = r.CreatedAt.UTC(), r.UpdatedAt.UTC()

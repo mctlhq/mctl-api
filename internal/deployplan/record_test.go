@@ -101,6 +101,7 @@ func TestRecordStore(t *testing.T) {
 	for _, q := range []string{
 		"UPDATE deploy_records SET image_digest = '" + digest + "' WHERE id = $1",
 		"UPDATE deploy_records SET argo_revision = 'rev1' WHERE id = $1",
+		"UPDATE deploy_records SET commit_sha = '" + strings.Repeat("a", 40) + "' WHERE id = $1",
 		"UPDATE deploy_records SET health = 'healthy', health_url = 'https://x' WHERE id = $1",
 	} {
 		if _, err := s.pool.Exec(ctx, q, r.ID); err != nil {
@@ -110,6 +111,7 @@ func TestRecordStore(t *testing.T) {
 	for name, q := range map[string]string{
 		"image digest": "UPDATE deploy_records SET image_digest = 'sha256:" + strings.Repeat("e", 64) + "' WHERE id = $1",
 		"argo":         "UPDATE deploy_records SET argo_revision = 'rev2' WHERE id = $1",
+		"commit sha":   "UPDATE deploy_records SET commit_sha = '" + strings.Repeat("b", 40) + "' WHERE id = $1",
 		"health":       "UPDATE deploy_records SET health = 'unhealthy' WHERE id = $1",
 		"health url":   "UPDATE deploy_records SET health_url = 'https://y' WHERE id = $1",
 	} {
@@ -124,6 +126,9 @@ func TestRecordStore(t *testing.T) {
 	}
 	if _, err := s.pool.Exec(ctx, "UPDATE deploy_records SET image_digest = 'latest' WHERE id = $1", r2.ID); err == nil {
 		t.Error("a non-digest image_digest was stored")
+	}
+	if _, err := s.pool.Exec(ctx, "UPDATE deploy_records SET commit_sha = 'main' WHERE id = $1", r2.ID); err == nil {
+		t.Error("a non-commit commit_sha was stored")
 	}
 }
 
@@ -143,7 +148,7 @@ func TestRecordRunResult(t *testing.T) {
 	if r.WorkflowRef != "preview-deploy-aaaa0001" || r.RunResult != "" {
 		t.Fatalf("inserted = %+v", r)
 	}
-	if _, err := s.SetRunResult(ctx, r.ID, RunSucceeded, digest); err == nil {
+	if _, err := s.SetRunResult(ctx, r.ID, RunOutcome{Result: RunSucceeded, ImageDigest: digest}); err == nil {
 		t.Fatal("a run result on a submitting record")
 	}
 	if _, err := s.SetRecordSubmission(ctx, r.ID, RecordSubmitted, "preview-deploy-other"); err == nil {
@@ -182,23 +187,23 @@ func TestRecordRunResult(t *testing.T) {
 	if _, err := s.SetRecordSubmission(ctx, r.ID, RecordSubmitted, "preview-deploy-aaaa0001"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.SetRunResult(ctx, f.ID, RunFailed, ""); err == nil {
+	if _, err := s.SetRunResult(ctx, f.ID, RunOutcome{Result: RunFailed}); err == nil {
 		t.Fatal("a run result on a failed submit")
 	}
-	if _, err := s.SetRunResult(ctx, r.ID, "maybe", ""); err == nil {
+	if _, err := s.SetRunResult(ctx, r.ID, RunOutcome{Result: "maybe"}); err == nil {
 		t.Fatal("an unknown run result")
 	}
-	if _, err := s.SetRunResult(ctx, r.ID, RunSucceeded, "latest"); err == nil {
+	if _, err := s.SetRunResult(ctx, r.ID, RunOutcome{Result: RunSucceeded, ImageDigest: "latest"}); err == nil {
 		t.Fatal("a malformed digest")
 	}
 	if !queue()[r.ID] {
 		t.Fatal("a submitted record without a result left the queue")
 	}
-	got, err := s.SetRunResult(ctx, r.ID, RunSucceeded, digest)
+	got, err := s.SetRunResult(ctx, r.ID, RunOutcome{Result: RunSucceeded, ImageDigest: digest})
 	if err != nil || got.RunResult != RunSucceeded || got.ImageDigest != digest {
 		t.Fatalf("SetRunResult = %+v, %v", got, err)
 	}
-	if _, err := s.SetRunResult(ctx, r.ID, RunFailed, ""); err == nil {
+	if _, err := s.SetRunResult(ctx, r.ID, RunOutcome{Result: RunFailed}); err == nil {
 		t.Fatal("run result written twice")
 	}
 	if queue()[r.ID] {
@@ -232,8 +237,43 @@ func TestRecordRunResult(t *testing.T) {
 	if _, err := s.pool.Exec(ctx, "UPDATE deploy_records SET image_digest = $2 WHERE id = $1", gr.ID, digest); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := s.SetRunResult(ctx, gr.ID, RunSucceeded, "sha256:"+strings.Repeat("9", 64)); err != nil || got.ImageDigest != digest {
+	if got, err := s.SetRunResult(ctx, gr.ID, RunOutcome{Result: RunSucceeded, ImageDigest: "sha256:" + strings.Repeat("9", 64)}); err != nil || got.ImageDigest != digest {
 		t.Fatalf("a result replaced the recorded digest: %+v %v", got, err)
+	}
+
+	// The full outcome lands once, each field kept when already set; a
+	// malformed one is refused before any write.
+	h := storedPlan(t, s, "b")
+	hr, _ := s.InsertRecord(ctx, NewRecord(h, "aar_r5", "prn_owner", "prn_dev", "preview-deploy-aaaa0005", time.Now()))
+	if _, err := s.SetRecordSubmission(ctx, hr.ID, RecordSubmitted, "preview-deploy-aaaa0005"); err != nil {
+		t.Fatal(err)
+	}
+	sha1, sha2 := strings.Repeat("1", 40), strings.Repeat("2", 40)
+	for name, o := range map[string]RunOutcome{
+		"argo not a commit": {Result: RunFailed, ArgoRevision: "main"},
+		"commit too short":  {Result: RunFailed, CommitSHA: "abc"},
+		"health idle":       {Result: RunSucceeded, Health: "idle"},
+		"url with a path":   {Result: RunSucceeded, HealthURL: "https://x.test/a"},
+		"url not https":     {Result: RunSucceeded, HealthURL: "http://x.test"},
+	} {
+		if _, err := s.SetRunResult(ctx, hr.ID, o); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	got, err = s.SetRunResult(ctx, hr.ID, RunOutcome{Result: RunFailed, ArgoRevision: sha1, CommitSHA: sha2,
+		Health: HealthUnhealthy, HealthURL: "https://svc.example.test"})
+	if err != nil || got.ArgoRevision != sha1 || got.CommitSHA != sha2 || got.Health != HealthUnhealthy ||
+		got.HealthURL != "https://svc.example.test" || got.ImageDigest != "" {
+		t.Fatalf("outcome = %+v, %v", got, err)
+	}
+	// No health reported: it stays unknown, never healthy.
+	k := storedPlan(t, s, "d")
+	kr, _ := s.InsertRecord(ctx, NewRecord(k, "aar_r6", "prn_owner", "prn_dev", "preview-deploy-aaaa0006", time.Now()))
+	if _, err := s.SetRecordSubmission(ctx, kr.ID, RecordSubmitted, "preview-deploy-aaaa0006"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.SetRunResult(ctx, kr.ID, RunOutcome{Result: RunSucceeded}); err != nil || got.Health != HealthUnknown {
+		t.Fatalf("silent outcome health = %+v, %v", got, err)
 	}
 }
 
