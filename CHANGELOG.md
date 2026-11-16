@@ -1,5 +1,35 @@
 # Changelog
 
+## [4.162.0](https://github.com/mctlhq/mctl-api/compare/4.161.3...4.162.0) (2026-11-16)
+
+
+### Features
+
+* **api:** delete Google customers by their Google subject ([1bef08a](https://github.com/mctlhq/mctl-api/commit/1bef08af802dc64e7cc38fd98657fbf3f9aee223))
+* **api:** delete Google customers by their Google subject ([b9e4bdd](https://github.com/mctlhq/mctl-api/commit/b9e4bdda0c1db2704209ac099e0a43910b1c8073)), closes [#1079](https://github.com/mctlhq/mctl-api/issues/1079)
+* **api:** resolve and admit Google customers by provider ([e4595c5](https://github.com/mctlhq/mctl-api/commit/e4595c5519dfee67645abfc15c8e5d9d21f01eb4))
+* **api:** resolve and admit Google customers by provider ([723886b](https://github.com/mctlhq/mctl-api/commit/723886b9d5ffbdb2e174c15cc96a06bc8e104659))
+* **auth:** resolve Google customers by their Google subject ([bdee3e4](https://github.com/mctlhq/mctl-api/commit/bdee3e44a0e8f644909349d03fb148651f316a10))
+* **auth:** resolve Google customers by their Google subject ([65b6122](https://github.com/mctlhq/mctl-api/commit/65b612299d5a6595364bfc658434537be5859dbe)), closes [#1079](https://github.com/mctlhq/mctl-api/issues/1079)
+* **deploy:** complete deployment records from Argo ([b895afe](https://github.com/mctlhq/mctl-api/commit/b895afedb89274d9cb945d16fda75cb239dde1d2))
+* **deploy:** complete deployment records from Argo ([1ea4ee7](https://github.com/mctlhq/mctl-api/commit/1ea4ee721d1ce74599d9c1072ccb574d2784c76c)), closes [#1047](https://github.com/mctlhq/mctl-api/issues/1047)
+* **deploy:** record each applied plan as a DeployRecord ([49410a9](https://github.com/mctlhq/mctl-api/commit/49410a96b3f6f018f47ce7fcaaef0ed49d77a314))
+* **glovo:** C2-1c consent record for linking a Glovo account ([5d88cea](https://github.com/mctlhq/mctl-api/commit/5d88ceacdba4fbc29b46cca58e0401773fa8e66d))
+* **glovo:** C2-1c consent record for linking a Glovo account ([96bd5bf](https://github.com/mctlhq/mctl-api/commit/96bd5bf2af1b917810f3586e5125709f20adcb40))
+* **zitadelhook:** accept a Google IdP on the customers org ([ee0ac32](https://github.com/mctlhq/mctl-api/commit/ee0ac329f5747362241bb9df00423a0f763e7a9c))
+* **zitadelhook:** accept a Google IdP on the customers org ([d04130c](https://github.com/mctlhq/mctl-api/commit/d04130c20eb61202075af8b7a6c318afa4f4e233)), closes [#1079](https://github.com/mctlhq/mctl-api/issues/1079)
+
+
+### Bug Fixes
+
+* **deploy:** apply a plan once and record only certain submit outcomes ([dfde6b6](https://github.com/mctlhq/mctl-api/commit/dfde6b60d413f011458b2b7094d6bba5d765eaa2)), closes [#1047](https://github.com/mctlhq/mctl-api/issues/1047)
+* **deploy:** bound the record queue, share the digest check ([2fd975c](https://github.com/mctlhq/mctl-api/commit/2fd975c18505df7c9a11ff3930c53e4eb313f671)), closes [#1047](https://github.com/mctlhq/mctl-api/issues/1047)
+* **deploy:** point failed applies at a new plan, record unprepared runs ([3524db2](https://github.com/mctlhq/mctl-api/commit/3524db26ba04094608c5c360a5ca28de50143889)), closes [#1047](https://github.com/mctlhq/mctl-api/issues/1047)
+* **glovoconsent:** bound tx waits, audit refusals, check every read ([7672a38](https://github.com/mctlhq/mctl-api/commit/7672a38d54a22a9567b8f930b02a53468be97896))
+* **zitadelhook:** name Google links outside customers in the reason ([80acbcd](https://github.com/mctlhq/mctl-api/commit/80acbcd2a1f4a9f266f4748a370ef0d17b2c734e)), closes [#1079](https://github.com/mctlhq/mctl-api/issues/1079)
+* **zitadelhook:** pid-only member reserves no login ([720b1d3](https://github.com/mctlhq/mctl-api/commit/720b1d3bf5b15b7d2048327493654339daff7fe1))
+* **zitadelhook:** pid-only member reserves no login ([9c66289](https://github.com/mctlhq/mctl-api/commit/9c66289ac5b8b98d52d838d5b68292b331d73fe4))
+
 ## [4.161.3](https://github.com/mctlhq/mctl-api/compare/4.161.2...4.161.3) (2026-11-16)
 
 
