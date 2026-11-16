@@ -1,13 +1,13 @@
 {
   "source_repo": "mctlhq/mctl-gitops",
-  "source_commit": "79367610370494d0e41de0a9beb0d1eedac16194",
-  "captured_at": "2026-11-16T09:22:54Z",
+  "source_commit": "9737ee3da7fcfee910fd7f02f3fc5c240c95ace4",
+  "captured_at": "2026-11-16T13:34:19Z",
   "refresh": "scripts/refresh-deployplan-upstream.sh",
   "files": [
     {
       "source_path": "platform-gitops/argo-workflows/cluster-templates/wft-preview-deploy.yaml",
       "snapshot": "wft-preview-deploy.yaml",
-      "sha256": "9d6b8b753d33bdae34474bba64940434e93ad81f87cbd61e5e069ff1d619a5be"
+      "sha256": "c1b60f14d7cb4b6826016cd5cd24e28e072f6572f50e5d8b97a2b18b38bf52ac"
     },
     {
       "source_path": "platform-gitops/argo-workflows/cluster-templates/tpl-git-commit.yaml",
