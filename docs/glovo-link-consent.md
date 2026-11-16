@@ -74,6 +74,11 @@ active at once:
   mounted (reads and withdrawals work) but no new consent is recorded, and
   the boot log says so at error level.
 
+Production target (owner decision, 2026-11-16): `GLOVO_C2_CAPACITY=10`, a
+plain, non-secret value in mctl-gitops `mctl-api.yaml`, set together with
+`GLOVO_CONSENT_ENABLED` in the rollout PR after an owner-approved release.
+The code default stays closed.
+
 ## Configuration (all default off)
 
 | Variable | Meaning |
