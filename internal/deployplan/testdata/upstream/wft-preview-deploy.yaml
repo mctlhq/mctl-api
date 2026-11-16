@@ -110,6 +110,15 @@ spec:
 
   templates:
     - name: preview-pipeline
+      # The workflow's own output, so mctl-api can record the digest a
+      # deploy-plan apply ran (DeployRecord, mctlhq/mctl-api#1047) from
+      # status.outputs instead of from one node's outputs. Set only when the
+      # pipeline succeeds.
+      outputs:
+        parameters:
+          - name: image_digest
+            valueFrom:
+              parameter: "{{tasks.build-image.outputs.parameters.digest}}"
       dag:
         tasks:
           # The component name is the image name: the build pushes

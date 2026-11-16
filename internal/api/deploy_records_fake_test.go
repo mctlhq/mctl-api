@@ -52,6 +52,9 @@ func (s *fakeRecordStore) SetRecordSubmission(_ context.Context, id, status, wor
 	if !ok || r.Status != deployplan.RecordSubmitting {
 		return nil, errors.New("not awaiting submission")
 	}
+	if workflow != "" && r.WorkflowRef != "" && workflow != r.WorkflowRef {
+		return nil, errors.New("workflow differs from the name it was submitted under")
+	}
 	r.Status, r.Workflow = status, workflow
 	out := *r
 	return &out, nil
