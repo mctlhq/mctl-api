@@ -46,7 +46,8 @@ configured federated service identity reaches only that prefix, and nobody
 else reaches it. It is rate limited per principal (60 per minute), on top
 of the global per-caller limit.
 
-Every record (including capacity refusals) and every withdrawal
+Every record and every withdrawal, refused or not (not a human, principal
+unresolved, capacity reached),
 writes an audit row: `glovo.link_consent.record` and
 `glovo.link_consent.revoke`, with the principal, consent id and version.
 

@@ -65,6 +65,9 @@ type PostgresStore struct {
 	pool        *pgxpool.Pool
 	releaseOnce sync.Once
 	now         func() time.Time
+	// timeout bounds every call, the lock waits inside a transaction
+	// included; dbTimeout unless a test shortens it.
+	timeout time.Duration
 }
 
 // NewStore connects and creates the schema.
@@ -77,7 +80,7 @@ func NewStore(ctx context.Context, connStr string) (*PostgresStore, error) {
 		pgshared.Release(pool)
 		return nil, fmt.Errorf("glovoconsent: create schema: %w", err)
 	}
-	return &PostgresStore{pool: pool, now: func() time.Time { return time.Now().UTC() }}, nil
+	return &PostgresStore{pool: pool, now: func() time.Time { return time.Now().UTC() }, timeout: dbTimeout}, nil
 }
 
 // Close releases the pool.
@@ -120,15 +123,15 @@ func (s *PostgresStore) Active(ctx context.Context, principalID string) (Record,
 	if !prnPattern.MatchString(principalID) {
 		return Record{}, ErrInvalid
 	}
-	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	return scan(s.pool.QueryRow(ctx, selectActive, principalID))
 }
 
 // withPrincipalTx runs fn in a transaction holding a per-principal advisory
 // lock, so two concurrent records or revokes for one principal serialize.
-func (s *PostgresStore) withPrincipalTx(ctx context.Context, principalID string, fn func(pgx.Tx) error) error {
-	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+func (s *PostgresStore) withPrincipalTx(ctx context.Context, principalID string, fn func(context.Context, pgx.Tx) error) error {
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -138,7 +141,7 @@ func (s *PostgresStore) withPrincipalTx(ctx context.Context, principalID string,
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('glovo-link-consent:' || $1))`, principalID); err != nil {
 		return fmt.Errorf("glovoconsent: lock: %w", err)
 	}
-	if err := fn(tx); err != nil {
+	if err := fn(ctx, tx); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -166,7 +169,7 @@ func (s *PostgresStore) Record(ctx context.Context, principalID, actor string, c
 	}
 	var out Record
 	created := false
-	err := s.withPrincipalTx(ctx, principalID, func(tx pgx.Tx) error {
+	err := s.withPrincipalTx(ctx, principalID, func(ctx context.Context, tx pgx.Tx) error {
 		// The capacity lock serialises every slot claim, so the count
 		// below and the insert after it are one atomic claim: two claims
 		// for the last slot cannot both see it free. Lock order is always
@@ -224,7 +227,7 @@ func (s *PostgresStore) Revoke(ctx context.Context, principalID, actor string) (
 		return Record{}, err
 	}
 	var out Record
-	err := s.withPrincipalTx(ctx, principalID, func(tx pgx.Tx) error {
+	err := s.withPrincipalTx(ctx, principalID, func(ctx context.Context, tx pgx.Tx) error {
 		cur, err := scan(tx.QueryRow(ctx, selectActive, principalID))
 		if err != nil {
 			return err

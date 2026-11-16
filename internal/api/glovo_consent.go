@@ -191,8 +191,10 @@ func glovoConsentHuman(u *auth.User) (pid string, ok, unresolved bool) {
 }
 
 // glovoConsentCaller answers every refusal of the human routes and returns
-// the caller's principal.
-func (h *Handlers) glovoConsentCaller(w http.ResponseWriter, r *http.Request, route string) (*auth.User, string, bool) {
+// the caller's principal. op is the audit operation of a write route ("" for
+// the read): a refused write is audited with its refusal code, under the
+// caller's own principal when it resolved and with no principal otherwise.
+func (h *Handlers) glovoConsentCaller(w http.ResponseWriter, r *http.Request, route, op string) (*auth.User, string, bool) {
 	user := auth.UserFromContext(r.Context())
 	if user == nil {
 		writeError(w, http.StatusUnauthorized, "authentication required")
@@ -202,10 +204,16 @@ func (h *Handlers) glovoConsentCaller(w http.ResponseWriter, r *http.Request, ro
 	switch {
 	case unresolved:
 		glovoConsentEvents.WithLabelValues(route, "principal_unresolved").Inc()
+		if op != "" {
+			h.auditGlovoConsent(r, user, op, "refused", "", nil, gcCodeUnavailable)
+		}
 		writeErrorCode(w, http.StatusServiceUnavailable, gcCodeUnavailable, "the caller's principal could not be resolved; try again", nil)
 		return nil, "", false
 	case !ok:
 		glovoConsentEvents.WithLabelValues(route, "not_human").Inc()
+		if op != "" {
+			h.auditGlovoConsent(r, user, op, "refused", "", nil, gcCodeHumanOnly)
+		}
 		writeErrorCode(w, http.StatusForbidden, gcCodeHumanOnly, "only a human acting directly, with a resolved principal, can manage their Glovo link consent", nil)
 		return nil, "", false
 	}
@@ -236,10 +244,18 @@ func (h *Handlers) auditGlovoConsent(r *http.Request, user *auth.User, op, statu
 	})
 }
 
+// activeConsentOf reports whether a store answer describes an active
+// consent of pid. Every reader applies it: an answer about another
+// principal, a revoked row or a row with no version is unreadable, never a
+// consent, so a faulty Store cannot expose another principal's record.
+func activeConsentOf(rec glovoconsent.Record, pid string) bool {
+	return rec.PrincipalID == pid && rec.Version != "" && rec.Active()
+}
+
 // GetGlovoLinkConsent handles GET /api/v1/glovo/link-consent: the caller's
 // own active consent, or state none.
 func (h *Handlers) GetGlovoLinkConsent(w http.ResponseWriter, r *http.Request) {
-	_, pid, ok := h.glovoConsentCaller(w, r, "human_read")
+	_, pid, ok := h.glovoConsentCaller(w, r, "human_read", "")
 	if !ok {
 		return
 	}
@@ -249,6 +265,9 @@ func (h *Handlers) GetGlovoLinkConsent(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, glovoConsentView{State: gcStateNone, CurrentVersion: glovoconsent.Version})
 	case err != nil:
 		glovoConsentEvents.WithLabelValues("human_read", "store_error").Inc()
+		writeErrorCode(w, http.StatusServiceUnavailable, gcCodeUnavailable, "the consent record could not be read", nil)
+	case !activeConsentOf(rec, pid):
+		glovoConsentEvents.WithLabelValues("human_read", "store_inconsistent").Inc()
 		writeErrorCode(w, http.StatusServiceUnavailable, gcCodeUnavailable, "the consent record could not be read", nil)
 	default:
 		writeJSON(w, http.StatusOK, glovoConsentView{State: gcStateActive, CurrentVersion: glovoconsent.Version, Consent: &rec})
@@ -261,11 +280,11 @@ func (h *Handlers) GetGlovoLinkConsent(w http.ResponseWriter, r *http.Request) {
 // capacity cap, atomically in the store; at the cap the answer is 409
 // capacity_reached. Re-recording takes no second slot.
 func (h *Handlers) PutGlovoLinkConsent(w http.ResponseWriter, r *http.Request) {
-	user, pid, ok := h.glovoConsentCaller(w, r, "human_record")
+	const op = "glovo.link_consent.record"
+	user, pid, ok := h.glovoConsentCaller(w, r, "human_record", op)
 	if !ok {
 		return
 	}
-	const op = "glovo.link_consent.record"
 	rec, created, err := h.opts.GlovoConsent.Store.Record(r.Context(), pid, principalOf(user), h.opts.GlovoConsent.Capacity)
 	if errors.Is(err, glovoconsent.ErrCapacityReached) {
 		glovoConsentEvents.WithLabelValues("human_record", "capacity_reached").Inc()
@@ -275,6 +294,12 @@ func (h *Handlers) PutGlovoLinkConsent(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		glovoConsentEvents.WithLabelValues("human_record", "store_error").Inc()
+		h.auditGlovoConsent(r, user, op, "failed", pid, nil, gcCodeUnavailable)
+		writeErrorCode(w, http.StatusServiceUnavailable, gcCodeUnavailable, "the consent could not be recorded", nil)
+		return
+	}
+	if !activeConsentOf(rec, pid) {
+		glovoConsentEvents.WithLabelValues("human_record", "store_inconsistent").Inc()
 		h.auditGlovoConsent(r, user, op, "failed", pid, nil, gcCodeUnavailable)
 		writeErrorCode(w, http.StatusServiceUnavailable, gcCodeUnavailable, "the consent could not be recorded", nil)
 		return
@@ -292,11 +317,11 @@ func (h *Handlers) PutGlovoLinkConsent(w http.ResponseWriter, r *http.Request) {
 // caller withdraws their consent, which frees its slot. Idempotent:
 // with no active consent the answer is state none.
 func (h *Handlers) DeleteGlovoLinkConsent(w http.ResponseWriter, r *http.Request) {
-	user, pid, ok := h.glovoConsentCaller(w, r, "human_revoke")
+	const op = "glovo.link_consent.revoke"
+	user, pid, ok := h.glovoConsentCaller(w, r, "human_revoke", op)
 	if !ok {
 		return
 	}
-	const op = "glovo.link_consent.revoke"
 	rec, err := h.opts.GlovoConsent.Store.Revoke(r.Context(), pid, principalOf(user))
 	switch {
 	case errors.Is(err, glovoconsent.ErrNoConsent):
@@ -352,7 +377,7 @@ func (h *Handlers) ReadGlovoLinkConsent(w http.ResponseWriter, r *http.Request) 
 	case err != nil:
 		glovoConsentEvents.WithLabelValues("service_read", "store_error").Inc()
 		writeErrorCode(w, http.StatusServiceUnavailable, gcCodeUnavailable, "the consent record could not be read", nil)
-	case rec.PrincipalID != pid || rec.Version == "" || !rec.Active():
+	case !activeConsentOf(rec, pid):
 		// A store answer that does not describe an active consent of this
 		// principal is unreadable, not a consent.
 		glovoConsentEvents.WithLabelValues("service_read", "store_inconsistent").Inc()

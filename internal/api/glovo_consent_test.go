@@ -301,6 +301,19 @@ func TestGlovoConsentOnlyAHumanActingDirectlyRecords(t *testing.T) {
 	if store.recordCalls != 0 {
 		t.Fatalf("%d non-human records reached the store", store.recordCalls)
 	}
+	// Every refused write is audited with its refusal code.
+	if rec := e.call("DELETE", consentHumanURL, "agent", ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("agent revoke = %d", rec.Code)
+	}
+	refused := map[string]int{}
+	for _, entry := range e.audit.List(500) {
+		if entry.Status == "refused" && entry.RefusalCode == gcCodeHumanOnly {
+			refused[entry.Operation]++
+		}
+	}
+	if refused["glovo.link_consent.record"] == 0 || refused["glovo.link_consent.revoke"] == 0 {
+		t.Fatalf("refused writes not audited: %v", refused)
+	}
 	if rec := e.call("PUT", consentHumanURL, "alice", ""); rec.Code != http.StatusCreated {
 		t.Fatalf("control: alice = %d %s", rec.Code, rec.Body.String())
 	}
@@ -368,6 +381,12 @@ func TestGlovoConsentRevokeReadsNone(t *testing.T) {
 	if got := readState(t, e.call("GET", consentReadURL(consentPIDA), "svc", "")); got.State != "active" {
 		t.Fatalf("before revoke = %+v", got)
 	}
+	// The human GET shows the caller's own active consent.
+	var own glovoConsentView
+	if rec := e.call("GET", consentHumanURL, "alice", ""); rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &own) != nil ||
+		own.State != "active" || own.Consent == nil || own.Consent.PrincipalID != consentPIDA || own.Consent.Version != glovoconsent.Version || own.Consent.ID == "" {
+		t.Fatalf("human GET before revoke = %d %+v", rec.Code, own)
+	}
 	if rec := e.call("DELETE", consentHumanURL, "alice", ""); rec.Code != http.StatusOK {
 		t.Fatalf("revoke = %d %s", rec.Code, rec.Body.String())
 	}
@@ -428,10 +447,28 @@ func TestGlovoConsentReadErrorIsNotNone(t *testing.T) {
 	}
 	store.recordErr = nil
 
-	// A store row that is not an active consent of this principal.
+	// A store row that is not an active consent of this principal is
+	// unreadable for every reader: the service read, the human GET and the
+	// row a record returns.
+	now := time.Now().UTC()
+	for name, row := range map[string]glovoconsent.Record{
+		"another principal": {ID: "x", PrincipalID: consentPIDA, Version: glovoconsent.Version},
+		"revoked":           {ID: "x", PrincipalID: consentPIDB, Version: glovoconsent.Version, RevokedAt: &now},
+		"no version":        {ID: "x", PrincipalID: consentPIDB},
+	} {
+		store.active[consentPIDB] = row
+		if rec := e.call("GET", consentReadURL(consentPIDB), "svc", ""); rec.Code != http.StatusServiceUnavailable {
+			t.Errorf("service read, %s row = %d %s, want 503", name, rec.Code, rec.Body.String())
+		}
+		if rec := e.call("GET", consentHumanURL, "bob", ""); rec.Code != http.StatusServiceUnavailable || strings.Contains(rec.Body.String(), `"x"`) {
+			t.Errorf("human GET, %s row = %d %s, want 503 without the row", name, rec.Code, rec.Body.String())
+		}
+	}
+	// Record answering with someone else's row (mem store returns the
+	// stored row unchanged when its version is current).
 	store.active[consentPIDB] = glovoconsent.Record{ID: "x", PrincipalID: consentPIDA, Version: glovoconsent.Version}
-	if rec := e.call("GET", consentReadURL(consentPIDB), "svc", ""); rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("inconsistent row = %d %s, want 503", rec.Code, rec.Body.String())
+	if rec := e.call("PUT", consentHumanURL, "bob", ""); rec.Code != http.StatusServiceUnavailable || strings.Contains(rec.Body.String(), `"x"`) {
+		t.Fatalf("record returning another principal's row = %d %s, want 503", rec.Code, rec.Body.String())
 	}
 }
 

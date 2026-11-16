@@ -340,3 +340,41 @@ func TestConsentGrants(t *testing.T) {
 		}
 	}
 }
+
+// The store's timeout bounds the whole claim, the wait for the global
+// capacity lock included: a transaction holding that lock stalls a claim
+// for at most the timeout, and the stalled claim fails, never succeeds.
+func TestPGClaimWaitIsBounded(t *testing.T) {
+	s := newTestStore(t)
+	s.timeout = 300 * time.Millisecond
+	ctx := context.Background()
+	holder, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	if _, err := holder.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('glovo-link-consent:capacity'))`); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		_, _, err := s.Record(ctx, pidA, "github:a", testCap)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || errors.Is(err, ErrCapacityReached) {
+			t.Fatalf("stalled claim = %v, want a timeout error", err)
+		}
+		if d := time.Since(start); d > 3*time.Second {
+			t.Fatalf("stalled claim took %v", d)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("the claim waited on the capacity lock past the store timeout")
+	}
+	_ = holder.Rollback(ctx)
+	if _, err := s.Active(ctx, pidA); !errors.Is(err, ErrNoConsent) {
+		t.Fatalf("a timed-out claim left a consent: %v", err)
+	}
+}
