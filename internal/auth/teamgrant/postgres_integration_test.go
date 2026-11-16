@@ -58,7 +58,7 @@ func TestPostgresStoreEndToEnd(t *testing.T) {
 	}
 	sess := refreshstore.Session{PrincipalID: prn, Resource: res, TeamGrantID: g1.ID}
 	err = rs.InsertBound(ctx, "rawtok-"+sfx+"-1", cl, sess, time.Now().Add(time.Hour), func(ctx context.Context, tx pgx.Tx, f uuid.UUID) error {
-		return teamgrant.ActivateTx(ctx, tx, g1.ID, prn, cl, res, f)
+		return teamgrant.ActivateTx(ctx, tx, g1.ID, prn, cl, res, "", f)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -83,7 +83,7 @@ func TestPostgresStoreEndToEnd(t *testing.T) {
 	}
 	// double activation refused
 	err = rs.InsertBound(ctx, "rawtok-"+sfx+"-2", cl, refreshstore.Session{PrincipalID: prn, Resource: res, TeamGrantID: g2.ID}, time.Now().Add(time.Hour), func(ctx context.Context, tx pgx.Tx, f uuid.UUID) error {
-		return teamgrant.ActivateTx(ctx, tx, g2.ID, prn, "wrongclient", res, f)
+		return teamgrant.ActivateTx(ctx, tx, g2.ID, prn, "wrongclient", res, "", f)
 	})
 	if !errors.Is(err, teamgrant.ErrGrantInvalid) {
 		t.Fatal("activate wrong client", err)
@@ -92,7 +92,7 @@ func TestPostgresStoreEndToEnd(t *testing.T) {
 		t.Fatal("row committed")
 	}
 	err = rs.InsertBound(ctx, "rawtok-"+sfx+"-4", cl, refreshstore.Session{PrincipalID: prn, Resource: res, TeamGrantID: g2.ID}, time.Now().Add(time.Hour), func(ctx context.Context, tx pgx.Tx, f uuid.UUID) error {
-		return teamgrant.ActivateTx(ctx, tx, g2.ID, prn, cl, res, f)
+		return teamgrant.ActivateTx(ctx, tx, g2.ID, prn, cl, res, "", f)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -122,5 +122,75 @@ func TestPostgresStoreEndToEnd(t *testing.T) {
 	}
 	if st != "revoked" {
 		t.Fatal("pending grant not revoked by principal", st)
+	}
+}
+
+// TestPostgresPersonalGrant covers the kind column against real SQL: an
+// upgrade from the team-only schema, the kind/tenant constraint, and that
+// activation and Check carry the kind. It needs TEST_DB_URL.
+func TestPostgresPersonalGrant(t *testing.T) {
+	if os.Getenv("TEST_DB_URL") == "" {
+		t.Skip("TEST_DB_URL not set; skipping Postgres tests")
+	}
+	ctx := context.Background()
+	rs, err := refreshstore.NewPostgresStore(ctx, os.Getenv("TEST_DB_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := rs.Pool()
+	// Put the table back in its team-only shape (no kind, tenant <> ''),
+	// with a live team grant in it, and boot again: the upgrade keeps the
+	// row as a team grant and admits personal ones.
+	sfx := uuid.NewString()
+	prn, cl, res := "prn_pg_"+sfx, "c1", "https://glovo.mctl.ai/mcp"
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM oauth_team_grants WHERE principal_id LIKE $1`, prn+"%")
+	})
+	if _, err := pool.Exec(ctx, `ALTER TABLE oauth_team_grants DROP CONSTRAINT IF EXISTS oauth_team_grants_kind_tenant;
+		ALTER TABLE oauth_team_grants DROP COLUMN IF EXISTS kind;
+		ALTER TABLE oauth_team_grants ADD CONSTRAINT oauth_team_grants_tenant_check CHECK (tenant <> '')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO oauth_team_grants (grant_id, principal_id, tenant, resource, client_id, state, created_at, expires_at)
+		VALUES ($1, $2, 'alpha', $3, $4, 'pending', now(), now() + interval '1 hour')`, "tgr_old_"+sfx, prn+"-old", res, cl); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := refreshstore.NewPostgresStore(ctx, os.Getenv("TEST_DB_URL")); err != nil {
+		t.Fatal("upgrade", err)
+	}
+	var kind string
+	if err := pool.QueryRow(ctx, `SELECT kind FROM oauth_team_grants WHERE grant_id = $1`, "tgr_old_"+sfx).Scan(&kind); err != nil || kind != teamgrant.KindTeam {
+		t.Fatalf("existing row after upgrade: %q %v", kind, err)
+	}
+	// The constraint, not only validate(), keeps kind and tenant together.
+	for name, q := range map[string]string{
+		"team without a tenant":  `INSERT INTO oauth_team_grants (grant_id, principal_id, kind, tenant, resource, client_id, state, created_at, expires_at) VALUES ($1, $2, 'team', '', $3, $4, 'pending', now(), now())`,
+		"personal with a tenant": `INSERT INTO oauth_team_grants (grant_id, principal_id, kind, tenant, resource, client_id, state, created_at, expires_at) VALUES ($1, $2, 'personal', 'alpha', $3, $4, 'pending', now(), now())`,
+		"unknown kind":           `INSERT INTO oauth_team_grants (grant_id, principal_id, kind, tenant, resource, client_id, state, created_at, expires_at) VALUES ($1, $2, 'other', '', $3, $4, 'pending', now(), now())`,
+	} {
+		if _, err := pool.Exec(ctx, q, "tgr_bad_"+uuid.NewString(), prn+"-bad", res, cl); err == nil {
+			t.Errorf("%s: inserted", name)
+		}
+	}
+	gs, _ := teamgrant.NewPostgresStore(pool)
+	p, err := gs.Create(ctx, teamgrant.Grant{PrincipalID: prn, Kind: teamgrant.KindPersonal, ClientID: cl, Resource: res, ExpiresAt: time.Now().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bind := func(n, kind string) error {
+		return rs.InsertBound(ctx, "rawtok-p-"+sfx+n, cl, refreshstore.Session{PrincipalID: prn, Resource: res, TeamGrantID: p.ID}, time.Now().Add(time.Hour),
+			func(ctx context.Context, tx pgx.Tx, f uuid.UUID) error {
+				return teamgrant.ActivateTx(ctx, tx, p.ID, prn, cl, res, kind, f)
+			})
+	}
+	if err := bind("1", ""); !errors.Is(err, teamgrant.ErrGrantInvalid) {
+		t.Fatalf("personal grant activated as a team grant: %v", err)
+	}
+	if err := bind("2", teamgrant.KindPersonal); err != nil {
+		t.Fatal(err)
+	}
+	got, err := gs.Check(ctx, p.ID, prn, cl, res)
+	if err != nil || !got.IsPersonal() || got.Tenant != "" || got.RefreshFamilyID == "" {
+		t.Fatalf("%+v %v", got, err)
 	}
 }

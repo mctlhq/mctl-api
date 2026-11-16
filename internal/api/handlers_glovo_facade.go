@@ -23,6 +23,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/glovo"
 	"github.com/mctlhq/mctl-api/internal/glovo/connect"
+	"github.com/mctlhq/mctl-api/internal/glovo/scope"
 	"github.com/mctlhq/mctl-api/internal/glovo/wire"
 )
 
@@ -48,6 +49,11 @@ func (h *Handlers) glovoFacadeScope(w http.ResponseWriter, r *http.Request, rout
 		return glovoFacadeCall{}, false
 	}
 	sc, refusal := h.glovoRoutes().Resolver.Resolve(r.Context(), user)
+	if refusal == nil {
+		// The facade acts for a team's installation: a personal scope has
+		// none.
+		refusal = scope.RequireTeam(sc)
+	}
 	if refusal != nil {
 		_ = glovoRefuse(w, route, refusal)
 		return glovoFacadeCall{}, false

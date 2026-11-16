@@ -94,6 +94,8 @@ type Claims struct {
 	// Glovo-audience token; set only with GlovoAudience.
 	TeamGrant      string
 	SelectedTenant string
+	// PersonalGrant is set when TeamGrant names a personal grant (tgk).
+	PersonalGrant bool
 	// OAuthClientID is the verified client_id claim (provenance only).
 	OAuthClientID string
 }

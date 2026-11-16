@@ -211,6 +211,10 @@ type auditLine struct {
 func (s *service) wrap(name string, fn handlerFunc) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		sc, ok := ctx.Value(scopeKey{}).(Scope)
+		if ok && sc.Personal {
+			// Baskets belong to a team member; a personal scope has no team.
+			return errorResult(scope.RequireTeam(sc)), nil
+		}
 		if !ok || sc.PrincipalID == "" || sc.Tenant == "" {
 			return errorResult(glovo.Refuse(glovo.CodeNotAuthorized)), nil
 		}

@@ -184,6 +184,9 @@ type User struct {
 	// Glovo-audience token; empty for every other credential.
 	teamGrantID    string
 	selectedTenant string
+	// personalGrant is the signed tgk claim: teamGrantID names a personal
+	// grant, which has no selectedTenant.
+	personalGrant bool
 	// glovoControlWorker is set only on the Glovo control-worker principal
 	// (mctl-api#985). Unexported for the same reason as service.
 	glovoControlWorker bool
@@ -1441,6 +1444,7 @@ func userFromVerified(v *Verified) *User {
 		u.glovoAudience = v.Claims.GlovoAudience
 		if u.glovoAudience {
 			u.teamGrantID, u.selectedTenant = v.Claims.TeamGrant, v.Claims.SelectedTenant
+			u.personalGrant = v.Claims.PersonalGrant
 		}
 		u.oauthClientID = v.Claims.OAuthClientID
 		return u
@@ -1452,6 +1456,7 @@ func userFromVerified(v *Verified) *User {
 			glovoAudience: v.Claims.GlovoAudience, oauthClientID: v.Claims.OAuthClientID}
 		if v.Claims.GlovoAudience {
 			u.teamGrantID, u.selectedTenant = v.Claims.TeamGrant, v.Claims.SelectedTenant
+			u.personalGrant = v.Claims.PersonalGrant
 		}
 		return u
 	case v.Identity.Provider == ProviderGitHubActions:
@@ -1609,6 +1614,19 @@ func (u *User) TeamGrant() (grantID, tenant string, ok bool) {
 		return "", "", false
 	}
 	return u.teamGrantID, u.selectedTenant, true
+}
+
+// PersonalGrant returns the personal grant id a Glovo-audience token was
+// minted under: a grant scoped to the principal alone, with no team. ok is
+// false for every other caller, for a team token, and for a token that names
+// a team as well. Like TeamGrant it is only a pointer: the resolver loads the
+// server-held grant, checks its kind and the live consent, and trusts nothing
+// else.
+func (u *User) PersonalGrant() (grantID string, ok bool) {
+	if u == nil || !u.glovoAudience || !u.personalGrant || u.teamGrantID == "" || u.selectedTenant != "" {
+		return "", false
+	}
+	return u.teamGrantID, true
 }
 
 // IsGlovoWorker reports whether the caller is the Glovo worker (glovo_worker.go).

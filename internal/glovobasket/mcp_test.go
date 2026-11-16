@@ -360,3 +360,15 @@ func TestRequestApprovalReturnsThePageURL(t *testing.T) {
 		}
 	}
 }
+
+// Baskets belong to a team member: a personal scope is refused as
+// scope_unsupported by every tool.
+func TestPersonalScopeRefused(t *testing.T) {
+	u := newUnit(t, Config{})
+	ctx := context.WithValue(context.Background(), scopeKey{}, scope.Scope{PrincipalID: "prn_01JBBBBBBBBBBBBBBBBBBBBBBB", Personal: true, GrantID: "pgr_x"})
+	for _, tool := range []string{ToolListProducts, ToolCreateBasket, ToolGetBasket, ToolApprovalStatus} {
+		if _, code := u.call(ctx, tool, map[string]any{}); code != string(glovo.CodeScopeUnsupported) {
+			t.Fatalf("%s: code %q", tool, code)
+		}
+	}
+}

@@ -399,7 +399,7 @@ func TestTeamClaimsOnlyOnGlovoAudience(t *testing.T) {
 	}
 	// Minting never signs them for another audience.
 	for _, aud := range []string{o.BaseURL, testSupportRes} {
-		tok, err := o.issueJWTWithGrant("alice", tgPRN, nil, aud, tgClient, "tgr_x", "alpha")
+		tok, err := o.issueJWTWithGrant("alice", tgPRN, nil, aud, tgClient, "tgr_x", "alpha", false)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -287,3 +287,107 @@ func TestResolveRefusesNonActiveGrants(t *testing.T) {
 		t.Fatalf("revoked grant resolved: %v", rerr)
 	}
 }
+
+// fakeConsent holds the consent of each principal, recorded at a time.
+type fakeConsent struct {
+	since map[string]time.Time
+	err   error
+}
+
+func (f *fakeConsent) HeldSince(_ context.Context, prn string, at time.Time) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	s, ok := f.since[prn]
+	return ok && !s.After(at), nil
+}
+
+// personalUser mints a Glovo-audience token under a personal grant.
+func (e *env) personalUser(t *testing.T, pid, tgr, stn string) *auth.User {
+	t.Helper()
+	enc := base64.RawURLEncoding
+	hdr, _ := json.Marshal(map[string]string{"alg": "HS256", "typ": "JWT"})
+	body, _ := json.Marshal(map[string]any{"iss": base, "sub": pid, "pid": pid, "aud": res, "client_id": client, "groups": []string{},
+		"tgr": tgr, "stn": stn, "tgk": "personal", "iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix()})
+	in := enc.EncodeToString(hdr) + "." + enc.EncodeToString(body)
+	mac := hmac.New(sha256.New, []byte("secret"))
+	mac.Write([]byte(in))
+	u, err := e.o.ValidateJWT(in + "." + enc.EncodeToString(mac.Sum(nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
+}
+
+// newPersonalEnv: prnA has no team at all, an active personal grant pgr_1
+// created now, and a consent recorded a minute before it.
+func newPersonalEnv(t *testing.T) (*env, *fakeConsent) {
+	t.Helper()
+	e := newEnv(t)
+	e.m.roles, e.al.rows = map[string][][]string{}, map[string]bool{}
+	created := time.Now()
+	e.g.g = teamgrant.Grant{ID: "pgr_1", PrincipalID: prnA, Kind: teamgrant.KindPersonal, ClientID: client, Resource: res,
+		State: teamgrant.StateActive, RefreshFamilyID: "fam-1", CreatedAt: created}
+	c := &fakeConsent{since: map[string]time.Time{prnA: created.Add(-time.Minute)}}
+	e.r.Consent = c
+	return e, c
+}
+
+func TestResolvePersonal(t *testing.T) {
+	ctx := context.Background()
+	e, _ := newPersonalEnv(t)
+	sc, err := e.r.Resolve(ctx, e.personalUser(t, prnA, "pgr_1", ""))
+	want := Scope{PrincipalID: prnA, Personal: true, GrantID: "pgr_1", RefreshFamilyID: "fam-1"}
+	if err != nil || sc != want {
+		t.Fatalf("%+v %v", sc, err)
+	}
+	if ge := RequireTeam(sc); code(ge) != glovo.CodeScopeUnsupported {
+		t.Fatalf("a personal scope passed RequireTeam: %v", ge)
+	}
+	for name, tc := range map[string]struct {
+		mutate func(*env, *fakeConsent)
+		user   func(*env, *testing.T) *auth.User
+		want   glovo.Code
+	}{
+		"consent withdrawn":                              {func(_ *env, c *fakeConsent) { delete(c.since, prnA) }, nil, glovo.CodeNotAuthorized},
+		"consent recorded later":                         {func(e *env, c *fakeConsent) { c.since[prnA] = e.g.g.CreatedAt.Add(time.Second) }, nil, glovo.CodeNotAuthorized},
+		"consent store error":                            {func(_ *env, c *fakeConsent) { c.err = errors.New("down") }, nil, glovo.CodeUnavailable},
+		"grant store error":                              {func(e *env, _ *fakeConsent) { e.g.err = errors.New("down") }, nil, glovo.CodeUnavailable},
+		"grant revoked or expired":                       {func(e *env, _ *fakeConsent) { e.g.err = teamgrant.ErrGrantInvalid }, nil, glovo.CodeAmbiguousTenant},
+		"server grant is a team":                         {func(e *env, _ *fakeConsent) { e.g.g.Kind, e.g.g.Tenant = teamgrant.KindTeam, "alpha" }, nil, glovo.CodeAmbiguousTenant},
+		"another principal's grant":                      {nil, func(e *env, t *testing.T) *auth.User { return e.personalUser(t, prnB, "pgr_1", "") }, glovo.CodeAmbiguousTenant},
+		"personal claim with a team":                     {nil, func(e *env, t *testing.T) *auth.User { return e.personalUser(t, prnA, "pgr_1", "alpha") }, glovo.CodeAmbiguousTenant},
+		"team claim on a personal grant naming the team": {func(e *env, _ *fakeConsent) { e.g.g.Tenant = "alpha" }, func(e *env, t *testing.T) *auth.User { return e.user(t, res, prnA, "pgr_1", "alpha") }, glovo.CodeAmbiguousTenant},
+		"team claim on personal":                         {nil, func(e *env, t *testing.T) *auth.User { return e.user(t, res, prnA, "pgr_1", "alpha") }, glovo.CodeAmbiguousTenant},
+		"api audience":                                   {nil, func(e *env, t *testing.T) *auth.User { return e.user(t, base, prnA, "pgr_1", "") }, glovo.CodeNotAuthorized},
+		"consent source off (no new)":                    {func(e *env, _ *fakeConsent) { e.r.Consent = nil }, nil, glovo.CodeAmbiguousTenant},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e, c := newPersonalEnv(t)
+			if tc.mutate != nil {
+				tc.mutate(e, c)
+			}
+			u := e.personalUser(t, prnA, "pgr_1", "")
+			if tc.user != nil {
+				u = tc.user(e, t)
+			}
+			if _, err := e.r.Resolve(ctx, u); code(err) != tc.want {
+				t.Fatalf("got %v, want %s", err, tc.want)
+			}
+		})
+	}
+}
+
+// A team member keeps the team path even with the consent source on: a team
+// token resolves to its team, never to a personal scope.
+func TestTeamPathUnchangedWithConsent(t *testing.T) {
+	e := newEnv(t)
+	e.r.Consent = &fakeConsent{since: map[string]time.Time{prnA: time.Now().Add(-time.Hour)}}
+	sc, err := e.r.Resolve(context.Background(), e.user(t, res, prnA, "tgr_1", "alpha"))
+	if err != nil || sc.Personal || sc.Tenant != "alpha" || RequireTeam(sc) != nil {
+		t.Fatalf("%+v %v", sc, err)
+	}
+	if ge := RequireTeam(Scope{PrincipalID: prnA}); code(ge) != glovo.CodeScopeUnsupported {
+		t.Fatalf("a scope without a team passed RequireTeam: %v", ge)
+	}
+}

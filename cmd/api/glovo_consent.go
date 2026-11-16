@@ -100,3 +100,20 @@ func glovoC2Capacity(raw string) (int, string) {
 }
 
 var glovoC2CapacityPattern = regexp.MustCompile(`^[1-9][0-9]{0,6}$`)
+
+// wireGlovoPersonalGrants admits personal Glovo grants: a human with no
+// eligible team who holds the glovo:c2 consent is scoped to itself. It needs
+// both the Glovo pilot (its resolver) and the consent routes; with either off
+// nothing is set, and the OAuth server and the resolver stay team-only,
+// exactly as before. The consent source is the consent table itself, read on
+// every check: nothing is cached, so a withdrawn consent refuses the next
+// scope resolve and the next refresh.
+func wireGlovoPersonalGrants(o *auth.OAuthServer, routes *api.GlovoRoutes, consent *api.GlovoConsentRoutes) bool {
+	if o == nil || routes == nil || !routes.Enabled || routes.Resolver == nil || consent == nil || !consent.Enabled || consent.Store == nil {
+		return false
+	}
+	src := glovoconsent.ConsentGrants{Store: consent.Store}
+	o.GlovoConsent = src
+	routes.Resolver.Consent = src
+	return true
+}

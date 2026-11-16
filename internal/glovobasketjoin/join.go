@@ -48,6 +48,7 @@ import (
 
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/glovo"
+	"github.com/mctlhq/mctl-api/internal/glovo/scope"
 	"github.com/mctlhq/mctl-api/internal/glovobasket"
 	"github.com/mctlhq/mctl-api/internal/glovojoin"
 	"github.com/mctlhq/mctl-api/internal/operations"
@@ -264,6 +265,11 @@ func (s *Service) verify(r *http.Request) (subject, *glovojoin.Refusal) {
 	sc, ge := s.Resolver.Resolve(r.Context(), u)
 	if ge != nil {
 		return subject{}, &glovojoin.Refusal{Err: ge, Reason: "resolver:" + string(ge.Code)}
+	}
+	if sc.Personal {
+		// The basket service acts for a team member; a personal scope has
+		// no team, which is a refusal, not an outage.
+		return subject{}, &glovojoin.Refusal{Err: scope.RequireTeam(sc), Reason: "resolver:personal_scope"}
 	}
 	if sc.PrincipalID == "" || sc.Tenant == "" || sc.PrincipalID != u.PrincipalID() {
 		return subject{}, refusal(glovo.CodeUnavailable, "dependency_unavailable:resolver_scope")
