@@ -188,6 +188,10 @@ func TestRequestAndListReleaseGrant(t *testing.T) {
 	// Who may not read.
 	list(ownerUser, "7.0.0", http.StatusForbidden)
 	list(gitopsCI("mctlhq/mctl-gitops/.github/workflows/release-deploy.yaml@refs/heads/feature"), "7.0.0", http.StatusForbidden)
+	// A branch named "x@refs/heads/main": the workflow ref ends like main's.
+	list(gitopsCI("mctlhq/mctl-gitops/.github/workflows/release-deploy.yaml@refs/heads/x@refs/heads/main"), "7.0.0", http.StatusForbidden)
+	list(gitopsCI("mctlhq/mctl-gitops/.github/workflows/sub/x.yaml@refs/heads/main"), "7.0.0", http.StatusForbidden)
+	list(gitopsCI("mctlhq/mctl-gitops/.github/workflows/@refs/heads/main"), "7.0.0", http.StatusForbidden)
 	list(gitopsCI("mctlhq/other/.github/workflows/x.yaml@refs/heads/main"), "7.0.0", http.StatusForbidden)
 	// Another repository calling a reusable workflow of mctl-gitops on main:
 	// job_workflow_ref names mctl-gitops, the token's repository does not.

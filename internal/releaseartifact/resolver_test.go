@@ -146,7 +146,8 @@ func (f *fake) server() *httptest.Server {
 			w.WriteHeader(f.tokenStatus)
 			return
 		}
-		if !(hasBasic && pass == "pull-cred") && !(f.anonymousOK && !hasBasic) {
+		authorized := (hasBasic && pass == "pull-cred") || (f.anonymousOK && !hasBasic)
+		if !authorized {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}

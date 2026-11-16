@@ -85,12 +85,22 @@ func (o *ReleaseGrantOptions) ttl() time.Duration {
 
 // releaseGrantReader is a CI principal of the reader repository running a
 // workflow from that repository's main branch.
+//
+// job_workflow_ref is <repo>/.github/workflows/<file>@<git ref>. It is split
+// at the first "@" after the workflow directory and the git ref must be
+// exactly refs/heads/main: a suffix match would accept a branch named
+// "x@refs/heads/main" (git allows "@" in branch names), whose
+// job_workflow_ref ends in "@refs/heads/main" too.
 func (o *ReleaseGrantOptions) releaseGrantReader(u *auth.User) bool {
 	if o == nil || o.ReaderRepository == "" || !u.IsCI() || u.CIRepository() != o.ReaderRepository {
 		return false
 	}
-	ref := u.CIJobWorkflowRef()
-	return strings.HasPrefix(ref, o.ReaderRepository+"/.github/workflows/") && strings.HasSuffix(ref, "@refs/heads/main")
+	rest, ok := strings.CutPrefix(u.CIJobWorkflowRef(), o.ReaderRepository+"/.github/workflows/")
+	if !ok {
+		return false
+	}
+	file, gitRef, ok := strings.Cut(rest, "@")
+	return ok && file != "" && !strings.Contains(file, "/") && gitRef == "refs/heads/main"
 }
 
 // ciReleaseGrantReadAllowed is the one release route a CI principal may

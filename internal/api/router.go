@@ -53,7 +53,10 @@ import (
 
 // Options holds all dependencies for the API router.
 type Options struct {
-	Signup                        *SignupOptions
+	Signup *SignupOptions
+	// GlovoC2KillSwitch mounts the admin route that flips the mctl-glovo
+	// runtime kill switch; nil leaves it unmounted (404).
+	GlovoC2KillSwitch             *GlovoC2KillSwitch
 	CustomerDeletion              *CustomerDeletionOptions
 	CustomerTenantDeletionPending func(context.Context, string) (bool, error)
 
@@ -743,6 +746,9 @@ func NewRouter(opts Options) http.Handler {
 			r.Post("/admin/signup/requests/{id}/decision", h.DecideSignupRequest)
 			r.Get("/admin/signup/capacity", h.GetSignupCapacity)
 			r.Post("/admin/signup/capacity", h.SetSignupCapacity)
+			if opts.GlovoC2KillSwitch.mounted() {
+				r.Post(glovoC2KillSwitchPath, h.SetGlovoC2KillSwitch)
+			}
 			r.Post("/surface-principals/signup-claim", h.ClaimSignup)
 			r.Post("/internal/customer-deletions/{tenant}/{principal}/cancel", h.CancelCustomerDeletion)
 			r.Post("/internal/customer-deletions/{tenant}/{principal}/{stage}", h.AdvanceCustomerDeletion)
