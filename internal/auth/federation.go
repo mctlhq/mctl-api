@@ -176,8 +176,11 @@ var ErrProviderContractViolation = errors.New("provider returned identity outsid
 var reservedProviderNames = map[string]bool{
 	ProviderGitHub:  true,
 	ProviderService: true,
-	ProviderDev:     true,
-	ProviderAgent:   true,
+	// Only a customers token the identity hook proved yields it (customer.go);
+	// a provider named "google" would mint Google principals at will.
+	ProviderGoogle: true,
+	ProviderDev:    true,
+	ProviderAgent:  true,
 	// Only githubActionsProvider may declare it (NewRegistry exempts that
 	// type), so no MCTL_OIDC_PROVIDERS entry can mint a CI principal.
 	ProviderGitHubActions: true,

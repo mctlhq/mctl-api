@@ -456,8 +456,11 @@ func (s *Store) ResolveCustomer(ctx context.Context, id auth.Identity) (*Princip
 	if id.Customer == nil {
 		return nil, fmt.Errorf("%w: not a customer identity", ErrInvalid)
 	}
-	if id.Provider == auth.ProviderGitHub || id.Kind != auth.KindHuman {
+	if id.Provider == auth.ProviderGitHub || id.Provider == auth.ProviderGoogle || id.Kind != auth.KindHuman {
 		return nil, fmt.Errorf("%w: a customer identity is a human ZITADEL identity", ErrInvalid)
+	}
+	if p := id.Customer.Provider; p != auth.ProviderGitHub && p != auth.ProviderGoogle {
+		return nil, fmt.Errorf("%w: a customer proof of provider %q", ErrInvalid, p)
 	}
 	// A deleted IdP subject remains refused even while its signed JWT is
 	// cryptographically valid. A later signup has a different ZITADEL subject.
@@ -468,7 +471,7 @@ func (s *Store) ResolveCustomer(ctx context.Context, id auth.Identity) (*Princip
 	if deleted {
 		return nil, fmt.Errorf("%w: customer account deletion", auth.ErrIdentityRefused)
 	}
-	p, err := s.Provision(ctx, id.Customer.GitHubIdentity())
+	p, err := s.Provision(ctx, id.Customer.Identity())
 	if err != nil {
 		return nil, err
 	}

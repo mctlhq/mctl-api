@@ -111,6 +111,13 @@ type OAuthZitadelOptions struct {
 	// the instance login page, which has no GitHub button. Empty offers
 	// no customer entry and leaves the sign-in as it was.
 	CustomersGitHubIdPID string
+	// CustomersGoogleIdPID is the ZITADEL id of the customers
+	// organization's Google IdP (ZITADEL_HOOK_GOOGLE_IDP_ID, mctl-api#1079).
+	// With it and CustomersOrgID both set, the chooser also offers "Sign in
+	// with Google", and the callback accepts a customer whose identity hook
+	// proved a Google subject. Empty, as until the IdP exists, offers no
+	// Google entry and refuses a Google customer token as unproven.
+	CustomersGoogleIdPID string
 	// RedirectBaseURL replaces the public base URL in the redirect_uri sent
 	// to ZITADEL (OAUTH_ZITADEL_REDIRECT_BASE_URL). It exists for a local
 	// end-to-end run behind a tunnel whose host changes every start: the
@@ -125,6 +132,9 @@ const (
 	// oauthUpstreamCustomer is the chooser's customer entry: the ZITADEL
 	// upstream, started in the customers organization at its GitHub IdP.
 	oauthUpstreamCustomer = "customer"
+	// oauthUpstreamCustomerGoogle is the same entry at the customers
+	// organization's Google IdP (mctl-api#1079).
+	oauthUpstreamCustomerGoogle = "customer_google"
 	// oauthUpstreamZitadelCustomer is the upstream label of a ZITADEL
 	// sign-in that resolved to a customer.
 	oauthUpstreamZitadelCustomer = "zitadel_customer"
@@ -175,6 +185,23 @@ func (z *oauthZitadel) offersCustomers() bool {
 	return z != nil && z.opts.CustomersOrgID != "" && z.opts.CustomersGitHubIdPID != ""
 }
 
+// offersGoogleCustomers is offersCustomers for the Google IdP.
+func (z *oauthZitadel) offersGoogleCustomers() bool {
+	return z != nil && z.opts.CustomersOrgID != "" && z.opts.CustomersGoogleIdPID != ""
+}
+
+// customerIdPID is the customers IdP a customer choice names, or "" when
+// that choice is not offered.
+func (z *oauthZitadel) customerIdPID(choice string) string {
+	switch {
+	case choice == oauthUpstreamCustomer && z.offersCustomers():
+		return z.opts.CustomersGitHubIdPID
+	case choice == oauthUpstreamCustomerGoogle && z.offersGoogleCustomers():
+		return z.opts.CustomersGoogleIdPID
+	}
+	return ""
+}
+
 func (z *oauthZitadel) oauthConfig(p *oidc.Provider, baseURL string) *oauth2.Config {
 	// The authorize request and the code exchange both come through here,
 	// so the redirect_uri they send cannot differ.
@@ -223,43 +250,55 @@ func renderOAuthPage(w http.ResponseWriter, status int, d oauthPageData) {
 // A request that has not chosen yet gets the chooser page and ok=false when
 // there is a choice to make: under "both", and under "zitadel" once the
 // customer entry is offered. The choice comes back as the same request plus
-// upstream=. customer reports the customer entry, which is the ZITADEL
-// upstream started in the customers organization at its GitHub IdP.
+// upstream=. customerIdP is the customers IdP of a customer entry, which is
+// the ZITADEL upstream started in the customers organization at that IdP
+// (GitHub, or Google once configured); "" for any other choice.
 //
 // The customer choice only shapes the request to ZITADEL. Whether the
 // person signs in as a customer is decided in the callback from the
 // verified ID token's organization, so choosing it grants nothing; it is
 // still refused where it is not offered, rather than quietly becoming a
 // staff sign-in.
-func (h *Handlers) pickOAuthUpstream(w http.ResponseWriter, r *http.Request) (upstream string, customer, ok bool) {
+func (h *Handlers) pickOAuthUpstream(w http.ResponseWriter, r *http.Request) (upstream, customerIdP string, ok bool) {
 	mode := h.opts.OAuthUpstream
-	customers := mode.allows(auth.UpstreamZitadel) && h.oauthZitadel.offersCustomers()
+	zitadel := mode.allows(auth.UpstreamZitadel)
+	githubCustomers := zitadel && h.oauthZitadel.offersCustomers()
+	googleCustomers := zitadel && h.oauthZitadel.offersGoogleCustomers()
+	customers := githubCustomers || googleCustomers
 	chosen := r.URL.Query().Get(oauthUpstreamParam)
-	if chosen == oauthUpstreamCustomer {
-		if !customers {
+	if chosen == oauthUpstreamCustomer || chosen == oauthUpstreamCustomerGoogle {
+		idp := ""
+		if zitadel {
+			idp = h.oauthZitadel.customerIdPID(chosen)
+		}
+		if idp == "" {
+			which := "GitHub"
+			if chosen == oauthUpstreamCustomerGoogle {
+				which = "Google"
+			}
 			// Answered directly, not through oauthError like the other
 			// refusals in handleOAuthAuthorize: this choice is only ever
 			// made by a person on the chooser page, so the browser is
 			// where it must be explained, and the client would get only
 			// an opaque error for an option it never offered.
 			renderOAuthPage(w, http.StatusBadRequest, oauthPageData{Title: "Sign-in option not available", Lines: []string{
-				"GitHub sign-in for customers is not available on this server. Start the connection again from your client.",
+				which + " sign-in for customers is not available on this server. Start the connection again from your client.",
 			}})
-			return "", false, false
+			return "", "", false
 		}
-		return auth.UpstreamZitadel, true, true
+		return auth.UpstreamZitadel, idp, true
 	}
 	switch mode {
 	case OAuthUpstreamZitadel:
 		if !customers || chosen == auth.UpstreamZitadel {
-			return auth.UpstreamZitadel, false, true
+			return auth.UpstreamZitadel, "", true
 		}
 	case OAuthUpstreamBoth:
 		if mode.allows(chosen) {
-			return chosen, false, true
+			return chosen, "", true
 		}
 	default:
-		return auth.UpstreamGitHub, false, true
+		return auth.UpstreamGitHub, "", true
 	}
 	choose := func(u string) string {
 		q := r.URL.Query()
@@ -273,15 +312,28 @@ func (h *Handlers) pickOAuthUpstream(w http.ResponseWriter, r *http.Request) (up
 		Primary: staff,
 	}
 	if customers {
+		github := &oauthPageLink{Href: choose(oauthUpstreamCustomer), Text: "Sign in with GitHub"}
+		google := &oauthPageLink{Href: choose(oauthUpstreamCustomerGoogle), Text: "Sign in with Google"}
+		account := "your GitHub account"
+		switch {
+		case githubCustomers && googleCustomers:
+			account = "your GitHub or Google account"
+			d.Primary = github
+			d.More = []oauthPageLink{*google}
+		case googleCustomers:
+			account = "your Google account"
+			d.Primary = google
+		default:
+			d.Primary = github
+		}
 		d.Lines = []string{
-			"Customers: sign in with your GitHub account.",
+			"Customers: sign in with " + account + ".",
 			"MCTL staff and partner accounts: use Sign in with MCTL account.",
 		}
-		d.Primary = &oauthPageLink{Href: choose(oauthUpstreamCustomer), Text: "Sign in with GitHub"}
-		// Not "staff": partner organizations sign in here too, and the
-		// GitHub entry would make them a stray customers account that
+		// Not "staff": partner organizations sign in here too, and a
+		// customer entry would make them a stray customers account that
 		// conflicts with their existing principal.
-		d.More = []oauthPageLink{{Href: staff.Href, Text: "Sign in with MCTL account"}}
+		d.More = append(d.More, oauthPageLink{Href: staff.Href, Text: "Sign in with MCTL account"})
 	}
 	if mode == OAuthUpstreamBoth {
 		if customers {
@@ -290,18 +342,19 @@ func (h *Handlers) pickOAuthUpstream(w http.ResponseWriter, r *http.Request) (up
 		d.Secondary = &oauthPageLink{Href: choose(auth.UpstreamGitHub), Text: "Sign in with GitHub (legacy, being retired)"}
 	}
 	renderOAuthPage(w, http.StatusOK, d)
-	return "", false, false
+	return "", "", false
 }
 
 // startZitadelAuthorize sends a validated authorization to ZITADEL.
-// customer starts it in the customers organization at its GitHub IdP.
-func (h *Handlers) startZitadelAuthorize(w http.ResponseWriter, r *http.Request, clientID, redirectURI, clientState, codeChallenge, resource string, customer bool) {
+// A non-empty customerIdP starts it in the customers organization at that
+// IdP, which must be one the server offers.
+func (h *Handlers) startZitadelAuthorize(w http.ResponseWriter, r *http.Request, clientID, redirectURI, clientState, codeChallenge, resource, customerIdP string) {
 	o, z := h.opts.OAuthServer, h.oauthZitadel
 	if z == nil {
 		http.Error(w, "ZITADEL sign-in is not configured", http.StatusServiceUnavailable)
 		return
 	}
-	if customer && !z.offersCustomers() {
+	if customerIdP != "" && customerIdP != z.customerIdPID(oauthUpstreamCustomer) && customerIdP != z.customerIdPID(oauthUpstreamCustomerGoogle) {
 		// pickOAuthUpstream already refuses this; a scope naming an empty
 		// organization or IdP must never be sent.
 		http.Error(w, "customer sign-in is not configured", http.StatusServiceUnavailable)
@@ -331,13 +384,13 @@ func (h *Handlers) startZitadelAuthorize(w http.ResponseWriter, r *http.Request,
 	// No prompt=login: an existing ZITADEL session is the single sign-on
 	// this upstream is for. Freshness matters to linking, not to sign-in.
 	cfg := z.oauthConfig(prov, o.BaseURL)
-	if customer {
+	if customerIdP != "" {
 		// The same two scopes mctl.ai sends (mctl-web cloudflare-worker/
-		// zitadel.js): ZITADEL skips its login page and goes to GitHub.
+		// zitadel.js): ZITADEL skips its login page and goes to the IdP.
 		// Only the authorize request carries them; the staff entry and
 		// the code exchange are unchanged.
 		cfg.Scopes = append(cfg.Scopes,
-			auth.ScopeOrgIDPrefix+z.opts.CustomersOrgID, auth.ScopeIdPIDPrefix+z.opts.CustomersGitHubIdPID)
+			auth.ScopeOrgIDPrefix+z.opts.CustomersOrgID, auth.ScopeIdPIDPrefix+customerIdP)
 	}
 	authURL := cfg.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier), oidc.Nonce(nonce))
 	http.Redirect(w, r, authURL, http.StatusFound)
@@ -449,7 +502,7 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 		if idt.Claims(&owner) == nil && owner[auth.ClaimResourceOwnerID] == z.opts.CustomersOrgID {
 			label = oauthUpstreamZitadelCustomer
 		}
-		customer, stopped := readSigninCustomer(w, idt, z.opts.CustomersOrgID)
+		customer, stopped := readSigninCustomer(w, idt, z.opts.CustomersOrgID, z.offersGoogleCustomers())
 		if stopped != "" {
 			result = stopped
 			return

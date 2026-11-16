@@ -143,3 +143,38 @@ func TestCustomersGitHubIdPWiring(t *testing.T) {
 		}
 	}
 }
+
+// The customers Google IdP (mctl-api#1079) reaches the OAuth chooser and
+// the bearer path only when it belongs to the customers organization of
+// the provider and is a distinct, well-formed ZITADEL id; otherwise
+// nothing about Google is offered or accepted.
+func TestCustomersGoogleIdPWiring(t *testing.T) {
+	const org, gh, goog = "395272528420931285", "395272528420931999", "395272528420932777"
+	oauth := auth.NewOAuthServer("https://api.example", "", "", []byte("k"), nil, nil)
+	cfg := zitadelUpstreamConfig("zitadel")
+	cfg.OIDCProvidersRaw = testCustomersProviders
+	cfg.ZitadelHook.CustomersOrgID, cfg.ZitadelHook.GitHubIdPID, cfg.ZitadelHook.GoogleIdPID = org, gh, goog
+	o := oauthZitadelOptions(cfg, &principals.Store{}, oauth)
+	if o == nil || o.CustomersGoogleIdPID != goog || o.CustomersGitHubIdPID != gh {
+		t.Fatalf("options = %+v, want both customers IdPs", o)
+	}
+	if got := cfg.customersGoogleOrgID(); got != org {
+		t.Fatalf("customersGoogleOrgID = %q, want %s", got, org)
+	}
+	for name, mutate := range map[string]func(*config){
+		"unset":            func(c *config) { c.ZitadelHook.GoogleIdPID = "" },
+		"malformed":        func(c *config) { c.ZitadelHook.GoogleIdPID = "google" },
+		"same as GitHub":   func(c *config) { c.ZitadelHook.GoogleIdPID = gh },
+		"other hook org":   func(c *config) { c.ZitadelHook.CustomersOrgID = "1" },
+		"no customers org": func(c *config) { c.OIDCProvidersRaw = testZitadelProviders },
+	} {
+		c := cfg
+		mutate(&c)
+		if o := oauthZitadelOptions(c, &principals.Store{}, oauth); o != nil && o.CustomersGoogleIdPID != "" {
+			t.Errorf("%s: Google IdP %q offered", name, o.CustomersGoogleIdPID)
+		}
+		if got := c.customersGoogleOrgID(); got != "" {
+			t.Errorf("%s: Google customers accepted for org %q", name, got)
+		}
+	}
+}

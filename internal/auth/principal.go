@@ -35,6 +35,11 @@ const (
 	// ProviderGitHub: subject is the numeric GitHub user id. The login is
 	// display only, because logins can be renamed and then reused.
 	ProviderGitHub = "github"
+	// ProviderGoogle: subject is the Google account's OIDC subject, which
+	// never changes or moves to another account (mctl-api#1079). Only a
+	// customers-organization ZITADEL token whose identity hook proved it
+	// yields one; no provider may mint into it.
+	ProviderGoogle = "google"
 	// ProviderDex: issuer is the token's iss, subject its sub.
 	ProviderDex = "dex"
 	// ProviderService: subject is "mctl-agent", "surface:<name>", the usage
@@ -81,8 +86,8 @@ type Identity struct {
 	Kind    string
 	// Customer is set only on a ZITADEL identity of the customers
 	// organization (customer.go). The resolver then keys the principal on
-	// the GitHub id it carries and links this identity to it, instead of
-	// provisioning a principal for the ZITADEL subject.
+	// the GitHub id or Google subject it carries and links this identity to
+	// it, instead of provisioning a principal for the ZITADEL subject.
 	Customer *CustomerProof
 }
 

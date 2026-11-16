@@ -73,6 +73,35 @@ func (c config) customersGitHubIdPID(entry auth.OIDCProviderConfigEntry) string 
 	return zc.GitHubIdPID
 }
 
+// customersGoogleIdPID is customersGitHubIdPID for the customers Google IdP
+// (ZITADEL_HOOK_GOOGLE_IDP_ID, mctl-api#1079). It decides both whether the
+// OAuth chooser offers "Sign in with Google" and whether a customers token
+// proving a Google subject is accepted at all, on the OAuth callback and as
+// a bearer token. "" (the default, until zitadel-iac creates the IdP)
+// keeps Google customers refused as unproven.
+func (c config) customersGoogleIdPID(entry auth.OIDCProviderConfigEntry) string {
+	zc := c.ZitadelHook
+	if entry.CustomersOrgID == "" || zc.GoogleIdPID == "" {
+		return ""
+	}
+	if zc.CustomersOrgID != entry.CustomersOrgID || !auth.ValidZitadelID(zc.GoogleIdPID) || zc.GoogleIdPID == zc.GitHubIdPID {
+		slog.Warn("OAuth customer Google sign-in not offered: ZITADEL_HOOK_GOOGLE_IDP_ID does not belong to the customers organization of this provider",
+			"provider", entry.Name)
+		return ""
+	}
+	return zc.GoogleIdPID
+}
+
+// customersGoogleOrgID is the customers organization whose Google
+// customers are accepted as bearer tokens, or "" (customersGoogleIdPID).
+func (c config) customersGoogleOrgID() string {
+	entry, err := c.customersProvider()
+	if err != nil || entry == nil || c.customersGoogleIdPID(*entry) == "" {
+		return ""
+	}
+	return entry.CustomersOrgID
+}
+
 // surfaceZitadelOptions wires POST /api/v1/surface-principals/zitadel, or
 // returns nil (the route answers 503) without a customers organization.
 // MCTL_WEB_CLIENT_ID is the client of purpose "create" and
