@@ -30,7 +30,7 @@ func TestGlovoC2KillSwitchConfigDarkAndFailClosed(t *testing.T) {
 		{"GLOVO_C2_KILLSWITCH_ENABLED": "yes"},
 		{"GLOVO_C2_KILLSWITCH_ENABLED": "true"},
 		{"GLOVO_C2_KILLSWITCH_ENABLED": "true", "GLOVO_C2_CONTROL_URL": "http://x"},
-		{"GLOVO_C2_KILLSWITCH_ENABLED": "true", "GLOVO_C2_CONTROL_TOKEN_FILE": "/var/run/glovo/token"},
+		{"GLOVO_C2_KILLSWITCH_ENABLED": "true", "GLOVO_C2_CONTROL_TOKEN_FILE": "/var/run/glovo/token"}, //nolint:gosec // a file path, not a credential
 	} {
 		if k, err := configureGlovoC2KillSwitch(killLookupOf(m)); k != nil || err == nil {
 			t.Fatalf("%v: k=%v err=%v", m, k, err)
@@ -46,7 +46,7 @@ func TestGlovoC2KillSwitchConfigDarkAndFailClosed(t *testing.T) {
 	if k, err := configureGlovoC2KillSwitch(killLookupOf(map[string]string{"GLOVO_C2_KILLSWITCH_ENABLED": "true", "GLOVO_C2_CONTROL_URL": "http://x", "GLOVO_C2_CONTROL_TOKEN": "t"})); k != nil || err == nil {
 		t.Fatalf("static token accepted: k=%v err=%v", k, err)
 	}
-	k, err := configureGlovoC2KillSwitch(killLookupOf(map[string]string{"GLOVO_C2_KILLSWITCH_ENABLED": "true", "GLOVO_C2_CONTROL_URL": "http://x", "GLOVO_C2_CONTROL_TOKEN_FILE": "/var/run/glovo/token"}))
+	k, err := configureGlovoC2KillSwitch(killLookupOf(map[string]string{"GLOVO_C2_KILLSWITCH_ENABLED": "true", "GLOVO_C2_CONTROL_URL": "http://x", "GLOVO_C2_CONTROL_TOKEN_FILE": "/var/run/glovo/token"})) //nolint:gosec // a file path, not a credential
 	if k == nil || err != nil {
 		t.Fatalf("k=%v err=%v", k, err)
 	}

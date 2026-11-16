@@ -29,7 +29,6 @@ import (
 
 type fakeKillSetter struct {
 	calls  []bool
-	state  glovoc2control.State
 	err    error
 	ignore bool // returns a state different from the request
 }

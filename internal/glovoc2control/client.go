@@ -98,7 +98,7 @@ func (c *Client) SetKilled(ctx context.Context, killed bool) (State, error) {
 		// Only a coarse, token-free class is kept; err itself can embed the URL.
 		return State{}, fmt.Errorf("%w: transport failure (%s)", ErrUnknown, transportClass(err))
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		return State{}, fmt.Errorf("%w: upstream status %d", ErrUnknown, resp.StatusCode)
