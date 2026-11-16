@@ -250,19 +250,44 @@ func TestIntentReservedUnreadableFailsClosed(t *testing.T) {
 	}
 }
 
-func TestReservedPrincipalOnlyMemberFailsClosed(t *testing.T) {
+// syntheticPID is shaped like a canonical principal id and names nobody.
+const syntheticPID = "prn_00000000000000000000000000"
+
+// A member recorded with only a principalId reserves no login: it carries
+// no login-keyed grant in any mode, so an unrelated login still creates an
+// account. It used to make the reservation undecidable, which answered 503
+// to every customer account creation while one such entry existed.
+func TestReservedPrincipalOnlyMemberReservesNoLogin(t *testing.T) {
 	for name, tenants := range map[string]fakeTenants{
-		"member": {tenants: []gitops.Tenant{{Name: "acme", Members: []gitops.TenantMember{{PrincipalID: "prn_x"}}}}},
+		"member": {tenants: []gitops.Tenant{{Name: "acme", Members: []gitops.TenantMember{{PrincipalID: syntheticPID}}}}},
 		"team member": {tenants: []gitops.Tenant{{Name: "multi", Teams: []gitops.Team{{Name: "x",
-			Members: []gitops.TenantMember{{PrincipalID: "prn_x"}}}}}}},
+			Members: []gitops.TenantMember{{PrincipalID: syntheticPID}}}}}}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHook(t, tenants, verified, 0)
-			if r := h.Intent(context.Background(), intentBody(idpGitHub, "4242", "bob", "", nil)); r.Status != http.StatusServiceUnavailable {
-				t.Fatalf("intent: status %d (%s), want 503", r.Status, r.Reason)
+			if r := h.Intent(context.Background(), intentBody(idpGitHub, "4242", "bob", "", nil)); r.Reason != "intent_create" {
+				t.Fatalf("intent: status %d reason %s, want intent_create", r.Status, r.Reason)
 			}
-			if r := h.CreateGate(context.Background(), createBodyFrom(t, goodCreate(), loginClient)); r.Status != http.StatusServiceUnavailable {
-				t.Fatalf("gate: status %d (%s), want 503", r.Status, r.Reason)
+			if r := h.CreateGate(context.Background(), createBodyFrom(t, goodCreate(), loginClient)); r.Reason != "gate_customer_create" {
+				t.Fatalf("gate: status %d reason %s, want gate_customer_create", r.Status, r.Reason)
+			}
+		})
+	}
+}
+
+// A principal-only entry must not end the scan: a login member listed after
+// it, at tenant or team level, is still reserved.
+func TestReservedLoginAfterPrincipalOnlyMember(t *testing.T) {
+	tenants := fakeTenants{tenants: []gitops.Tenant{
+		{Name: "acme", Members: []gitops.TenantMember{{PrincipalID: syntheticPID}, {UserID: "alice"}}},
+		{Name: "multi", Teams: []gitops.Team{{Name: "x",
+			Members: []gitops.TenantMember{{PrincipalID: syntheticPID}, {UserID: "TeamUser"}}}}},
+	}}
+	for _, login := range []string{"alice", "teamuser"} {
+		t.Run(login, func(t *testing.T) {
+			h := newHook(t, tenants, verified, 0)
+			if r := h.Intent(context.Background(), intentBody(idpGitHub, "4242", login, "", nil)); r.Reason != "intent_login_reserved" {
+				t.Fatalf("intent: status %d reason %s, want intent_login_reserved", r.Status, r.Reason)
 			}
 		})
 	}

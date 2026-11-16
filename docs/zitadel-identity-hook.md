@@ -108,11 +108,15 @@ A login is reserved **at creation** when it matches, case-insensitively:
 4. any tenant or team member `userId` in the gitops checkout.
 
 Tenant data is read with `gitops.Reader.ListTenantsStrict`. A member recorded
-with only a `principalId` (no `userId`) makes the reservation undecidable, so
-it is `503` as well; every member in gitops carries a `userId` today, and the
-api#377 migration must keep it until this check resolves principals. A checkout that
-never synced, is older than 10 minutes, is missing, empty, or holds a tenant
-that does not parse is an error (`503`), never an empty list.
+with only a `principalId` (no `userId`) reserves no login. The reservation
+protects grants keyed on a login, and such an entry has none in any
+`TENANT_AUTHZ_MODE`: principal mode grants it by `principalId`, and legacy and
+shadow match an empty `userId` against nothing. Its holder's principal is
+bound to their GitHub numeric id, so a new account that takes the same login
+is a different principal and gains nothing from the entry. Members listed
+after it are still checked. A checkout that never synced, is older than 10
+minutes, is missing, empty, or holds a tenant that does not parse is an error
+(`503`), never an empty list.
 
 Sources 3 and 4 apply only at creation. A customer who later becomes a
 tenant member under their own login must not lock themselves out.

@@ -569,15 +569,19 @@ func validEmail(s string) bool {
 	return at > 0 && at < len(s)-1 && !strings.ContainsAny(s, " \t\r\n")
 }
 
-// memberHasLogin reports whether a tenant member's login equals login. A
-// member recorded with only a principalId has a login the checkout does not
-// state, so the reservation cannot be decided: that is an error, not "not
-// reserved".
-func memberHasLogin(tenant string, m gitops.TenantMember, login string) (bool, error) {
-	if m.UserID == "" {
-		return false, fmt.Errorf("tenant %q: member without userId", tenant)
-	}
-	return strings.EqualFold(m.UserID, login), nil
+// memberHasLogin reports whether a tenant member's login equals login.
+//
+// A member recorded with only a principalId reserves no login. The
+// reservation protects grants keyed on a login, and such an entry has none
+// in any TENANT_AUTHZ_MODE: principal mode grants it by principalId, and
+// legacy and shadow match an empty userId against nothing
+// (gitops.matchLogin). Its holder's principal is bound to their GitHub
+// numeric id, so a new account under the same login is a different
+// principal and gains nothing from the entry. Refusing the check instead
+// would answer 503 to every customer account creation while any such entry
+// exists.
+func memberHasLogin(m gitops.TenantMember, login string) bool {
+	return m.UserID != "" && strings.EqualFold(m.UserID, login)
 }
 
 // loginReservedAtCreation reports whether a new customers account may not
@@ -601,14 +605,14 @@ func (h *Hook) loginReservedAtCreation(login string) (bool, error) {
 			return true, nil
 		}
 		for _, m := range t.Members {
-			if reserved, err := memberHasLogin(t.Name, m, login); reserved || err != nil {
-				return reserved, err
+			if memberHasLogin(m, login) {
+				return true, nil
 			}
 		}
 		for _, team := range t.Teams {
 			for _, m := range team.Members {
-				if reserved, err := memberHasLogin(t.Name, m, login); reserved || err != nil {
-					return reserved, err
+				if memberHasLogin(m, login) {
+					return true, nil
 				}
 			}
 		}
