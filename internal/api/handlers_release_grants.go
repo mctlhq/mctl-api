@@ -227,16 +227,19 @@ func (h *Handlers) ListReleaseGrants(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !slices.Contains(o.Repositories, repo) {
+		h.releaseGrantAudit(r, user, "release.grant.list", "denied", codeReleaseGrantInvalid+": repository not enabled", params)
 		writeErrorCode(w, http.StatusBadRequest, codeReleaseGrantInvalid, "release grants are not enabled for this repository", nil)
 		return
 	}
 	rows, err := h.opts.WorkItems.ReleaseApprovals(r.Context(), repo, version, 0)
 	switch {
 	case errors.Is(err, workitems.ErrInvalid):
+		h.releaseGrantAudit(r, user, "release.grant.list", "denied", codeReleaseGrantInvalid, params)
 		writeErrorCode(w, http.StatusBadRequest, codeReleaseGrantInvalid, err.Error(), nil)
 		return
 	case err != nil:
 		slog.Error("release grant: list", "repository", repo, "version", version, "error", err)
+		h.releaseGrantAudit(r, user, "release.grant.list", "error", codeReleaseGrantStore, params)
 		writeErrorCode(w, http.StatusServiceUnavailable, codeReleaseGrantStore, "release grants could not be read", nil)
 		return
 	}
@@ -245,6 +248,8 @@ func (h *Handlers) ListReleaseGrants(w http.ResponseWriter, r *http.Request) {
 		art, err := workitems.ReleaseArtifactOf(&rows[i])
 		if err != nil {
 			slog.Error("release grant: inconsistent record", "id", rows[i].ID, "error", err)
+			params["approval_id"] = rows[i].ID
+			h.releaseGrantAudit(r, user, "release.grant.list", "error", codeReleaseGrantInconsistent, params)
 			writeErrorCode(w, http.StatusInternalServerError, codeReleaseGrantInconsistent,
 				"a release grant record does not reproduce its digest", map[string]any{"approval_id": rows[i].ID})
 			return

@@ -15,14 +15,19 @@ import (
 //
 //	RELEASE_GRANTS_REPOSITORIES       comma-separated owner/name, default mctlhq/mctl-api
 //	RELEASE_GRANTS_READER_REPOSITORY  the release gate's repository, default mctlhq/mctl-gitops
+//	RELEASE_GRANTS_REGISTRY_TOKEN_FILE a file holding a GHCR credential with
+//	                                  read:packages, read per use; unset asks
+//	                                  GHCR for an anonymous pull token
 //
-// The resolver reads tags and GHCR images with the GitOps GitHub credential,
-// which therefore needs to read the repository's contents and pull its
-// package. Without it every request answers 503, never a pass.
+// Tags are read with the GitOps GitHub credential. GHCR accepts neither that
+// GitHub App installation token nor fine-grained tokens, so a private
+// package needs its own credential. Without a working one every request
+// answers 503, never a pass.
 type releaseGrantEnv struct {
 	Enabled      bool
 	Repositories string
 	Reader       string
+	RegistryFile string
 }
 
 func releaseGrantEnvFromOS() releaseGrantEnv {
@@ -30,6 +35,7 @@ func releaseGrantEnvFromOS() releaseGrantEnv {
 		Enabled:      os.Getenv("RELEASE_GRANTS_ENABLED") == "true",
 		Repositories: os.Getenv("RELEASE_GRANTS_REPOSITORIES"),
 		Reader:       os.Getenv("RELEASE_GRANTS_READER_REPOSITORY"),
+		RegistryFile: os.Getenv("RELEASE_GRANTS_REGISTRY_TOKEN_FILE"),
 	}
 }
 
@@ -48,7 +54,7 @@ func releaseGrantOptions(env releaseGrantEnv, token ghtoken.Source, haveLedger b
 		}
 	}
 	return &mctlapi.ReleaseGrantOptions{
-		Resolver:         &releaseartifact.Resolver{Token: token},
+		Resolver:         &releaseartifact.Resolver{Token: token, RegistryToken: ghtoken.File(env.RegistryFile)},
 		Repositories:     repos,
 		ReaderRepository: strings.ToLower(envDefault(env.Reader, "mctlhq/mctl-gitops")),
 	}

@@ -61,6 +61,11 @@ type fake struct {
 	lieDigest bool
 	// corruptConfig serves config bytes that do not hash to their digest.
 	corruptConfig bool
+	// anonymousOK lets /token answer a request without credentials (a
+	// public package); otherwise it requires the registry credential.
+	anonymousOK bool
+	// tagDigestEntry lists the second image by a tag instead of a digest.
+	tagDigestEntry bool
 
 	sawBasic string
 }
@@ -89,6 +94,9 @@ func (f *fake) server() *httptest.Server {
 	entries := []map[string]any{{"mediaType": mediaOCIManifest, "digest": digestOf(image),
 		"platform": map[string]string{"architecture": "amd64", "os": "linux"}}}
 	switch {
+	case f.tagDigestEntry:
+		entries = append(entries, map[string]any{"mediaType": mediaOCIManifest, "digest": testVersion,
+			"platform": map[string]string{"architecture": "arm64", "os": "linux"}})
 	case f.extraImage:
 		entries = append(entries, map[string]any{"mediaType": mediaOCIManifest, "digest": digestOf(image2),
 			"platform": map[string]string{"architecture": "arm64", "os": "linux"}})
@@ -132,10 +140,14 @@ func (f *fake) server() *httptest.Server {
 		_ = json.NewEncoder(w).Encode(map[string]any{"object": map[string]string{"type": "commit", "sha": testCommit}})
 	})
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
-		_, pass, _ := r.BasicAuth()
+		_, pass, hasBasic := r.BasicAuth()
 		f.sawBasic = pass
 		if f.tokenStatus != 0 {
 			w.WriteHeader(f.tokenStatus)
+			return
+		}
+		if !(hasBasic && pass == "pull-cred") && !(f.anonymousOK && !hasBasic) {
+			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
 		if r.URL.Query().Get("scope") != "repository:"+testRepo+":pull" {
@@ -194,7 +206,8 @@ func (f *fake) server() *httptest.Server {
 
 func (f *fake) resolver() *Resolver {
 	srv := f.server()
-	return &Resolver{Token: ghtoken.Static("gh-token"), GitHubAPI: srv.URL, Registry: srv.URL, Client: srv.Client()}
+	return &Resolver{Token: ghtoken.Static("gh-token"), RegistryToken: ghtoken.Static("pull-cred"),
+		GitHubAPI: srv.URL, Registry: srv.URL, Client: srv.Client()}
 }
 
 func TestResolveRefusals(t *testing.T) {
@@ -210,6 +223,7 @@ func TestResolveRefusals(t *testing.T) {
 		{"registry token refused", fake{tokenStatus: http.StatusForbidden}, ErrUnavailable, ""},
 		{"image missing", fake{manifestStatus: http.StatusNotFound}, ErrNotFound, ""},
 		{"registry error", fake{manifestStatus: http.StatusInternalServerError}, ErrUnavailable, ""},
+		{"index entry named by a tag", fake{tagDigestEntry: true}, ErrUnavailable, "lists an entry with digest"},
 		{"announced digest lies", fake{lieDigest: true}, ErrUnavailable, ""},
 		{"config bytes do not hash", fake{corruptConfig: true}, ErrUnavailable, ""},
 		{"label names another commit", fake{revision: otherCommit}, ErrMismatch, ""},
@@ -261,8 +275,48 @@ func TestResolve(t *testing.T) {
 			!strings.HasPrefix(art.ImageDigest, "sha256:") || len(art.ImageDigest) != 71 {
 			t.Errorf("artifact %+v", art)
 		}
-		if f.sawBasic != "gh-token" {
-			t.Errorf("registry token was not requested with the GitHub credential")
+		if f.sawBasic != "pull-cred" {
+			t.Errorf("registry token was not requested with the registry credential: %q", f.sawBasic)
 		}
+	}
+}
+
+// The registry credential is separate from the GitHub one. Without it the
+// resolver asks for an anonymous pull token: that works for a public package
+// and fails closed for a private one.
+func TestResolveRegistryCredential(t *testing.T) {
+	public := &fake{t: t, anonymousOK: true}
+	r := public.resolver()
+	r.RegistryToken = nil
+	if _, err := r.Resolve(context.Background(), testRepo, testVersion); err != nil {
+		t.Fatalf("anonymous pull of a public package: %v", err)
+	}
+	if public.sawBasic != "" {
+		t.Errorf("an anonymous request sent a credential: %q", public.sawBasic)
+	}
+
+	r = (&fake{t: t}).resolver()
+	r.RegistryToken = nil
+	if _, err := r.Resolve(context.Background(), testRepo, testVersion); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("anonymous pull of a private package: %v, want ErrUnavailable", err)
+	}
+
+	// A configured credential that cannot be read never falls back to an
+	// anonymous pull, even where one would be granted.
+	for name, src := range map[string]ghtoken.Source{
+		"empty value":  func() (string, error) { return "", nil },
+		"missing file": ghtoken.File(t.TempDir() + "/absent"),
+	} {
+		r = (&fake{t: t, anonymousOK: true}).resolver()
+		r.RegistryToken = src
+		if _, err := r.Resolve(context.Background(), testRepo, testVersion); !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("%s registry credential: %v, want ErrUnavailable", name, err)
+		}
+	}
+
+	r = (&fake{t: t}).resolver()
+	r.RegistryToken = ghtoken.Static("gh-token")
+	if _, err := r.Resolve(context.Background(), testRepo, testVersion); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("the GitHub credential used for the registry: %v, want ErrUnavailable", err)
 	}
 }

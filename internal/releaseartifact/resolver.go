@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -59,9 +60,15 @@ const (
 
 // Resolver reads releases from GitHub and GHCR.
 type Resolver struct {
-	// Token is a GitHub credential able to read the repository's tags and
-	// pull its GHCR package. It is read per call (ghtoken).
+	// Token is a GitHub credential able to read the repository's tags. It
+	// is read per call (ghtoken).
 	Token ghtoken.Source
+	// RegistryToken is the credential for the GHCR token exchange (a token
+	// with read:packages). GHCR accepts neither GitHub App installation
+	// tokens nor fine-grained tokens, so it is separate from Token. Nil
+	// requests an anonymous pull token, which GHCR grants only for a public
+	// package; for a private one every Resolve then fails closed.
+	RegistryToken ghtoken.Source
 	// GitHubAPI and Registry override https://api.github.com and
 	// https://ghcr.io (tests only).
 	GitHubAPI string
@@ -108,7 +115,13 @@ func (r *Resolver) Resolve(ctx context.Context, repository, version string) (wor
 	if err != nil {
 		return workitems.ReleaseArtifact{}, err
 	}
-	digest, revisions, err := r.image(ctx, token, repository, version)
+	pullCred := ""
+	if r.RegistryToken != nil {
+		if pullCred, err = ghtoken.Resolve(r.RegistryToken); err != nil || pullCred == "" {
+			return workitems.ReleaseArtifact{}, unavailable("the registry credential could not be read")
+		}
+	}
+	digest, revisions, err := r.image(ctx, pullCred, repository, version)
 	if err != nil {
 		return workitems.ReleaseArtifact{}, err
 	}
@@ -199,15 +212,17 @@ func (r *Resolver) tagCommit(ctx context.Context, token, repository, version str
 	return strings.ToLower(ref.Object.SHA), nil
 }
 
-// registryToken trades the GitHub credential for a pull token of one
-// repository.
+// registryToken trades the registry credential for a pull token of one
+// repository; an empty credential asks for an anonymous one.
 func (r *Resolver) registryToken(ctx context.Context, token, repository string) (string, error) {
 	q := url.Values{"service": {registryService}, "scope": {"repository:" + repository + ":pull"}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, orDefault(r.Registry, defaultRegistry)+"/token?"+q.Encode(), nil)
 	if err != nil {
 		return "", unavailable("build registry token request: %v", err)
 	}
-	req.SetBasicAuth("x-access-token", token)
+	if token != "" {
+		req.SetBasicAuth("x-access-token", token)
+	}
 	resp, err := r.client().Do(req)
 	if err != nil {
 		return "", unavailable("registry token: %v", err)
@@ -228,6 +243,8 @@ func (r *Resolver) registryToken(ctx context.Context, token, repository string) 
 	}
 	return out.Token, nil
 }
+
+var manifestDigestRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 func sha256Digest(b []byte) string {
 	sum := sha256.Sum256(b)
@@ -341,6 +358,12 @@ func (r *Resolver) image(ctx context.Context, token, repository, version string)
 		// what a node pulls, whatever its annotations say.
 		if d.Annotations["vnd.docker.reference.type"] == attestationRefType && d.Platform != nil && d.Platform.OS == "unknown" {
 			continue
+		}
+		// Fetched only by an exact sha256 digest, so the body is checked
+		// against the reference it was fetched by (fetchManifest), never
+		// read through a mutable reference.
+		if !manifestDigestRe.MatchString(d.Digest) {
+			return "", nil, unavailable("index %s of %s lists an entry with digest %q", digest, repository, d.Digest)
 		}
 		_, m, err := r.fetchManifest(ctx, pull, repository, d.Digest)
 		if err != nil {

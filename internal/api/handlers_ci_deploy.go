@@ -77,7 +77,7 @@ func ciPrincipalGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if user := auth.UserFromContext(r.Context()); user.IsCI() && !ciRouteAllowed(r) {
 			writeErrorCode(w, http.StatusForbidden, codeCIRouteForbidden,
-				"a GitHub Actions principal may only call POST "+ciDeployRoute+" or GET "+ciBuildBindingRoute, nil)
+				"a GitHub Actions principal may only call POST "+ciDeployRoute+", GET "+ciBuildBindingRoute+" or GET "+releaseGrantsPath, nil)
 			return
 		}
 		next.ServeHTTP(w, r)
