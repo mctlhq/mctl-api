@@ -433,7 +433,7 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 		slog.Error("deploy apply: recording the deployment", "plan", p.ID, "approval", spent.ID, "error", err)
 		a.set("error", "error:record_failed")
 		writeErrorCode(w, http.StatusServiceUnavailable, codeDeployApplyUnavailable,
-			"the grant was spent but the deployment could not be recorded, so nothing was submitted; request a new grant", nil)
+			"the grant was spent but the deployment could not be recorded, so nothing was submitted; request a new grant for this plan", nil)
 		return
 	}
 	a.params["deployment_id"] = rec.ID
@@ -443,6 +443,7 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 	auditParams["grant_ref"], auditParams["subject_principal_id"] = spent.ID, spent.DecidedByPrincipalID
 	submitCtx, executionEnded, prepared := h.prepareSubmitExecution(w, r, user, op, p.Tenant, input)
 	if !prepared {
+		h.recordSubmission(r.Context(), rec.ID, nil, operations.NotCreated(errors.New("the run's execution was not prepared")))
 		h.logAudit(r, audit.Entry{UserID: user.ID, Operation: previewDeployOp, Parameters: auditParams, Status: "failed",
 			RiskLevel: string(op.RiskLevel), Message: "could not create the run's execution; nothing was submitted"})
 		a.set("error", "error:execution_not_prepared")
@@ -456,7 +457,7 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 			RiskLevel: string(op.RiskLevel), Message: "submit failed: " + err.Error()})
 		a.set("error", "error:submit_failed")
 		writeErrorCode(w, http.StatusBadGateway, codeDeployApplyUnavailable,
-			"the grant was spent but preview-deploy could not be submitted; request a new grant"+note, nil)
+			"the grant was spent but preview-deploy could not be submitted, and this plan cannot be applied again; create a new plan and request a grant for it"+note, nil)
 		return
 	}
 	h.logAudit(r, audit.Entry{UserID: user.ID, Operation: previewDeployOp, Parameters: auditParams,
