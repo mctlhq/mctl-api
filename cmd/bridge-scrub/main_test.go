@@ -24,9 +24,9 @@ import (
 
 func TestScrubCLIRequiresExplicitConsentAndScopedDatabase(t *testing.T) {
 	cases := []struct {
-		name	string
-		args	[]string
-		want	string
+		name string
+		args []string
+		want string
 	}{
 		{name: "no confirmation", args: nil, want: "--confirm=scrub-legacy-results"},
 		{name: "unrecognized confirmation", args: []string{"--confirm=do-something-else"}, want: "--confirm=scrub-legacy-results"},
@@ -90,10 +90,10 @@ func TestScrubBatchesProgressAndZeroRemaining(t *testing.T) {
 
 func TestScrubBatchesNoProgressAndCapAreFailures(t *testing.T) {
 	cases := []struct {
-		name	string
-		n	int
-		rem	int64
-		want	string
+		name string
+		n    int
+		rem  int64
+		want string
 	}{
 		{name: "locked", n: 0, rem: 5, want: "no progress"},
 		{name: "capped", n: 1, rem: 4, want: "stopped at batch cap"},

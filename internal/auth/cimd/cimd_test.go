@@ -82,17 +82,17 @@ func TestRedirectAllowed(t *testing.T) {
 	}
 	no := []string{
 		"https://app.example.com:444/cb", "https://app.example.com/other",
-		"https://127.0.0.1:5000/callback",       // scheme
-		"http://127.0.0.1:5000/other",           // path
-		"http://127.0.0.1:5000/callback?y=2",    // query
-		"http://[::1]:5555/cb",                  // query missing
-		"http://[::1]:5555/cb?x=2",              // query differs
-		"http://localhost:62049/cb",             // localhost path differs
-		"http://LOCALHOST:62049/callback",       // other spelling
-		"http://localhost.:62049/callback",      // other spelling
-		"http://localhost:8000/callback?x=1",    // localhost query differs
-		"https://localhost:62049/callback",      // scheme
-		"http://u@localhost:62049/callback",     // userinfo
+		"https://127.0.0.1:5000/callback",    // scheme
+		"http://127.0.0.1:5000/other",        // path
+		"http://127.0.0.1:5000/callback?y=2", // query
+		"http://[::1]:5555/cb",               // query missing
+		"http://[::1]:5555/cb?x=2",           // query differs
+		"http://localhost:62049/cb",          // localhost path differs
+		"http://LOCALHOST:62049/callback",    // other spelling
+		"http://localhost.:62049/callback",   // other spelling
+		"http://localhost:8000/callback?x=1", // localhost query differs
+		"https://localhost:62049/callback",   // scheme
+		"http://u@localhost:62049/callback",  // userinfo
 		"http://localhost.evil.com:62049/callback",
 		"http://[::1]:5/callback",               // other host's path
 		"http://u@127.0.0.1:5000/callback",      // userinfo
