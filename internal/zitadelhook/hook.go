@@ -987,11 +987,14 @@ func (h *Hook) gateCreateUser(ctx context.Context, p requestPayload) Result {
 	if err := json.Unmarshal(p.Request, &req); err != nil {
 		return failure("gate_unparsable_request")
 	}
-	linksCustomerIdP := false
+	linksCustomerIdP, linksGoogle := false, false
 	if req.Human != nil {
 		for _, l := range req.Human.IDPLinks {
 			if l.IDPID == h.cfg.GitHubIdPID || h.isGoogleIdP(l.IDPID) {
 				linksCustomerIdP = true
+			}
+			if h.isGoogleIdP(l.IDPID) {
+				linksGoogle = true
 			}
 		}
 	}
@@ -1022,7 +1025,12 @@ func (h *Hook) gateCreateUser(ctx context.Context, p requestPayload) Result {
 	}
 	// A user linked to a customers IdP outside customers would skip every
 	// rule below.
+	// The GitHub reason is kept as it was for dashboards; a Google link gets
+	// its own.
 	if req.OrganizationID != h.cfg.CustomersOrgID {
+		if linksGoogle {
+			return no("gate_google_link_outside_customers")
+		}
 		return no("gate_github_link_outside_customers")
 	}
 	if p.UserID != h.cfg.LoginClientUserID {

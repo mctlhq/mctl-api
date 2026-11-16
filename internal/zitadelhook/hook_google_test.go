@@ -411,3 +411,19 @@ func TestParseCustomerCreateGoogleAllowlist(t *testing.T) {
 		t.Fatal("New must refuse a malformed Google allowlist")
 	}
 }
+
+// A Google link outside customers is refused under its own reason, so logs
+// do not report it as a GitHub one.
+func TestGateGoogleLinkOutsideCustomersReason(t *testing.T) {
+	h, _ := newGoogleHook(t, []string{CreateAnyone})
+	m := goodGoogleCreate()
+	m["organizationId"] = orgAdmins
+	if r := h.CreateGate(context.Background(), createBodyFrom(t, m, loginClient)); r.Reason != "gate_google_link_outside_customers" {
+		t.Fatalf("reason %s", r.Reason)
+	}
+	g := goodCreate()
+	g["organizationId"] = orgAdmins
+	if r := h.CreateGate(context.Background(), createBodyFrom(t, g, loginClient)); r.Reason != "gate_github_link_outside_customers" {
+		t.Fatalf("GitHub reason changed: %s", r.Reason)
+	}
+}
