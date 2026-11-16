@@ -70,6 +70,8 @@ func TestSpecParses(t *testing.T) {
 		"/api/v1/glovo/facade/connections/{id}/revoke":                              {"post"},
 		"/api/v1/glovo/facade/connections/{id}/reconnect":                           {"post"},
 		"/api/v1/glovo/tenants/{tenant}/installation":                               {"put", "delete"},
+		"/api/v1/glovo/link-consent":                                                {"get", "put", "delete"},
+		"/api/v1/assistants/glovo-consent/v1/principals/{principal_id}":             {"get"},
 		"/api/v1/glovo/worker/check":                                                {"post"},
 		"/api/v1/glovo/worker/connections/{id}/activate":                            {"post"},
 		"/api/v1/glovo/worker/connections/{id}/expire":                              {"post"},

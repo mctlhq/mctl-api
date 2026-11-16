@@ -334,6 +334,10 @@ type Options struct {
 	// configured (GLOVO_BASKET_JOIN_ENABLED and the service identity), leaves
 	// it unmounted (404).
 	GlovoBasketJoin *GlovoBasketJoinRoutes
+	// GlovoConsent configures the Glovo link consent routes (mctl-glovo
+	// epic #11, C2-1c): dark unless cmd/api builds it from
+	// GLOVO_CONSENT_ENABLED and every dependency.
+	GlovoConsent *GlovoConsentRoutes
 	// Glovo configures the synthetic Glovo connection routes (mctl-api#961):
 	// facade, tenant installation and worker. Nil, or Enabled false, makes
 	// every one of them answer 503 not_ready.
@@ -623,6 +627,9 @@ func NewRouter(opts Options) http.Handler {
 		// The basket service reaches only the basket join prefix, and
 		// nothing else reaches that prefix.
 		r.Use(h.glovoBasketJoinGate)
+		// The Glovo consent reader reaches only the consent read prefix, and
+		// nothing else reaches that prefix.
+		r.Use(h.glovoConsentGate)
 		// A surface principal's ceiling counts every call it makes, so it
 		// runs before the gate: the gate turns a relay call into the linked
 		// human, and a refused relay still costs a link lookup.
@@ -992,6 +999,16 @@ func NewRouter(opts Options) http.Handler {
 			// directions, the routes carry their own limiters.
 			if opts.GlovoBasketJoin.mounted() {
 				r.Mount(glovoBasketJoinMount, opts.GlovoBasketJoin.Handler)
+			}
+
+			// Glovo link consent (mctl-glovo epic #11, C2-1c): dark. The
+			// human routes act on the caller's own principal only; the read
+			// prefix is the consent reader's alone (glovoConsentGate).
+			if opts.GlovoConsent.mounted() {
+				r.Get(glovoConsentHumanPath, h.GetGlovoLinkConsent)
+				r.Put(glovoConsentHumanPath, h.PutGlovoLinkConsent)
+				r.Delete(glovoConsentHumanPath, h.DeleteGlovoLinkConsent)
+				r.Get(glovoConsentMount+"/principals/{principal_id}", h.ReadGlovoLinkConsent)
 			}
 
 			// Glovo pilot allowlist: per (tenant, principal), human admins only.
