@@ -82,6 +82,18 @@ func TestDeployPlanTools_ForwardAndSurfaceCodes(t *testing.T) {
 		t.Fatalf("%s %s", gotMethod, gotPath)
 	}
 
+	_, getDep := srv.toolGetDeployment()
+	res, err = getDep(context.Background(), mcplib.CallToolRequest{Params: mcplib.CallToolParams{Arguments: map[string]any{"id": "dep_a/b"}}})
+	if err != nil || res.IsError {
+		t.Fatalf("%v %+v", err, res)
+	}
+	if gotMethod != http.MethodGet || gotPath != "/api/v1/deploy/deployments/dep_a/b" {
+		t.Fatalf("%s %s", gotMethod, gotPath)
+	}
+	if res, _ = getDep(context.Background(), mcplib.CallToolRequest{Params: mcplib.CallToolParams{Arguments: map[string]any{}}}); !res.IsError {
+		t.Fatal("a missing id must be a tool error")
+	}
+
 	status = http.StatusUnprocessableEntity
 	res, _ = plan(context.Background(), mcplib.CallToolRequest{Params: mcplib.CallToolParams{Arguments: map[string]any{"intent": map[string]any{}}}})
 	text := ""

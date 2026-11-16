@@ -1830,3 +1830,71 @@ func TestServiceValuesAt(t *testing.T) {
 		t.Fatal("a checkout with no revision must be an error")
 	}
 }
+
+func TestBaseServiceChartValuesAt(t *testing.T) {
+	dir, r := setupTempRepo(t)
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	r.head = sha
+
+	r.lastSync.Store(time.Now().UnixNano())
+	// No chart is a broken checkout, not "no defaults".
+	if _, err := r.BaseServiceChartValuesAt(sha); err == nil {
+		t.Fatal("a missing chart must be an error")
+	}
+	chart := filepath.Join(dir, "platform-gitops", "helm-charts", "base-service")
+	if err := os.MkdirAll(chart, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(chart, "values.yaml"), []byte("replicaCount: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// With the chart in place: a checkout that never synced does not answer.
+	r.lastSync.Store(0)
+	if _, err := r.BaseServiceChartValuesAt(sha); err == nil {
+		t.Fatal("a checkout that never synced must not answer")
+	}
+	r.lastSync.Store(time.Now().UnixNano())
+	data, err := r.BaseServiceChartValuesAt(sha)
+	if err != nil || string(data) != "replicaCount: 1\n" {
+		t.Fatalf("chart = %q, %v", data, err)
+	}
+
+	// Another revision than the service values were read at is an error.
+	for _, rev := range []string{"", "fedcba9876543210fedcba9876543210fedcba98"} {
+		if _, err := r.BaseServiceChartValuesAt(rev); err == nil {
+			t.Fatalf("revision %q must be refused", rev)
+		}
+	}
+
+	r.lastSync.Store(time.Now().Add(-CheckoutMaxAge - time.Minute).UnixNano())
+	if _, err := r.BaseServiceChartValuesAt(sha); err == nil {
+		t.Fatal("a stale checkout must not answer")
+	}
+	r.lastSync.Store(time.Now().UnixNano())
+
+	// A symlinked values.yaml or chart directory is an error.
+	other := filepath.Join(dir, "elsewhere.yaml")
+	if err := os.WriteFile(other, []byte("replicaCount: 9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(chart, "values.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, filepath.Join(chart, "values.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.BaseServiceChartValuesAt(sha); err == nil {
+		t.Fatal("a symlinked values.yaml must be an error")
+	}
+	if err := os.RemoveAll(chart); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(dir, chart); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.BaseServiceChartValuesAt(sha); err == nil {
+		t.Fatal("a symlinked chart directory must be an error")
+	}
+
+}

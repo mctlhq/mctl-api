@@ -423,8 +423,14 @@ func TestConsentPageInShellNamesPrincipalWithoutLogin(t *testing.T) {
 	if !strings.Contains(body, "signed in as "+testPRN+".") {
 		t.Errorf("page does not name the principal:\n%s", body)
 	}
+	if !strings.Contains(body, `onsubmit="if(this.submitted)return false;this.submitted=true;setTimeout(()=>{for(const b of this.querySelectorAll('button'))b.disabled=true},0)"`) {
+		t.Errorf("consent form missing onsubmit double-click protection:\n%s", body)
+	}
 	if h := rec.Header().Get("Content-Security-Policy"); !strings.Contains(h, "form-action 'self' https://app.example.com;") {
 		t.Errorf("CSP %q does not allow the consent form and its redirect to the client", h)
+	}
+	if h := rec.Header().Get("Content-Security-Policy"); !strings.Contains(h, "script-src 'unsafe-inline';") {
+		t.Errorf("CSP %q missing script-src 'unsafe-inline' for onsubmit handler", h)
 	}
 }
 

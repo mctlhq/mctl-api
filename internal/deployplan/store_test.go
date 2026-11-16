@@ -21,7 +21,23 @@ func newStoreForTest(t *testing.T) *Store {
 		t.Fatalf("NewStore: %v", err)
 	}
 	wipe := func() {
-		if _, err := s.pool.Exec(ctx, "DELETE FROM deploy_plans WHERE tenant = 'storetest'"); err != nil {
+		// Records cannot be deleted (a trigger refuses it); only test
+		// cleanup bypasses that, with triggers off for its own session.
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		for _, q := range []string{
+			"SET LOCAL session_replication_role = replica",
+			"DELETE FROM deploy_records WHERE tenant = 'storetest'",
+			"DELETE FROM deploy_plans WHERE tenant = 'storetest'",
+		} {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
 			t.Fatal(err)
 		}
 	}

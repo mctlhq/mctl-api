@@ -141,6 +141,12 @@ func TestGlovoConsentListsEligibleUnselected(t *testing.T) {
 	if !strings.Contains(body, `name="decision" value="deny" formnovalidate`) {
 		t.Fatalf("deny button must carry formnovalidate: %s", body)
 	}
+	if !strings.Contains(body, `onsubmit="if(this.submitted)return false;this.submitted=true;setTimeout(()=>{for(const b of this.querySelectorAll('button'))b.disabled=true},0)"`) {
+		t.Fatalf("team consent form missing onsubmit double-click protection: %s", body)
+	}
+	if h := rec.Header().Get("Content-Security-Policy"); !strings.Contains(h, "script-src 'unsafe-inline';") {
+		t.Fatalf("CSP %q missing script-src 'unsafe-inline' for onsubmit handler", h)
+	}
 	// T1: approve without a team is refused, no code.
 	p := locationParams(t, e.decide(token, "approve", cookie))
 	if p.Get("error") != "access_denied" || p.Get("code") != "" {

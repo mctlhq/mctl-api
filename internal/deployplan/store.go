@@ -87,6 +87,10 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 		pgshared.Release(pool)
 		return nil, fmt.Errorf("deployplan: create schema: %w", err)
 	}
+	if _, err := pool.Exec(ctx, recordSchema); err != nil {
+		pgshared.Release(pool)
+		return nil, fmt.Errorf("deployplan: create record schema: %w", err)
+	}
 	slog.Info("deploy-plan store initialized")
 	return &Store{pool: pool, now: func() time.Time { return time.Now().UTC() }}, nil
 }

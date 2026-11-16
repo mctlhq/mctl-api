@@ -711,6 +711,8 @@ func main() {
 	// WORK_ITEMS_DB_URL may name a DML-only role (mctl-api#1006). Nil makes
 	// POST /api/v1/deploy/plan and GET /api/v1/deploy/plans/{id} answer 503.
 	var deployPlans mctlapi.DeployPlanStore
+	var deployRecords mctlapi.DeployRecordStore
+	var deployRecordReconcileStore *deployplan.Store
 	if deployPlanDBURL := deployPlanStoreSource(); !workItemsDisabled && deployPlanDBURL != "" {
 		dps, dpErr := initStore(initCtx, storeFailures, "deploy plans", func(ctx context.Context) (*deployplan.Store, error) {
 			return deployplan.NewStore(ctx, deployPlanDBURL)
@@ -719,6 +721,8 @@ func main() {
 			slog.Error("deploy-plan store init failed; deploy plan routes will return 503", "error", dpErr)
 		} else {
 			deployPlans = dps
+			deployRecords = dps
+			deployRecordReconcileStore = dps
 			defer dps.Close()
 		}
 	}
@@ -1494,6 +1498,7 @@ func main() {
 		SourceRepoBindings:             gitReader,
 		DeployContentReader:            deployanalyze.NewHTTPReader("", gitOpsTokenSource()),
 		DeployPlans:                    deployPlans,
+		DeployRecords:                  deployRecords,
 		DeployGitops:                   gitReader,
 		ArgoCD:                         argoClient,
 		AuditLog:                       auditLog,
@@ -1619,6 +1624,12 @@ func main() {
 	// that run in a tenant namespace (deploy-service, provision-database,
 	// retire-service, previews, scaling, rollbacks) never send one.
 	go mctlapi.StartAuditReconciler(ctx, auditLog, executor, registry)
+
+	// Complete deployment records from Argo: resolve ambiguous submits and
+	// record each run's result and image digest (mctl-api#1047).
+	if deployRecordReconcileStore != nil {
+		go mctlapi.StartDeployRecordReconciler(ctx, deployRecordReconcileStore, executor, registry)
+	}
 
 	// Every store is built by now, so this is the process's whole share of
 	// the database roles' connection limits (gitops shared-pg cluster.yaml).

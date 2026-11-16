@@ -1,5 +1,22 @@
 # Changelog
 
+## [4.161.3](https://github.com/mctlhq/mctl-api/compare/4.161.2...4.161.3) (2026-11-16)
+
+
+### Bug Fixes
+
+* **deploy:** compare plan values over the chart defaults ([1718e17](https://github.com/mctlhq/mctl-api/commit/1718e17d41594cb2dbb75ae9fd69b3f824c1b171))
+* **deploy:** compare plan values over the chart defaults ([f73f237](https://github.com/mctlhq/mctl-api/commit/f73f2377e11406b8c4fe6a36dd3768c55f4896cd))
+
+## [4.161.2](https://github.com/mctlhq/mctl-api/compare/4.161.1...4.161.2) (2026-11-16)
+
+
+### Bug Fixes
+
+* **deployplan:** sync compiler and golden fixtures with mctl-gitops preview deploy ([cefd0a9](https://github.com/mctlhq/mctl-api/commit/cefd0a9633a08488094d8b55767fcfc6df106f68))
+* **oauth:** prevent double submit on consent forms ([9927944](https://github.com/mctlhq/mctl-api/commit/9927944c344d438fbcbbc3735fb6785e8d1889fd))
+* **oauth:** prevent double submit on consent forms ([952a8bd](https://github.com/mctlhq/mctl-api/commit/952a8bd956334f245f3b00d4ee1073ae176f6c74))
+
 ## [4.161.1](https://github.com/mctlhq/mctl-api/compare/4.161.0...4.161.1) (2026-11-15)
 
 

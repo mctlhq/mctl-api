@@ -196,9 +196,48 @@ A preview apply of a stored deploy plan (`dpl_`) is authorized by a
   grant to the plan's intent hash, revalidates the decider, spends the grant
   once, and submits `preview-deploy` with the plan's preview id and gitops
   commit. `preview_id` and `gitops_ref` are refused in any execute body.
+- Deployment record (mctl-api#1047). Right after the grant is spent and before
+  anything is submitted, apply writes one `deploy_records` row (`dep_...`):
+  the plan and its digest, revision, gitops commit, preview id and host, the
+  grant and the principal who decided it, and who applied it. If that write
+  fails, nothing is submitted and the spent grant is not reusable
+  (`503 deploy_apply_unavailable`; create a new plan and request a grant for
+  it, since a requester's grant for a plan is that one spent grant). A plan
+  applies once:
+  grants are per requester, so a second holder's apply is refused with
+  `409 deploy_plan_already_applied` before their grant is spent (or, if it
+  loses a race after that check, after the spend with nothing submitted), and
+  a record store that cannot be read refuses with 503 before the spend.
+  Status moves once, from `submitting` to `submitted` (with the workflow
+  name) or to `submit_failed` only when the submit certainly created no
+  workflow; an ambiguous submit error leaves it in `submitting` (outcome not
+  recorded), since a guess could not be corrected later.
+- Completing the record (mctl-api#1047 slice 2a). The workflow's name is
+  fixed before the submit and kept with the record, and a reconciler in
+  mctl-api reads that workflow from Argo every minute. A `submitting` record
+  becomes `submitted` once its workflow is seen, or `submit_failed` once it
+  has been absent for 10 minutes (and less than Argo's 72 h retention, past
+  which absence proves nothing). A `submitted` record gets `run_result`
+  (`succeeded` for phase Succeeded, `failed` for Failed or Error) and
+  `image_digest` from the workflow output `image_digest`
+  (`wft-preview-deploy`, mctlhq/mctl-gitops#2707) when it is a well-formed
+  `sha256:` digest. Both are written once. A workflow that cannot be read
+  changes nothing; a submitted record whose workflow was collected before it
+  was seen keeps no result. `health` stays `unknown` until the health gate
+  (mctlhq/mctl-gitops#2653) reports it.
+  `image_digest`, `argo_revision`, `health` and `health_url` are written once
+  when observed; until then health reads `unknown`, which never means healthy.
+  Planned and granted fields are immutable and rows are never deleted
+  (database triggers). The 202 answer carries `deployment_id`.
+  `GET /api/v1/deploy/deployments/{id}` (MCP `mctl_get_deployment`) takes a
+  `dep_` or the applied plan's `dpl_` id; tenant members and admins only,
+  anyone else gets `404 deployment_not_found`, and an unreadable store answers
+  `503 deploy_record_store_unavailable`.
 - Faithful or refused: `preview-deploy` renders the service's GitOps values,
   not the intent's runtime changes. A plan whose intent changes the values
-  (`intent_changes_values`, compared before redaction), or builds from a
+  (`intent_changes_values`, compared before redaction and over the
+  base-service chart defaults at the plan's gitops commit, so a value the
+  chart already defaults to is not a change), or builds from a
   context other than the repository root, is refused with
   `deploy_apply_not_reproducible`.
 - Agent-deploy tenants have no other way (mctl-api#1031). A tenant whose

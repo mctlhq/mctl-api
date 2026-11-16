@@ -77,6 +77,32 @@ func (s *Server) toolGetDeployPlan() (mcplib.Tool, server.ToolHandlerFunc) {
 	return tool, handler
 }
 
+func (s *Server) toolGetDeployment() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_get_deployment",
+		mcplib.WithTitleAnnotation("Get Deployment"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(true),
+		mcplib.WithDescription(`Read the record of one applied deploy plan: the plan and its digest, the source revision and gitops commit, the grant and the owner who decided it, who applied it, the submitted workflow and its status (submitting, submitted, submit_failed).
+
+Fields the platform has not observed yet are absent, and health reads unknown until it is observed. Read unknown as unknown, never as healthy. Visible to members of the tenant and platform admins; any other caller gets deployment_not_found.`),
+		mcplib.WithString("id", mcplib.Required(), mcplib.Description("Deployment id (dep_...) from mctl_deploy_apply, or the applied plan's id (dpl_...)")),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		id, err := req.RequireString("id")
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		out, err := s.deployPlanRequest(ctx, http.MethodGet, "/api/v1/deploy/deployments/"+url.PathEscape(id), nil)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to read deployment: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(out)), nil
+	}
+	return tool, handler
+}
+
 func (s *Server) toolRequestDeployApproval() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_request_deploy_approval",
 		mcplib.WithTitleAnnotation("Request Deploy Approval"),

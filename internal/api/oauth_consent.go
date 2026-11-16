@@ -197,7 +197,7 @@ func (h *Handlers) requestConsent(w http.ResponseWriter, r *http.Request, c auth
 	if account == "" {
 		account = c.PrincipalID
 	}
-	renderShellPage(w, http.StatusOK, "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'"+consentFormTarget(redirect)+"; frame-ancestors 'none'", consentPage,
+	renderShellPage(w, http.StatusOK, "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'"+consentFormTarget(redirect)+"; frame-ancestors 'none'", consentPage,
 		shellData{Title: "Authorize this application?", Lines: []string{
 			"An application is asking to access MCTL on your behalf.",
 			"Application: " + name,
@@ -252,7 +252,7 @@ type consentPageData struct{ Token string }
 
 // consentPage is drawn in the page shell, which escapes every line,
 // client_name included.
-var consentPage = shellPage("consent", `<form class="actions" method="post" action="/oauth/consent">
+var consentPage = shellPage("consent", `<form class="actions" method="post" action="/oauth/consent" onsubmit="if(this.submitted)return false;this.submitted=true;setTimeout(()=>{for(const b of this.querySelectorAll('button'))b.disabled=true},0)">
 <input type="hidden" name="token" value="{{.Token}}">
 <button type="submit" name="decision" value="approve">Allow</button>
 <button class="secondary" type="submit" name="decision" value="deny">Deny</button>
@@ -403,7 +403,7 @@ func (h *Handlers) requestTeamConsent(w http.ResponseWriter, r *http.Request, c 
 	if account == "" {
 		account = c.PrincipalID
 	}
-	renderShellPage(w, http.StatusOK, "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'"+consentFormTarget(redirect)+"; frame-ancestors 'none'", teamConsentPage,
+	renderShellPage(w, http.StatusOK, "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'"+consentFormTarget(redirect)+"; frame-ancestors 'none'", teamConsentPage,
 		shellData{Title: "Choose a team", Lines: []string{
 			"An application is asking to use Glovo on your behalf.",
 			"Application: " + name,
@@ -423,7 +423,7 @@ type teamConsentPageData struct {
 }
 
 // teamConsentPage lists the eligible teams as radio buttons, none checked.
-var teamConsentPage = shellPage("team-consent", `<form class="actions" method="post" action="/oauth/consent">
+var teamConsentPage = shellPage("team-consent", `<form class="actions" method="post" action="/oauth/consent" onsubmit="if(this.submitted)return false;this.submitted=true;setTimeout(()=>{for(const b of this.querySelectorAll('button'))b.disabled=true},0)">
 <input type="hidden" name="token" value="{{.Token}}">
 {{range .Teams}}<label><input type="radio" name="tenant" value="{{.}}" required> {{.}}</label>
 {{end}}<button type="submit" name="decision" value="approve">Allow</button>
