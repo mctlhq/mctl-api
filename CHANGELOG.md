@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.161.3](https://github.com/mctlhq/mctl-api/compare/4.161.2...4.161.3) (2026-11-16)
+
+
+### Bug Fixes
+
+* **deploy:** compare plan values over the chart defaults ([1718e17](https://github.com/mctlhq/mctl-api/commit/1718e17d41594cb2dbb75ae9fd69b3f824c1b171))
+* **deploy:** compare plan values over the chart defaults ([f73f237](https://github.com/mctlhq/mctl-api/commit/f73f2377e11406b8c4fe6a36dd3768c55f4896cd))
+
 ## [4.161.2](https://github.com/mctlhq/mctl-api/compare/4.161.1...4.161.2) (2026-11-16)
 
 
