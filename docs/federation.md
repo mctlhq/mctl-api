@@ -329,6 +329,40 @@ set, or the boot is refused.
 The portal resolves a customer with `POST /api/v1/surface-principals/zitadel`
 (see `docs/principals.md`).
 
+#### Google customers (mctl-api#1079, slice 2)
+
+A customer may sign in with Google instead. The identity hook then issues
+`mctl:idp=google` and `mctl:google_sub` (the Google subject) and no
+`mctl:github_*` claim (`docs/zitadel-identity-hook.md`, "Google").
+
+- **Dark by default.** A Google customer is accepted only when
+  `ZITADEL_HOOK_GOOGLE_IDP_ID` is a ZITADEL resource id, differs from
+  `ZITADEL_HOOK_GITHUB_IDP_ID`, and `ZITADEL_HOOK_CUSTOMERS_ORG_ID` equals
+  the entry's `customers_org_id`. The same condition decides the OAuth
+  chooser's "Sign in with Google" and the bearer path (only the entry of
+  that organization accepts Google tokens). Otherwise a Google token is
+  refused as unproven, exactly as before. zitadel-iac writes the id only
+  while `customers_google_idp_enabled` is on, so a release is inert until
+  that flip.
+- **Keyed on the Google subject.** The principal is the one holding
+  `('google', '', <sub>)`, provisioned on first sight, then linked to the
+  ZITADEL identity, as for GitHub. The provider name `google` is reserved:
+  no `MCTL_OIDC_PROVIDERS` entry may use it. A Google identity has no
+  display name (the token carries neither email nor name) and never an
+  issuer, so the namespace has one row per subject.
+- **Separate from GitHub.** A Google subject and a GitHub id with the same
+  digits are different principals. Linking is off in ZITADEL, so a person
+  who signs in once with each gets two customers accounts and two
+  principals; a ZITADEL subject already linked to a GitHub customer is a
+  conflict (409), never re-keyed.
+- **Mixed tokens are refused.** A Google token with any `mctl:github_*`
+  claim, or a GitHub token with `mctl:google_sub`, is unproven.
+- **Not yet everywhere.** `POST /api/v1/surface-principals/zitadel`, signup
+  requests and customer deletion still read GitHub proofs only; a Google
+  customer gets `customer_unproven` there until slice 3. A Google customer
+  has no GitHub login, so routes that act as the caller's GitHub login
+  (repository sync) answer as for any principal without one.
+
 ## GitHub Actions: CI deploys (mctl-api#530)
 
 A tenant's CI deploys with the job's own GitHub Actions OIDC token instead of

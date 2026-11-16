@@ -2689,7 +2689,8 @@ func oauthZitadelOptions(cfg config, store *principals.Store, oauth *auth.OAuthS
 		ProviderName: entry.Name, Issuer: entry.Issuer,
 		ClientID: cfg.OAuthZitadelClientID, ClientSecret: cfg.OAuthZitadelClientSecret,
 		CustomersOrgID: entry.CustomersOrgID, CustomersGitHubIdPID: cfg.customersGitHubIdPID(entry),
-		RedirectBaseURL: cfg.OAuthZitadelRedirectBaseURL,
+		CustomersGoogleIdPID: cfg.customersGoogleIdPID(entry),
+		RedirectBaseURL:      cfg.OAuthZitadelRedirectBaseURL,
 	}
 	if opts.RedirectBaseURL != "" {
 		slog.Warn("OAuth ZITADEL upstream redirects to OAUTH_ZITADEL_REDIRECT_BASE_URL, not SELF_URL; development only",
@@ -2703,7 +2704,7 @@ func oauthZitadelOptions(cfg config, store *principals.Store, oauth *auth.OAuthS
 		slog.Error("OAuth ZITADEL upstream has no principal store; ZITADEL sign-ins will answer 503")
 	}
 	slog.Info("OAuth ZITADEL upstream enabled", "provider", entry.Name, "issuer", entry.Issuer,
-		"customer_github_signin", opts.CustomersGitHubIdPID != "")
+		"customer_github_signin", opts.CustomersGitHubIdPID != "", "customer_google_signin", opts.CustomersGoogleIdPID != "")
 	return opts
 }
 
@@ -2721,6 +2722,9 @@ func buildFederationRegistry(ctx context.Context, cfg config, validator *auth.Gi
 		DexIssuerURL:     cfg.DexIssuerURL,
 		DexClientID:      cfg.DexClientID,
 		GitHubActionsRaw: cfg.GitHubActionsOIDCRaw,
+		// Google customers are accepted where the OAuth chooser offers
+		// them, and nowhere before (mctl-api#1079).
+		CustomersGoogleOrgID: cfg.customersGoogleOrgID(),
 	}, validator, resolver, oauth)
 }
 

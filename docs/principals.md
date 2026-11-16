@@ -259,6 +259,19 @@ authorization: whether the person signs in as a customer is decided in the
 callback from the verified ID token's organization (see "Self-service
 customers" in `docs/federation.md`), so choosing the entry grants nothing.
 
+**Google (mctl-api#1079).** When `ZITADEL_HOOK_GOOGLE_IDP_ID` also names
+the customers organization's Google IdP (a distinct ZITADEL resource id),
+the chooser adds `upstream=customer_google`, "Sign in with Google", after
+the GitHub entry, and its first line reads "Customers: sign in with your
+GitHub or Google account." It sends the same organization scope with
+`urn:zitadel:iam:org:idp:id:<google idp id>`. With only the Google IdP
+configured, Google is the primary customer entry. Without the Google id the
+chooser is byte-for-byte the GitHub one, and `upstream=customer_google`
+answers 400 like any customer choice that is not offered. The callback
+accepts a Google customer under the same condition, and resolves it to the
+principal of its Google subject (`docs/federation.md`, "Google customers").
+The startup log line also says `customer_google_signin=true|false`.
+
 It fails closed. Without both ids, or with the hook's organization unset or
 different, no customer entry is offered and `zitadel` goes straight to
 ZITADEL as before. An `upstream=customer` that is not offered answers 400

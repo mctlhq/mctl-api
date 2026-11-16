@@ -46,7 +46,7 @@ func TestReadCustomerProof(t *testing.T) {
 	if err != nil || got == nil || got.GitHubID != "268260640" || got.GitHubLogin != "mctl-reviewer" {
 		t.Fatalf("customer = %+v, %v", got, err)
 	}
-	if id := got.GitHubIdentity(); id.Provider != ProviderGitHub || id.Subject != "268260640" || id.Kind != KindHuman {
+	if id := got.Identity(); id.Provider != ProviderGitHub || id.Subject != "268260640" || id.Kind != KindHuman {
 		t.Fatalf("GitHub identity = %+v", id)
 	}
 
@@ -184,5 +184,102 @@ func TestZitadelCustomerGetsNoGroupsEvenWhenTheEntryGrantsThem(t *testing.T) {
 	// the test above is not passing for want of a groups claim.
 	if v := verify(map[string]any{ClaimResourceOwnerID: "1", "groups": []any{"acme"}}); len(v.Claims.Groups) != 1 {
 		t.Fatalf("other organization groups = %v, want [acme]", v.Claims.Groups)
+	}
+}
+
+func googleClaims(over map[string]any) map[string]any {
+	c := map[string]any{
+		ClaimResourceOwnerID:   testCustomersOrg,
+		ClaimCustomerOrg:       "customers",
+		ClaimCustomerIdP:       "google",
+		ClaimCustomerGoogleSub: "109876543210987654321",
+	}
+	for k, v := range over {
+		if v == nil {
+			delete(c, k)
+			continue
+		}
+		c[k] = v
+	}
+	return c
+}
+
+// A Google proof (mctl-api#1079) is read only where it is enabled, keys the
+// principal on the Google subject, and never mixes with GitHub claims.
+func TestReadCustomerProofGoogle(t *testing.T) {
+	got, err := ReadCustomerProofWith(googleClaims(nil), testCustomersOrg, true)
+	if err != nil || got == nil || got.Provider != ProviderGoogle || got.GoogleSub != "109876543210987654321" || got.GitHubID != "" {
+		t.Fatalf("Google proof = %+v, %v", got, err)
+	}
+	if id := got.Identity(); id.Provider != ProviderGoogle || id.Subject != "109876543210987654321" || id.Issuer != "" || id.Display != "" || id.Kind != KindHuman {
+		t.Fatalf("Google identity = %+v", id)
+	}
+	// Dark by default: the GitHub-only reader and a disabled one refuse it.
+	if _, err := ReadCustomerProof(googleClaims(nil), testCustomersOrg); !errors.Is(err, ErrCustomerUnproven) {
+		t.Fatalf("ReadCustomerProof(google) = %v, want ErrCustomerUnproven", err)
+	}
+	if _, err := ReadCustomerProofWith(googleClaims(nil), testCustomersOrg, false); !errors.Is(err, ErrCustomerUnproven) {
+		t.Fatalf("Google disabled = %v, want ErrCustomerUnproven", err)
+	}
+	for name, over := range map[string]map[string]any{
+		"no subject":         {ClaimCustomerGoogleSub: nil},
+		"empty subject":      {ClaimCustomerGoogleSub: ""},
+		"non-numeric":        {ClaimCustomerGoogleSub: "abc"},
+		"numeric type":       {ClaimCustomerGoogleSub: 123},
+		"too long":           {ClaimCustomerGoogleSub: strings.Repeat("1", 65)},
+		"with GitHub id":     {ClaimCustomerGitHubID: "268260640"},
+		"with GitHub login":  {ClaimCustomerGitHubLogin: "mctl-reviewer"},
+		"hook refused":       {ClaimCustomerRefused: "ambiguous_identity"},
+		"other customer org": {ClaimCustomerOrg: "admins"},
+	} {
+		if p, err := ReadCustomerProofWith(googleClaims(over), testCustomersOrg, true); !errors.Is(err, ErrCustomerUnproven) {
+			t.Errorf("%s: %+v, %v; want ErrCustomerUnproven", name, p, err)
+		}
+	}
+	// A GitHub token carrying a Google subject is refused too, Google on
+	// or off.
+	for _, google := range []bool{false, true} {
+		if p, err := ReadCustomerProofWith(customerClaims(map[string]any{ClaimCustomerGoogleSub: "1"}), testCustomersOrg, google); !errors.Is(err, ErrCustomerUnproven) {
+			t.Errorf("GitHub token with a Google subject (google=%v): %+v, %v", google, p, err)
+		}
+	}
+	// GitHub proofs are unchanged with Google on.
+	if p, err := ReadCustomerProofWith(customerClaims(nil), testCustomersOrg, true); err != nil || p.Provider != ProviderGitHub || p.GitHubID != "268260640" {
+		t.Fatalf("GitHub proof with Google on = %+v, %v", p, err)
+	}
+	// A proof of no known provider yields no provider, never a guess.
+	if id := (CustomerProof{GitHubID: "1", GoogleSub: "2"}).Identity(); id.Provider != "" || id.Subject != "" {
+		t.Fatalf("unknown provider identity = %+v", id)
+	}
+}
+
+// "google" is a reserved provider name: no MCTL_OIDC_PROVIDERS entry may
+// mint into the Google customer namespace.
+func TestGoogleProviderNameIsReserved(t *testing.T) {
+	_, err := ParseOIDCProviders(`[{"name":"google","issuer":"https://accounts.google.com","audiences":["x"]}]`)
+	if err == nil || !strings.Contains(err.Error(), "google") {
+		t.Fatalf("ParseOIDCProviders(google) = %v, want a refusal", err)
+	}
+}
+
+// The bearer path accepts a Google customer only on the entry of the
+// customers organization the registry was told has a Google IdP.
+func TestZitadelEntryGoogleCustomer(t *testing.T) {
+	verify := func(googleOrg string) (*Verified, error) {
+		r := buildZitadelRegistryWith(t, FederationProvidersConfig{OIDCProvidersRaw: zitadelCustomersEntry, CustomersGoogleOrgID: googleOrg},
+			map[string]*oidcVerifiedToken{zitadelIssuer: zitadelToken([]string{zitadelClientID}, googleClaims(nil))})
+		return r.Verify(context.Background(), fakeJWT(zitadelIssuer))
+	}
+	v, err := verify(testCustomersOrg)
+	if err != nil || v.Identity.Customer == nil || v.Identity.Customer.Provider != ProviderGoogle || len(v.Claims.Groups) != 0 {
+		t.Fatalf("Google customer = %+v, %v; want its Google proof", v, err)
+	}
+	if u := userFromVerified(v); u.oidcCustomer == nil || u.oidcCustomer.GoogleSub == "" {
+		t.Fatal("the request user lost the Google proof")
+	}
+	for _, org := range []string{"", "1"} {
+		if _, err := verify(org); !errors.Is(err, ErrCustomerUnproven) {
+			t.Fatalf("Google org %q: err = %v, want ErrCustomerUnproven", org, err)
+		}
 	}
 }

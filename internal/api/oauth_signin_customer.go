@@ -30,23 +30,24 @@ import (
 // a user of another organization. When the sign-in must stop it writes the
 // response and answers the sign-in metric's result: a token that does not
 // name its organization is a broken sign-in, never "not a customer"; a
-// customers token without a proven GitHub identity is refused.
-func readSigninCustomer(w http.ResponseWriter, idt *oidc.IDToken, customersOrgID string) (*auth.CustomerProof, string) {
+// customers token without a proven GitHub identity, or Google identity
+// where acceptGoogle allows one, is refused.
+func readSigninCustomer(w http.ResponseWriter, idt *oidc.IDToken, customersOrgID string, acceptGoogle bool) (*auth.CustomerProof, string) {
 	var claims map[string]any
 	if err := idt.Claims(&claims); err != nil {
 		slog.Warn("oauth: ZITADEL ID token claims unreadable", "error", err)
 		http.Error(w, "the ZITADEL ID token was not valid", http.StatusBadGateway)
 		return nil, "invalid_token"
 	}
-	customer, err := auth.ReadCustomerProof(claims, customersOrgID)
+	customer, err := auth.ReadCustomerProofWith(claims, customersOrgID, acceptGoogle)
 	switch {
 	case err == nil:
 		return customer, ""
 	case errors.Is(err, auth.ErrCustomerUnproven):
-		slog.Warn("oauth: ZITADEL customer sign-in without a proven GitHub identity", "zitadel_subject", idt.Subject, "error", err)
+		slog.Warn("oauth: ZITADEL customer sign-in without a proven identity", "zitadel_subject", idt.Subject, "error", err)
 		renderOAuthPage(w, http.StatusForbidden, oauthPageData{Title: "Sign-in refused", Lines: []string{
-			"Your MCTL account has no GitHub identity MCTL can rely on, so it cannot tell which account you are.",
-			"Sign in again with GitHub. If this keeps happening, contact MCTL support.",
+			"Your MCTL account has no GitHub or Google identity MCTL can rely on, so it cannot tell which account you are.",
+			"Sign in again with the account you signed up with. If this keeps happening, contact MCTL support.",
 		}})
 		return nil, "customer_unproven"
 	default:
@@ -74,13 +75,18 @@ func (h *Handlers) customerSigninPrincipal(w http.ResponseWriter, r *http.Reques
 	}
 	prn, err := h.opts.Principals.ResolvePrincipal(r.Context(), id)
 	if errors.Is(err, principals.ErrCustomerConflict) {
-		slog.Warn("oauth: customer identity conflicts with another principal", "github_id", id.Customer.GitHubID, "zitadel_subject", id.Subject, "error", err)
+		which, idName := "GitHub", "GitHub id"
+		if id.Customer.Provider == auth.ProviderGoogle {
+			which, idName = "Google", "Google account id"
+		}
+		slog.Warn("oauth: customer identity conflicts with another principal", "customer_provider", id.Customer.Provider,
+			"customer_subject", id.Customer.Subject(), "zitadel_subject", id.Subject, "error", err)
 		renderOAuthPage(w, http.StatusConflict, oauthPageData{Title: "Sign-in refused", Lines: []string{
-			"Your MCTL account is already tied to a different MCTL principal than your GitHub account, so MCTL does not guess which one you are.",
+			"Your MCTL account is already tied to a different MCTL principal than your " + which + " account, so MCTL does not guess which one you are.",
 			// The usual cause: a staff or partner user who already has a
 			// principal pressed the customer entry.
-			"If you have an MCTL staff or partner account, start the connection again and choose \"Sign in with MCTL account\" instead of \"Sign in with GitHub\".",
-			"Otherwise ask a platform admin to resolve it, quoting GitHub id " + id.Customer.GitHubID + ".",
+			"If you have an MCTL staff or partner account, start the connection again and choose \"Sign in with MCTL account\" instead of \"Sign in with " + which + "\".",
+			"Otherwise ask a platform admin to resolve it, quoting " + idName + " " + id.Customer.Subject() + ".",
 		}})
 		return "", "customer_conflict"
 	}

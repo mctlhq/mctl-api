@@ -64,7 +64,7 @@ func (f *fakeBackend) Provision(_ context.Context, id auth.Identity) (*Principal
 // customer's GitHub id, as the store does once the link is in place.
 func (f *fakeBackend) ResolveCustomer(ctx context.Context, id auth.Identity) (*Principal, error) {
 	f.customers = append(f.customers, id)
-	return f.Provision(ctx, id.Customer.GitHubIdentity())
+	return f.Provision(ctx, id.Customer.Identity())
 }
 
 func (f *fakeBackend) Get(_ context.Context, id string) (*Principal, error) {
@@ -437,7 +437,7 @@ func TestResolverRoutesCustomerIdentityByGitHubID(t *testing.T) {
 	r := newResolver(b, nil, false)
 	id := auth.Identity{
 		Provider: "zitadel", Issuer: "https://auth.example", Subject: "zsub-1", Display: "alice@mctl.ai", Kind: auth.KindHuman,
-		Customer: &auth.CustomerProof{GitHubID: "4242", GitHubLogin: "alice"},
+		Customer: &auth.CustomerProof{Provider: auth.ProviderGitHub, GitHubID: "4242", GitHubLogin: "alice"},
 	}
 	got, err := r.ResolvePrincipal(context.Background(), id)
 	if err != nil {

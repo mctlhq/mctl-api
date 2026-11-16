@@ -47,6 +47,13 @@ const zitadelEntry = `[{"name":"zitadel","issuer":"` + zitadelIssuer + `","audie
 // signature check replaced by tokens[issuer].
 func buildZitadelRegistry(t *testing.T, raw string, tokens map[string]*oidcVerifiedToken) *Registry {
 	t.Helper()
+	return buildZitadelRegistryWith(t, FederationProvidersConfig{OIDCProvidersRaw: raw}, tokens)
+}
+
+// buildZitadelRegistryWith is buildZitadelRegistry with the rest of cfg
+// (its Dex fields are always the test Dex).
+func buildZitadelRegistryWith(t *testing.T, cfg FederationProvidersConfig, tokens map[string]*oidcVerifiedToken) *Registry {
+	t.Helper()
 	orig := newOIDCProviderFn
 	t.Cleanup(func() { newOIDCProviderFn = orig })
 	newOIDCProviderFn = func(_ context.Context, spec OIDCProviderSpec) (*oidcProvider, error) {
@@ -56,9 +63,8 @@ func buildZitadelRegistry(t *testing.T, raw string, tokens map[string]*oidcVerif
 		}
 		return newOIDCProviderForTest(spec, fv), nil
 	}
-	r, err := BuildFederationRegistry(context.Background(), FederationProvidersConfig{
-		OIDCProvidersRaw: raw, DexIssuerURL: testDexIssuer, DexClientID: "mctl-api",
-	}, nil, nil, nil)
+	cfg.DexIssuerURL, cfg.DexClientID = testDexIssuer, "mctl-api"
+	r, err := BuildFederationRegistry(context.Background(), cfg, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("BuildFederationRegistry: %v", err)
 	}

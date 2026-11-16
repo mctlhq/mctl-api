@@ -154,10 +154,10 @@ read at start.
 ## Google
 
 Slice 1 of mctl-api#1079. With `ZITADEL_HOOK_GOOGLE_IDP_ID` set, the
-customers Google IdP gets the treatment below. Relying parties do not accept
-a Google account yet: `auth.ReadCustomerProof` refuses any customers token
-whose `mctl:idp` is not `github`, so until slice 2 (principal resolution by
-`(google, sub)`) a Google account exists in ZITADEL but signs in nowhere.
+customers Google IdP gets the treatment below. Slice 2 lets mctl-api's OAuth
+sign-in and bearer path accept the resulting tokens under the same id and
+resolve them by `(google, sub)` (`docs/federation.md`, "Google customers");
+the portal route, signup and deletion still accept GitHub only (slice 3).
 
 **Identity.** The OIDC subject (`sub`), stable and never reused by Google.
 The email is never an identity; relying parties must not authorize on it.

@@ -208,6 +208,10 @@ type FederationProvidersConfig struct {
 	// GitHubActionsRaw is MCTL_GITHUB_ACTIONS_OIDC (mctl-api#530). Unset
 	// leaves the GitHub Actions provider unregistered.
 	GitHubActionsRaw string
+	// CustomersGoogleOrgID is the customers organization whose Google IdP is
+	// configured (mctl-api#1079), or "". Only the MCTL_OIDC_PROVIDERS entry
+	// with that customers_org_id accepts Google customer tokens.
+	CustomersGoogleOrgID string
 }
 
 // BuildFederationRegistry builds the full production Registry: the three
@@ -283,6 +287,7 @@ func BuildFederationRegistry(ctx context.Context, cfg FederationProvidersConfig,
 			dexClaimedExplicitly = true
 		}
 		spec := e.spec()
+		spec.CustomersGoogle = cfg.CustomersGoogleOrgID != "" && e.CustomersOrgID == cfg.CustomersGoogleOrgID
 		// Unfiltered "admins" (LegacyDexGroups) only for the trusted Dex
 		// slot: "dex" on the issuer already configured in DEX_ISSUER_URL.
 		// That keeps the documented audit canary (an explicit "dex" entry on

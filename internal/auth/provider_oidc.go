@@ -105,6 +105,12 @@ type OIDCProviderSpec struct {
 	// proven GitHub identity, which becomes Identity.Customer (customer.go).
 	// A token that fails either check is refused.
 	CustomersOrgID string
+	// CustomersGoogle accepts a customers token whose identity hook proved
+	// a Google subject instead of a GitHub id (mctl-api#1079). It is never
+	// parsed from MCTL_OIDC_PROVIDERS: BuildFederationRegistry sets it from
+	// FederationProvidersConfig.CustomersGoogleOrgID, only on the entry of
+	// that customers organization. False refuses such a token as unproven.
+	CustomersGoogle bool
 	// SubjectAudiences accepts, for exactly one verified subject each, an
 	// audience the entry's Audiences do not list (mctl-api#963). A ZITADEL
 	// machine user signing in with its own key gets only the project id in
@@ -291,7 +297,7 @@ func (p *oidcProvider) Verify(ctx context.Context, raw string) (*Verified, error
 
 	var customer *CustomerProof
 	if p.spec.CustomersOrgID != "" {
-		customer, err = ReadCustomerProof(tok.Claims, p.spec.CustomersOrgID)
+		customer, err = ReadCustomerProofWith(tok.Claims, p.spec.CustomersOrgID, p.spec.CustomersGoogle)
 		if err != nil {
 			return nil, fmt.Errorf("%s token refused: %w", p.spec.Name, err)
 		}

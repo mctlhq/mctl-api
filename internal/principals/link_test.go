@@ -573,7 +573,7 @@ func TestMergePrincipalsConcurrentWithAdminRemovalLeavesOne(t *testing.T) {
 
 func customer(sub string, githubID int64, login string) auth.Identity {
 	id := zitadel(sub, login+"@mctl.ai")
-	id.Customer = &auth.CustomerProof{GitHubID: strconv.FormatInt(githubID, 10), GitHubLogin: login}
+	id.Customer = &auth.CustomerProof{Provider: auth.ProviderGitHub, GitHubID: strconv.FormatInt(githubID, 10), GitHubLogin: login}
 	return id
 }
 
@@ -653,7 +653,7 @@ func TestResolveCustomerRefusesASubjectOwnedElsewhere(t *testing.T) {
 	}
 	// Deliberate: the GitHub id's own principal exists after the refusal,
 	// with only its GitHub identity, for an admin to merge into.
-	gh, err := s.Provision(ctx, customer("z1", 7, "bob").Customer.GitHubIdentity())
+	gh, err := s.Provision(ctx, customer("z1", 7, "bob").Customer.Identity())
 	if err != nil || gh.ID == own.ID {
 		t.Fatalf("GitHub principal = %+v, %v", gh, err)
 	}
@@ -747,5 +747,93 @@ func TestResolveCustomerDisabledBetweenProvisionAndLink(t *testing.T) {
 	}
 	if _, _, err := s.LinkedGitHub(ctx, zitadel("z1", "bob")); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("z1 was linked to a disabled principal: %v", err)
+	}
+}
+
+func googleCustomer(sub, googleSub string) auth.Identity {
+	id := zitadel(sub, "google."+googleSub+"@mctl.ai")
+	id.Customer = &auth.CustomerProof{Provider: auth.ProviderGoogle, GoogleSub: googleSub}
+	return id
+}
+
+// mctl-api#1079: a Google customer lands on the principal of the Google
+// subject the hook proved, apart from any GitHub id with the same digits,
+// and a second sign-in finds the same principal.
+func TestResolveCustomerKeysOnTheGoogleSubject(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	p, err := s.ResolveCustomer(ctx, googleCustomer("z1", "1234567"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := s.ResolveCustomer(ctx, googleCustomer("z1", "1234567"))
+	if err != nil || again.ID != p.ID {
+		t.Fatalf("second sign-in = %v (%v), want %s", again, err, p.ID)
+	}
+	ids, _ := s.Identities(ctx, p.ID)
+	var google, zitadelLinked bool
+	for _, x := range ids {
+		switch {
+		case x.Provider == auth.ProviderGoogle && x.Subject == "1234567" && x.Issuer == "" && x.Display == "":
+			google = true
+		case x.Provider == "zitadel" && x.Subject == "z1":
+			zitadelLinked = true
+		case x.Provider == auth.ProviderGitHub:
+			t.Fatalf("a Google customer got a GitHub identity: %+v", x)
+		}
+	}
+	if !google || !zitadelLinked || len(ids) != 2 {
+		t.Fatalf("identities = %+v, want the Google subject and the ZITADEL subject", ids)
+	}
+	gh, err := s.Provision(ctx, github(1234567, "someone"))
+	if err != nil || gh.ID == p.ID {
+		t.Fatalf("GitHub id 1234567 = %v (%v), want a principal other than the Google one", gh, err)
+	}
+	// A GitHub customer with those digits is someone else as well.
+	other, err := s.ResolveCustomer(ctx, customer("z2", 1234567, "someone"))
+	if err != nil || other.ID == p.ID {
+		t.Fatalf("GitHub customer = %v (%v), want a principal other than %s", other, err, p.ID)
+	}
+}
+
+// A ZITADEL subject already tied to a GitHub customer cannot become a
+// Google customer's: the conflict is refused, not resolved by either side.
+func TestResolveCustomerGoogleConflict(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	if _, err := s.ResolveCustomer(ctx, customer("z1", 7, "bob")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ResolveCustomer(ctx, googleCustomer("z1", "99")); !errors.Is(err, ErrCustomerConflict) || !errors.Is(err, auth.ErrIdentityRefused) {
+		t.Fatalf("err = %v, want a refused customer conflict", err)
+	}
+}
+
+// A Google identity is a person's bare numeric subject; a proof of no known
+// provider is refused before anything is written.
+func TestGoogleIdentityShape(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	for name, id := range map[string]auth.Identity{
+		"issuer":      {Provider: auth.ProviderGoogle, Issuer: "https://accounts.google.com", Subject: "1", Kind: auth.KindHuman},
+		"non-numeric": {Provider: auth.ProviderGoogle, Subject: "a1", Kind: auth.KindHuman},
+		"agent":       {Provider: auth.ProviderGoogle, Subject: "1", Kind: auth.KindAgent},
+	} {
+		if _, err := s.Provision(ctx, id); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: err = %v, want ErrInvalid", name, err)
+		}
+	}
+	for name, proof := range map[string]*auth.CustomerProof{
+		"no provider":    {GitHubID: "7", GitHubLogin: "bob"},
+		"other provider": {Provider: "gitlab", GitHubID: "7", GitHubLogin: "bob"},
+	} {
+		id := zitadel("z9", "x@mctl.ai")
+		id.Customer = proof
+		if _, err := s.ResolveCustomer(ctx, id); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: err = %v, want ErrInvalid", name, err)
+		}
+	}
+	if n, _ := countRows(t, s); n != 0 {
+		t.Fatalf("%d principals written for refused identities", n)
 	}
 }

@@ -145,8 +145,8 @@ type User struct {
 	oidcIssuer       string
 	oidcSubject      string
 	oidcKind         string
-	// oidcCustomer is the GitHub identity a customers-organization token
-	// proved (customer.go); nil for every other caller.
+	// oidcCustomer is the GitHub or Google identity a customers-organization
+	// token proved (customer.go); nil for every other caller.
 	oidcCustomer *CustomerProof
 
 	// principalID is the canonical principal (prn_...): resolved from that

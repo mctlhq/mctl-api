@@ -429,35 +429,39 @@ func (s *Store) DisablePrincipal(ctx context.Context, id string, admins []string
 }
 
 // ErrCustomerConflict: a customers-organization ZITADEL identity cannot be
-// attached to the principal of the GitHub id it proved: it belongs to
-// another principal, was revoked there, or that principal already holds
-// another identity of the same issuer. It wraps auth.ErrIdentityRefused,
+// attached to the principal of the GitHub id or Google subject it proved:
+// it belongs to another principal, was revoked there, or that principal
+// already holds another identity of the same issuer. It wraps auth.ErrIdentityRefused,
 // so every caller refuses it; an admin resolves it (MergePrincipals or an
 // unlink), never the sign-in.
-var ErrCustomerConflict = errors.New("customer identity conflicts with the principal of its GitHub id")
+var ErrCustomerConflict = errors.New("customer identity conflicts with the principal of its GitHub id or Google subject")
 
 // ResolveCustomer resolves a customers-organization ZITADEL identity (stage
 // C0 of the site onboarding plan). The principal is the one of the GitHub
-// numeric id the identity hook proved, provisioned on first sight exactly
-// as a GitHub sign-in would; the ZITADEL identity is then linked to it.
+// numeric id, or the Google subject (mctl-api#1079), that the identity hook
+// proved, provisioned on first sight exactly as a sign-in with that
+// identity would; the ZITADEL identity is then linked to it.
 // Nothing is keyed on a login, and the ZITADEL subject never gets a
 // principal of its own.
 //
 // A disabled principal is returned as it is, unlinked, like Provision
 // returns one: the resolver's answer maps it to auth.ErrPrincipalDisabled
-// and caches that. A revoked GitHub identity or a link conflict is
+// and caches that. A revoked GitHub or Google identity or a link conflict is
 // auth.ErrIdentityRefused. Any other error is a failed read or write.
 //
-// The GitHub identity is provisioned before the link is tried, so a
-// refused conflict still leaves the principal of that GitHub id behind.
+// The GitHub or Google identity is provisioned before the link is tried, so
+// a refused conflict still leaves the principal of that identity behind.
 // That is deliberate and idempotent: it is the principal the id gets on any
 // sign-in, and the admin who resolves the conflict merges into it.
 func (s *Store) ResolveCustomer(ctx context.Context, id auth.Identity) (*Principal, error) {
 	if id.Customer == nil {
 		return nil, fmt.Errorf("%w: not a customer identity", ErrInvalid)
 	}
-	if id.Provider == auth.ProviderGitHub || id.Kind != auth.KindHuman {
+	if id.Provider == auth.ProviderGitHub || id.Provider == auth.ProviderGoogle || id.Kind != auth.KindHuman {
 		return nil, fmt.Errorf("%w: a customer identity is a human ZITADEL identity", ErrInvalid)
+	}
+	if p := id.Customer.Provider; p != auth.ProviderGitHub && p != auth.ProviderGoogle {
+		return nil, fmt.Errorf("%w: a customer proof of provider %q", ErrInvalid, p)
 	}
 	// A deleted IdP subject remains refused even while its signed JWT is
 	// cryptographically valid. A later signup has a different ZITADEL subject.
@@ -468,7 +472,7 @@ func (s *Store) ResolveCustomer(ctx context.Context, id auth.Identity) (*Princip
 	if deleted {
 		return nil, fmt.Errorf("%w: customer account deletion", auth.ErrIdentityRefused)
 	}
-	p, err := s.Provision(ctx, id.Customer.GitHubIdentity())
+	p, err := s.Provision(ctx, id.Customer.Identity())
 	if err != nil {
 		return nil, err
 	}

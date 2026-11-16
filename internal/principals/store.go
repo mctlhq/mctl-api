@@ -177,6 +177,10 @@ func validIdentity(id auth.Identity) error {
 		return fmt.Errorf("%w: unknown kind %q", ErrInvalid, id.Kind)
 	case id.Provider == auth.ProviderGitHub && strings.TrimLeft(id.Subject, "0123456789") != "":
 		return fmt.Errorf("%w: a GitHub subject is the numeric user id", ErrInvalid)
+	case id.Provider == auth.ProviderGoogle && (!auth.ValidGoogleSubject(id.Subject) || id.Issuer != "" || id.Kind != auth.KindHuman):
+		// One namespace per Google subject, whoever asks: an issuer would
+		// split it, and only a person has a Google account here.
+		return fmt.Errorf("%w: a Google identity is a person's numeric subject, without an issuer", ErrInvalid)
 	}
 	return nil
 }
