@@ -7103,6 +7103,84 @@ paths:
         '422': {description: verification_not_bound, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
         '503': {description: security_findings_store_unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityFindingError'}}}}
 
+  /api/v1/glovo/link-consent:
+    get:
+      summary: Read your own consent to link a real Glovo account
+      description: |
+        Dark unless GLOVO_CONSENT_ENABLED (mctl-glovo epic #11, C2-1c). Only a
+        human acting directly, with a resolved principal, reaches it: a
+        service, agent, CI or surface identity, a delegated or relayed
+        request and a Glovo or support audience token are refused. The
+        principal is always the caller's own; no route names another.
+      tags: [Glovo]
+      responses:
+        '200': {description: 'state active with the consent, or state none'}
+        '403': {description: glovo_consent_human_required}
+        '503': {description: 'glovo_consent_unavailable: the record could not be read; never reported as none'}
+    put:
+      summary: Record your consent to link a real Glovo account
+      description: |
+        Records consent to the current text version (`c2-link-v1`, fixed
+        server-side). The request body is never read: a version or principal
+        in it is ignored. A new consent claims one slot under the capacity
+        cap (GLOVO_C2_CAPACITY), atomically; at the cap, or with the cap
+        closed, the answer is 409 `capacity_reached` and nothing is recorded.
+        The active consent is the `glovo:c2` grant. Idempotent: an active
+        consent to the current version is returned unchanged (200) and takes
+        no second slot; an active consent to an older version is superseded
+        and keeps its slot. Audited as glovo.link_consent.record, including
+        the capacity refusal.
+      tags: [Glovo]
+      responses:
+        '200': {description: Already recorded for the current version}
+        '201': {description: Recorded}
+        '403': {description: glovo_consent_human_required}
+        '409': {description: 'capacity_reached: every slot is taken or the cap is closed; a waitlist answer'}
+        '503': {description: glovo_consent_unavailable}
+    delete:
+      summary: Withdraw your consent to link a real Glovo account
+      description: |
+        Same callers as GET. Withdrawing frees the slot. Idempotent: with
+        no active consent the answer is state none. After a withdrawal the
+        service read answers state none. Audited as glovo.link_consent.revoke.
+      tags: [Glovo]
+      responses:
+        '200': {description: state none, with the withdrawn consent when there was one}
+        '403': {description: glovo_consent_human_required}
+        '503': {description: glovo_consent_unavailable}
+
+  /api/v1/assistants/glovo-consent/v1/principals/{principal_id}:
+    get:
+      summary: Read a principal's active Glovo link consent (mctl-glovo only)
+      description: |
+        Dark unless GLOVO_CONSENT_ENABLED. Only the one federated service
+        identity named by GLOVO_CONSENT_SERVICE_PROVIDER and
+        GLOVO_CONSENT_SERVICE_SUBJECT reaches it, and that identity reaches
+        no other route (401 both ways). `state: none` is returned only for the
+        documented absence (no consent recorded, or withdrawn); a record that
+        could not be read is 503, never `none` and never a consent. Rate
+        limited per principal.
+      tags: [Glovo]
+      parameters:
+        - {name: principal_id, in: path, required: true, schema: {type: string, pattern: '^prn_[0-9A-HJKMNP-TV-Z]{26}$'}}
+      responses:
+        '200':
+          description: The principal's consent state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [principal_id, state]
+                properties:
+                  principal_id: {type: string}
+                  state: {type: string, enum: [active, none]}
+                  consent_version: {type: string, description: present when state is active}
+                  recorded_at: {type: string, format: date-time}
+        '400': {description: glovo_consent_invalid_principal}
+        '401': {description: not the consent reader}
+        '429': {description: glovo_consent_rate_limited}
+        '503': {description: glovo_consent_unavailable}
+
   /api/v1/glovo/pilot/{tenant}/principals/{principal_id}:
     put:
       summary: Add a principal to a tenant's Glovo pilot allowlist

@@ -64,6 +64,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/glovo"
 	"github.com/mctlhq/mctl-api/internal/glovo/scope"
 	"github.com/mctlhq/mctl-api/internal/glovobasket"
+	"github.com/mctlhq/mctl-api/internal/glovoconsent"
 	"github.com/mctlhq/mctl-api/internal/governance"
 	"github.com/mctlhq/mctl-api/internal/humaninput"
 	"github.com/mctlhq/mctl-api/internal/k8s"
@@ -1457,6 +1458,24 @@ func main() {
 	if gbjErr != nil {
 		slog.Error("glovo basket join disabled", "error", gbjErr)
 	}
+	// Glovo link consent (mctl-glovo epic #11, C2-1c): dark unless
+	// GLOVO_CONSENT_ENABLED and every dependency is there.
+	glovoConsentRoutes, gcErr := configureGlovoConsent(initCtx, os.LookupEnv, func(_ context.Context, dbURL string) (glovoconsent.Store, error) {
+		st, err := initStore(initCtx, storeFailures, "glovo link consent", func(ctx context.Context) (*glovoconsent.PostgresStore, error) {
+			return glovoconsent.NewStore(ctx, dbURL)
+		})
+		if err != nil {
+			return nil, err
+		}
+		return st, nil
+	})
+	if gcErr != nil {
+		slog.Error("glovo link consent disabled", "error", gcErr)
+	} else if glovoConsentRoutes != nil {
+		if st, ok := glovoConsentRoutes.Store.(*glovoconsent.PostgresStore); ok {
+			defer st.Close()
+		}
+	}
 
 	deletionProbeRequired := (cfg.PrincipalDBConfigured && !cfg.PrincipalsDisabled) || os.Getenv("CUSTOMER_DELETION_ENABLED") == "true"
 	signup := signupOptions(cfg, principalStore)
@@ -1550,6 +1569,7 @@ func main() {
 		GlovoControl:                   glovoControlRoutes,
 		GlovoJoin:                      glovoJoinRoutes,
 		GlovoBasketJoin:                glovoBasketJoinRoutes,
+		GlovoConsent:                   glovoConsentRoutes,
 		AdminPrincipals:                cfg.adminPrincipals(),
 		RequireRegisteredPolicy:        cfg.requireRegisteredPolicy(),
 		Clock:                          approvalClock,
