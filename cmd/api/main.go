@@ -1523,6 +1523,7 @@ func main() {
 		DevLoopDecide:                  devLoopDecideOptions(cfg, principalResolver, principalAuthz),
 		GlovoBasketApproval:            glovoBasketPage,
 		DeployApproval:                 deployApprovalPage,
+		ReleaseGrants:                  releaseGrantOptions(releaseGrantEnvFromOS(), gitOpsTokenSource(), workItemsStore != nil),
 		OAuthUpstream:                  cfg.oauthUpstreamMode(),
 		OAuthZitadel:                   oauthZitadelOptions(cfg, principalStore, oauthServer),
 		SurfaceZitadel:                 surfaceZitadelOptions(cfg),

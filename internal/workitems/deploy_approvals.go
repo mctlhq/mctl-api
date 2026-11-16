@@ -52,11 +52,13 @@ const (
 func IsDeployKind(kind string) bool { return strings.HasPrefix(kind, deployKindPrefix) }
 
 // isDedicatedKind is a kind that only its own paths create, decide or spend.
-func isDedicatedKind(kind string) bool { return IsGlovoKind(kind) || IsDeployKind(kind) }
+func isDedicatedKind(kind string) bool {
+	return IsGlovoKind(kind) || IsDeployKind(kind) || IsReleaseKind(kind)
+}
 
 // dedicatedKindPredicate is isDedicatedKind in SQL, parenthesized so it can be
 // negated as it stands.
-const dedicatedKindPredicate = `(action_kind LIKE 'glovo.%' OR action_kind LIKE 'deploy.%')`
+const dedicatedKindPredicate = `(action_kind LIKE 'glovo.%' OR action_kind LIKE 'deploy.%' OR action_kind LIKE 'release.%')`
 
 // DeployIdempotencyKey is the idempotency key of the grant request for a plan.
 func DeployIdempotencyKey(planID string) string { return deployIdempotencyPrefix + planID }
