@@ -710,6 +710,7 @@ func main() {
 	// WORK_ITEMS_DB_URL may name a DML-only role (mctl-api#1006). Nil makes
 	// POST /api/v1/deploy/plan and GET /api/v1/deploy/plans/{id} answer 503.
 	var deployPlans mctlapi.DeployPlanStore
+	var deployRecords mctlapi.DeployRecordStore
 	if deployPlanDBURL := deployPlanStoreSource(); !workItemsDisabled && deployPlanDBURL != "" {
 		dps, dpErr := initStore(initCtx, storeFailures, "deploy plans", func(ctx context.Context) (*deployplan.Store, error) {
 			return deployplan.NewStore(ctx, deployPlanDBURL)
@@ -718,6 +719,7 @@ func main() {
 			slog.Error("deploy-plan store init failed; deploy plan routes will return 503", "error", dpErr)
 		} else {
 			deployPlans = dps
+			deployRecords = dps
 			defer dps.Close()
 		}
 	}
@@ -1475,6 +1477,7 @@ func main() {
 		SourceRepoBindings:             gitReader,
 		DeployContentReader:            deployanalyze.NewHTTPReader("", gitOpsTokenSource()),
 		DeployPlans:                    deployPlans,
+		DeployRecords:                  deployRecords,
 		DeployGitops:                   gitReader,
 		ArgoCD:                         argoClient,
 		AuditLog:                       auditLog,

@@ -181,6 +181,16 @@ type DeployPlanStore interface {
 	Get(ctx context.Context, id string) (*deployplan.Plan, error)
 }
 
+// DeployRecordStore keeps deployment records (internal/deployplan). Only
+// the server writes them: the planned and granted fields never change, the
+// status moves once out of submitting, and observed fields are written once.
+type DeployRecordStore interface {
+	InsertRecord(ctx context.Context, r *deployplan.Record) (*deployplan.Record, error)
+	SetRecordSubmission(ctx context.Context, id, status, workflow string) (*deployplan.Record, error)
+	GetRecord(ctx context.Context, id string) (*deployplan.Record, error)
+	RecordForPlan(ctx context.Context, planID string) (*deployplan.Record, error)
+}
+
 // DeployPlanGitops reads a service's values, source-repo annotation and the
 // checkout revision as one consistent read (gitops.Reader.ServiceValuesAt).
 // It fails closed: only a documented absence is exists=false.

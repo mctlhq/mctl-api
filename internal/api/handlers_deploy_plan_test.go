@@ -168,6 +168,7 @@ type planFixture struct {
 	content *fakeContent
 	gitops  *fakePlanGitops
 	store   *fakePlanStore
+	records *fakeRecordStore
 	exec    *fakeExecutor
 	now     time.Time
 }
@@ -176,7 +177,7 @@ func newPlanFixture(t *testing.T) *planFixture {
 	t.Helper()
 	t.Setenv("AUTH_REQUIRED", "false")
 	f := &planFixture{
-		log: audit.NewLogger(), content: &fakeContent{}, store: newFakePlanStore(), exec: &fakeExecutor{},
+		log: audit.NewLogger(), content: &fakeContent{}, store: newFakePlanStore(), records: newFakeRecordStore(), exec: &fakeExecutor{},
 		gitops: &fakePlanGitops{data: planBaseValues, sourceRepo: "acme/web", exists: true, rev: planBaseSHA},
 		now:    time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC),
 	}
@@ -189,7 +190,7 @@ func newPlanFixture(t *testing.T) *planFixture {
 		Registry: operations.NewRegistry(), GitReader: git, ArgoCD: &fakeArgoCD{}, AuditLog: f.log, Executor: f.exec,
 		BackstageInternalURL: portal.URL, BackstageGithubAppConnectToken: "tok",
 		SourceRepoBindings:  repoBindings{},
-		DeployContentReader: f.content, DeployPlans: f.store, DeployGitops: f.gitops,
+		DeployContentReader: f.content, DeployPlans: f.store, DeployRecords: f.records, DeployGitops: f.gitops,
 		PlatformDomain: "mctl.ai", Clock: func() time.Time { return f.now },
 	})
 	return f

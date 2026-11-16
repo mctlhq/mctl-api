@@ -136,7 +136,7 @@ func newGrantFixture(t *testing.T, values string, edit ...func(*mctlapi.Options)
 	}
 	f := &grantFixture{
 		planFixture: &planFixture{
-			log: audit.NewLogger(), content: &fakeContent{}, store: newFakePlanStore(), exec: &fakeExecutor{},
+			log: audit.NewLogger(), content: &fakeContent{}, store: newFakePlanStore(), records: newFakeRecordStore(), exec: &fakeExecutor{},
 			gitops: &fakePlanGitops{data: values, sourceRepo: "acme/web", exists: true, rev: planBaseSHA},
 			now:    time.Now().UTC(),
 		},
@@ -158,7 +158,7 @@ func newGrantFixture(t *testing.T, values string, edit ...func(*mctlapi.Options)
 		Registry: operations.NewRegistry(), GitReader: &fakeGitReader{tenants: []gitops.Tenant{{Name: "acme"}}}, ArgoCD: &fakeArgoCD{}, AuditLog: f.log, Executor: f.exec,
 		BackstageInternalURL: portal.URL, BackstageGithubAppConnectToken: "tok",
 		SourceRepoBindings:  repoBindings{},
-		DeployContentReader: f.content, DeployPlans: f.store, DeployGitops: f.gitops,
+		DeployContentReader: f.content, DeployPlans: f.store, DeployRecords: f.records, DeployGitops: f.gitops,
 		PlatformDomain: "mctl.ai", Clock: func() time.Time { return f.now },
 		WorkItems: wi, TenantAuthzMode: mctlapi.TenantAuthzPrincipal, PrincipalMembership: f.members,
 		Principals: f.prins, AdminPrincipals: map[string]bool{grantRootPRN: true},

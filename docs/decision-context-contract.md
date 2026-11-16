@@ -196,6 +196,21 @@ A preview apply of a stored deploy plan (`dpl_`) is authorized by a
   grant to the plan's intent hash, revalidates the decider, spends the grant
   once, and submits `preview-deploy` with the plan's preview id and gitops
   commit. `preview_id` and `gitops_ref` are refused in any execute body.
+- Deployment record (mctl-api#1047). Right after the grant is spent and before
+  anything is submitted, apply writes one `deploy_records` row (`dep_...`):
+  the plan and its digest, revision, gitops commit, preview id and host, the
+  grant and the principal who decided it, and who applied it. If that write
+  fails, nothing is submitted and the spent grant is not reusable
+  (`503 deploy_apply_unavailable`; request a new grant). Status moves once,
+  from `submitting` to `submitted` (with the workflow name) or `submit_failed`.
+  `image_digest`, `argo_revision`, `health` and `health_url` are written once
+  when observed; until then health reads `unknown`, which never means healthy.
+  Planned and granted fields are immutable and rows are never deleted
+  (database triggers). The 202 answer carries `deployment_id`.
+  `GET /api/v1/deploy/deployments/{id}` (MCP `mctl_get_deployment`) takes a
+  `dep_` or the applied plan's `dpl_` id; tenant members and admins only,
+  anyone else gets `404 deployment_not_found`, and an unreadable store answers
+  `503 deploy_record_store_unavailable`.
 - Faithful or refused: `preview-deploy` renders the service's GitOps values,
   not the intent's runtime changes. A plan whose intent changes the values
   (`intent_changes_values`, compared before redaction and over the

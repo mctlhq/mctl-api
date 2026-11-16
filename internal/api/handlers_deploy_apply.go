@@ -287,7 +287,7 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.params["approval_id"] = truncate256(req.ApprovalID)
-	if h.opts.WorkItems == nil || h.opts.Registry == nil || h.opts.Executor == nil {
+	if h.opts.WorkItems == nil || h.opts.Registry == nil || h.opts.Executor == nil || h.opts.DeployRecords == nil {
 		a.refuse(w, http.StatusServiceUnavailable, codeDeployApplyUnavailable, "apply is not configured")
 		return
 	}
@@ -399,6 +399,24 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 	h.auditActionApproval(r, user, "action_approval.consume", spent, operations.RiskMedium,
 		map[string]string{"revalidation": reval.Revalidation, "plan_id": p.ID})
 
+	// The deployment record, before anything is submitted: an apply that
+	// cannot be recorded does not run (mctl-api#1047). The grant is spent
+	// either way, as for a failed submit.
+	appliedBy := user.PrincipalID()
+	if appliedBy == "" {
+		appliedBy = user.ID
+	}
+	rec, err := h.opts.DeployRecords.InsertRecord(r.Context(),
+		deployplan.NewRecord(p, spent.ID, spent.DecidedByPrincipalID, appliedBy, h.deployPlanNow()))
+	if err != nil {
+		slog.Error("deploy apply: recording the deployment", "plan", p.ID, "approval", spent.ID, "error", err)
+		a.set("error", "error:record_failed")
+		writeErrorCode(w, http.StatusServiceUnavailable, codeDeployApplyUnavailable,
+			"the grant was spent but the deployment could not be recorded, so nothing was submitted; request a new grant", nil)
+		return
+	}
+	a.params["deployment_id"] = rec.ID
+
 	auditParams := redactSecrets(op, input)
 	auditParams["plan_id"], auditParams["plan_digest"] = p.ID, p.Digest
 	auditParams["grant_ref"], auditParams["subject_principal_id"] = spent.ID, spent.DecidedByPrincipalID
@@ -411,6 +429,7 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := h.opts.Executor.Submit(submitCtx, op, input, user.ID, p.Tenant)
 	note := executionEnded(result, err)
+	h.recordSubmission(rec.ID, result, err)
 	if err != nil {
 		h.logAudit(r, audit.Entry{UserID: user.ID, Operation: previewDeployOp, Parameters: auditParams, Status: "failed",
 			RiskLevel: string(op.RiskLevel), Message: "submit failed: " + err.Error()})
@@ -424,11 +443,12 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 	a.params["workflow"] = result.WorkflowName
 	a.set("succeeded", "submitted")
 	writeJSON(w, http.StatusAccepted, map[string]any{
-		"plan_id":     p.ID,
-		"approval_id": spent.ID,
-		"preview_id":  p.PreviewID,
-		"preview_url": "https://" + p.Host,
-		"workflow":    result,
+		"deployment_id": rec.ID,
+		"plan_id":       p.ID,
+		"approval_id":   spent.ID,
+		"preview_id":    p.PreviewID,
+		"preview_url":   "https://" + p.Host,
+		"workflow":      result,
 	})
 }
 
@@ -481,4 +501,23 @@ func (h *Handlers) revalidateDeployGrant(w http.ResponseWriter, r *http.Request,
 		return res, false
 	}
 	return res, true
+}
+
+// recordSubmission writes the submit's outcome into the deployment record.
+// It runs after the side effect, so a failure here cannot undo it: the
+// record stays in submitting, which reads as "outcome not recorded", never
+// as success, and the error is logged for the operator.
+func (h *Handlers) recordSubmission(id string, result *operations.SubmitResult, submitErr error) {
+	status, workflow := deployplan.RecordSubmitted, ""
+	if submitErr != nil || result == nil || result.WorkflowName == "" {
+		status = deployplan.RecordSubmitFailed
+	} else {
+		workflow = result.WorkflowName
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := h.opts.DeployRecords.SetRecordSubmission(ctx, id, status, workflow); err != nil {
+		slog.Error("deploy apply: recording the submission outcome; the record stays in submitting",
+			"deployment", id, "status", status, "error", err)
+	}
 }
