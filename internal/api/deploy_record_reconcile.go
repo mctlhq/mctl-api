@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"log/slog"
-	"regexp"
 	"time"
 
 	"github.com/mctlhq/mctl-api/internal/deployplan"
@@ -24,8 +23,6 @@ type workflowOutcomeGetter interface {
 	GetWorkflowOutcome(ctx context.Context, namespace, name string) (*operations.WorkflowOutcome, error)
 }
 
-var imageDigestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-
 // deployRecordReconciler completes deployment records from what Argo shows
 // (mctl-api#1047): a submit whose outcome was ambiguous becomes submitted
 // once its workflow is seen, or submit_failed once it has stayed absent
@@ -41,14 +38,15 @@ type deployRecordReconciler struct {
 	now   func() time.Time
 
 	interval time.Duration
-	// lookback bounds which records are still examined.
-	lookback time.Duration
 	// absentAfter is how long a submitting record's workflow may be missing
 	// before the create is taken as never made. A create is one apiserver
 	// request; nothing lands minutes after it returned.
 	absentAfter time.Duration
 	// gcGrace: past it, a missing workflow may have been garbage-collected
-	// (Argo keeps finished workflows 72h), so absence proves nothing.
+	// (Argo keeps finished workflows 72h), so absence proves nothing. It also
+	// bounds the queue: an older record can no longer be resolved, so it is
+	// not examined at all, and records that never resolve (a workflow
+	// collected before it was seen) cannot crowd out newer ones.
 	gcGrace       time.Duration
 	lookupTimeout time.Duration
 	batch         int
@@ -58,7 +56,7 @@ type deployRecordReconciler struct {
 func newDeployRecordReconciler(store DeployRecordReconcileStore, exec workflowOutcomeGetter, op operations.Operation) *deployRecordReconciler {
 	return &deployRecordReconciler{
 		store: store, exec: exec, op: op, now: time.Now,
-		interval: time.Minute, lookback: 7 * 24 * time.Hour, absentAfter: 10 * time.Minute,
+		interval: time.Minute, absentAfter: 10 * time.Minute,
 		gcGrace: 72 * time.Hour, lookupTimeout: 10 * time.Second, batch: 100, maxPerPass: 1000,
 	}
 }
@@ -77,7 +75,7 @@ func (r *deployRecordReconciler) Run(ctx context.Context) {
 }
 
 func (r *deployRecordReconciler) reconcileOnce(ctx context.Context) {
-	since := r.now().Add(-r.lookback)
+	since := r.now().Add(-r.gcGrace)
 	var afterCreated time.Time
 	var afterID string
 	for examined := 0; examined < r.maxPerPass; {
@@ -145,7 +143,7 @@ func (r *deployRecordReconciler) reconcileRecord(ctx context.Context, rec *deplo
 	case "Succeeded":
 		result = deployplan.RunSucceeded
 		digest = out.Outputs["image_digest"]
-		if digest != "" && !imageDigestRE.MatchString(digest) {
+		if digest != "" && !deployplan.ValidImageDigest(digest) {
 			slog.Error("deploy record reconcile: workflow reported a malformed image digest; not recorded",
 				"deployment", rec.ID, "workflow", name)
 			digest = ""

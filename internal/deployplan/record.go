@@ -41,6 +41,9 @@ const (
 
 var digestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
+// ValidImageDigest reports whether s is an image digest the record accepts.
+func ValidImageDigest(s string) bool { return digestRE.MatchString(s) }
+
 // ErrRecordNotFound is the store's answer for an id or plan with no record.
 var ErrRecordNotFound = errors.New("deployplan: deployment record not found")
 

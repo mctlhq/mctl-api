@@ -416,6 +416,10 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 	auditParams := redactSecrets(op, input)
 	auditParams["plan_id"], auditParams["plan_digest"] = p.ID, p.Digest
 	auditParams["grant_ref"], auditParams["subject_principal_id"] = spent.ID, spent.DecidedByPrincipalID
+	// preview-deploy does not require an execution today
+	// (operations.RequiresExecution), so this returns the request context and
+	// a no-op; TestDeployApply_PreviewDeployNeedsNoExecution trips if that
+	// changes, since the branches below then need tests that reach them.
 	submitCtx, executionEnded, prepared := h.prepareSubmitExecution(w, r, user, op, p.Tenant, input)
 	if !prepared {
 		// Nothing recorded yet, so the plan stays appliable with a new grant.

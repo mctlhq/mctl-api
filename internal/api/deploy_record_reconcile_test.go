@@ -155,6 +155,11 @@ func TestDeployRecordReconcile(t *testing.T) {
 	if len(store.results) != 4 {
 		t.Errorf("run result writes = %v, want one each for dep_5, dep_6, dep_7, dep_9", store.results)
 	}
+	for _, a := range exec.asked {
+		if a == "acme/wf-4" {
+			t.Error("looked up a record older than Argo's retention: it can never resolve")
+		}
+	}
 	if exec.asked[0] != "acme/wf-1" {
 		t.Errorf("looked up %v: the workflow lives in the tenant's namespace", exec.asked[0])
 	}

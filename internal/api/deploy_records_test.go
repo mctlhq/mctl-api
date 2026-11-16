@@ -185,3 +185,15 @@ func TestGetDeployment_StoreUnreadable(t *testing.T) {
 		}
 	}
 }
+
+// Apply's execution branches (a refused preparation writes no record; a
+// failed record insert ends the prepared execution; a preset workflow name
+// is kept) cannot be reached through the router while preview-deploy needs
+// no execution, and apply's input carries no issue_url to create one from.
+// This trips when that changes, so those branches get tests that reach them
+// (mctl-api#1077 review).
+func TestDeployApply_PreviewDeployNeedsNoExecution(t *testing.T) {
+	if operations.RequiresExecution("preview-deploy") {
+		t.Fatal("preview-deploy now requires an execution: cover apply's execution branches (handlers_deploy_apply.go) before relying on them")
+	}
+}
