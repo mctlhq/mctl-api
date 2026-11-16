@@ -90,3 +90,67 @@ func TestZitadelHookCreateAllowlistWired(t *testing.T) {
 		}
 	}
 }
+
+// The Google allowlist and IdP id refuse the boot when malformed, like the
+// GitHub allowlist: left to the hook they would switch it off, and every
+// existing GitHub customer with it.
+func TestZitadelHookGoogleValidatedAtBoot(t *testing.T) {
+	for name, zc := range map[string]zitadelHookConfig{
+		"unset":       {},
+		"subs":        {CustomerCreateGoogleSubs: []string{"109876543210987654321", "1"}},
+		"anyone":      {CustomerCreateGoogleSubs: []string{"*"}},
+		"google idp":  {GitHubIdPID: "300000000000000003", GoogleIdPID: "300000000000000006"},
+		"only google": {GoogleIdPID: "300000000000000006"},
+	} {
+		if err := (config{ZitadelHook: zc}).validate(); err != nil {
+			t.Errorf("%s: validate() = %v", name, err)
+		}
+	}
+	for name, tc := range map[string]struct {
+		zc   zitadelHookConfig
+		want string
+	}{
+		"email in subs":     {zitadelHookConfig{CustomerCreateGoogleSubs: []string{"carol@gmail.com"}}, "ZITADEL_HOOK_CUSTOMER_CREATE_GOOGLE_SUBS"},
+		"anyone mixed":      {zitadelHookConfig{CustomerCreateGoogleSubs: []string{"1", "*"}}, "ZITADEL_HOOK_CUSTOMER_CREATE_GOOGLE_SUBS"},
+		"malformed idp":     {zitadelHookConfig{GoogleIdPID: "google"}, "ZITADEL_HOOK_GOOGLE_IDP_ID"},
+		"idp equals github": {zitadelHookConfig{GitHubIdPID: "300000000000000003", GoogleIdPID: "300000000000000003"}, "ZITADEL_HOOK_GOOGLE_IDP_ID"},
+	} {
+		if err := (config{ZitadelHook: tc.zc}).validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: validate() = %v, want a refusal naming %s", name, err, tc.want)
+		}
+	}
+	t.Setenv("ZITADEL_HOOK_GOOGLE_IDP_ID", "300000000000000006")
+	t.Setenv("ZITADEL_HOOK_CUSTOMER_CREATE_GOOGLE_SUBS", " 1, 2 ")
+	zc := loadZitadelHookConfig()
+	if zc.GoogleIdPID != "300000000000000006" || strings.Join(zc.CustomerCreateGoogleSubs, ",") != "1,2" {
+		t.Fatalf("loaded %q %q", zc.GoogleIdPID, zc.CustomerCreateGoogleSubs)
+	}
+}
+
+// The Google settings reach the hook: a hook-shaped Google creation passes
+// the gate only for a listed subject, and only with the IdP configured.
+func TestZitadelHookGoogleWired(t *testing.T) {
+	create := []byte(`{"fullMethod":"/zitadel.user.v2.UserService/CreateUser","userID":"login","request":{` +
+		`"organizationId":"org","username":"google.4242@mctl.ai","human":{"profile":{"givenName":"Carol"},` +
+		`"email":{"email":"carol@gmail.com","isVerified":true},"idpLinks":[{"idpId":"77","userId":"4242","userName":"carol@gmail.com"}]},` +
+		`"metadata":[{"key":"google_sub","value":"NDI0Mg=="}]}}`)
+	for name, tc := range map[string]struct {
+		idp, subs, want string
+	}{
+		"listed":        {"77", "4242", "gate_customer_create"},
+		"not listed":    {"77", "", "gate_customer_create_not_allowed:google:4242"},
+		"idp not wired": {"", "4242", "gate_idp_links"},
+	} {
+		cfg := config{ZitadelHook: zitadelHookConfig{
+			CustomersOrgID: "org", GitHubIdPID: "idp", GoogleIdPID: tc.idp, LoginClientUserID: "login",
+			ClaimClientIDs: []string{"web"}, UsernameDomain: "mctl.ai", CustomerCreateGoogleSubs: splitCSV(tc.subs),
+		}}
+		opts := zitadelHookOptions(cfg, hookTenants{})
+		if opts == nil {
+			t.Fatalf("%s: hook not built", name)
+		}
+		if r := opts.Hook.CreateGate(context.Background(), create); r.Reason != tc.want {
+			t.Errorf("%s: gate %s %s, want %s", name, r.Reason, r.Body, tc.want)
+		}
+	}
+}
