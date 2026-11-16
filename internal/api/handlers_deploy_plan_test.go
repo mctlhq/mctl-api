@@ -69,6 +69,43 @@ type fakePlanGitops struct {
 	exists     bool
 	rev        string
 	err        error
+	// chart is the base-service defaults; "" means planChartDefaults.
+	chart    string
+	chartErr error
+	chartRev string // the revision the chart was last asked for
+}
+
+// planChartDefaults is the part of base-service's values.yaml the planner's
+// change check depends on.
+const planChartDefaults = `
+service:
+  type: ClusterIP
+  port: 8080
+replicaCount: 1
+probes:
+  liveness:
+    path: /healthz
+    port: http
+  readiness:
+    path: /readyz
+    port: http
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+env: {}
+envFrom: []
+`
+
+func (f *fakePlanGitops) BaseServiceChartValuesAt(rev string) ([]byte, error) {
+	f.chartRev = rev
+	if f.chartErr != nil {
+		return nil, f.chartErr
+	}
+	if f.chart == "" {
+		return []byte(planChartDefaults), nil
+	}
+	return []byte(f.chart), nil
 }
 
 func (f *fakePlanGitops) ServiceValuesAt(string, string) ([]byte, string, bool, string, error) {
@@ -311,6 +348,10 @@ func TestDeployPlan_Refusals(t *testing.T) {
 			f.gitops.err = errors.New("stale checkout")
 			f.gitops.exists = false
 		}, intentBody, 503, "deploy_gitops_unavailable"},
+		{"chart defaults unreadable", planDev, func(f *planFixture, _ map[string]any) {
+			f.gitops.chartErr = errors.New("checkout moved")
+		}, intentBody, 503, "deploy_gitops_unavailable"},
+		{"chart defaults unusable", planDev, func(f *planFixture, _ map[string]any) { f.gitops.chart = "- a\n" }, intentBody, 500, "deploy_plan_failed"},
 		{"service bound to another repo", planDev, func(f *planFixture, _ map[string]any) { f.gitops.sourceRepo = "acme/another" }, intentBody, 403, "deploy_service_not_bound"},
 		{"service without annotation", planDev, func(f *planFixture, _ map[string]any) { f.gitops.sourceRepo = "" }, intentBody, 403, "deploy_service_not_bound"},
 		{"unparseable values", planDev, func(f *planFixture, _ map[string]any) { f.gitops.data = "- a\n- b\n" }, intentBody, 500, "deploy_values_unparseable"},
@@ -507,5 +548,57 @@ func TestDeployPlan_RefusesTrailingData(t *testing.T) {
 		if f.store.inserts != 0 {
 			t.Fatalf("trailing %q: a plan was stored", suffix)
 		}
+	}
+}
+
+// mctl-api#1058: a service that leaves replicaCount, service.port or a probe
+// to the chart can still reach a faithful plan, and a real change is still
+// reported. The chart defaults are read at the plan's gitops commit.
+func TestDeployPlan_IntentChangesValuesOverChartDefaults(t *testing.T) {
+	for name, tc := range map[string]struct {
+		values string
+		mutate func(map[string]any)
+		want   bool
+	}{
+		"coolify-mcp: replicaCount and port left to the chart": {planBaseValues + `
+probes:
+  liveness:
+    path: /healthz
+  readiness:
+    path: /healthz
+`, func(in map[string]any) { delete(spec(in), "env"); delete(spec(in), "secretRefs") }, false},
+		"readiness probe left to the chart differs": {planBaseValues,
+			func(in map[string]any) { delete(spec(in), "env"); delete(spec(in), "secretRefs") }, true},
+		"another port": {planBaseValues + `
+probes:
+  liveness:
+    path: /healthz
+  readiness:
+    path: /healthz
+`, func(in map[string]any) {
+			delete(spec(in), "env")
+			delete(spec(in), "secretRefs")
+			spec(in)["runtime"] = map[string]any{"port": 3000, "healthPath": "/healthz"}
+		}, true},
+		"env added": {planBaseValues + `
+probes:
+  liveness:
+    path: /healthz
+  readiness:
+    path: /healthz
+`, func(in map[string]any) { delete(spec(in), "secretRefs") }, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newPlanFixture(t)
+			f.gitops.data = tc.values
+			w := f.plan(t, planDev, planIntent(tc.mutate), "")
+			assertStatus(t, w, http.StatusCreated)
+			if got := decodeJSON(t, w)["intent_changes_values"]; got != tc.want {
+				t.Fatalf("intent_changes_values = %v, want %v", got, tc.want)
+			}
+			if f.gitops.chartRev != planBaseSHA {
+				t.Fatalf("chart read at %q, want the plan's gitops commit %s", f.gitops.chartRev, planBaseSHA)
+			}
+		})
 	}
 }

@@ -186,4 +186,7 @@ type DeployPlanStore interface {
 // It fails closed: only a documented absence is exists=false.
 type DeployPlanGitops interface {
 	ServiceValuesAt(team, component string) (data []byte, sourceRepo string, exists bool, rev string, err error)
+	// BaseServiceChartValuesAt reads the chart defaults at rev, the
+	// revision ServiceValuesAt reported; any other revision is an error.
+	BaseServiceChartValuesAt(rev string) ([]byte, error)
 }

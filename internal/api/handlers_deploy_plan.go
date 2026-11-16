@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"reflect"
 	"strings"
 	"time"
 
@@ -226,9 +225,23 @@ func (h *Handlers) DeployPlan(w http.ResponseWriter, r *http.Request) {
 		a.refuse(w, http.StatusInternalServerError, "deploy_plan_failed", "the plan could not be computed")
 		return
 	}
-	// Compared before redaction: a change hidden behind a redacted value is
-	// still a change preview-deploy would not make.
-	changes := !reflect.DeepEqual(before, after)
+	// Compared before redaction, over the chart defaults at the same gitops
+	// commit: a change hidden behind a redacted value is still a change
+	// preview-deploy would not make, and a value the chart already defaults
+	// to is not one (mctl-api#1058). Defaults that cannot be read refuse the
+	// plan rather than guess either way.
+	chartDefaults, err := h.opts.DeployGitops.BaseServiceChartValuesAt(baseSHA)
+	if err != nil {
+		slog.Error("deploy plan: reading base-service chart defaults", "error", err)
+		a.refuse(w, http.StatusServiceUnavailable, "deploy_gitops_unavailable", "the gitops checkout cannot be read right now")
+		return
+	}
+	changes, err := deployplan.ChangesRender(chartDefaults, before, after)
+	if err != nil {
+		slog.Error("deploy plan: chart defaults", "error", err)
+		a.refuse(w, http.StatusInternalServerError, "deploy_plan_failed", "the plan could not be computed")
+		return
+	}
 	approval := deployplan.RequiredApproval(intent.Spec.Environment, deployplan.ActionUpdate)
 	digest := deployplan.Digest(deployplan.DigestInput{
 		Tenant: tenant, Service: service, Environment: intent.Spec.Environment,

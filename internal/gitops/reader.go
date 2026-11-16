@@ -1360,6 +1360,44 @@ func (r *Reader) ServiceValuesAt(team, component string) (data []byte, sourceRep
 	return data, sourceRepo, true, rev, nil
 }
 
+// BaseServiceChartValuesAt reads platform-gitops/helm-charts/base-service/
+// values.yaml, the defaults every service's values are rendered over, from
+// the checkout at rev. A checkout now at another revision is an error, so
+// the defaults and the service values read by ServiceValuesAt are one
+// commit. Unlike a service, the chart has no documented absence: a missing
+// file, a symlink or non-plain entry on the path, a stale or never-synced
+// checkout are all errors.
+func (r *Reader) BaseServiceChartValuesAt(rev string) ([]byte, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if err := r.checkFreshLocked(); err != nil {
+		return nil, err
+	}
+	head, err := r.revisionLocked()
+	if err != nil {
+		return nil, err
+	}
+	if rev == "" || head != rev {
+		return nil, fmt.Errorf("base-service chart: checkout is at %q, not %q", head, rev)
+	}
+	path := r.localPath
+	for i, name := range []string{"platform-gitops", "helm-charts", "base-service", "values.yaml"} {
+		path = filepath.Join(path, name)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return nil, fmt.Errorf("base-service chart: %w", err)
+		}
+		if last := i == 3; last && !info.Mode().IsRegular() || !last && !info.IsDir() {
+			return nil, fmt.Errorf("base-service chart: %s is not a plain entry", path)
+		}
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // fixed path, regular file inside the checkout
+	if err != nil {
+		return nil, fmt.Errorf("base-service chart: %w", err)
+	}
+	return data, nil
+}
+
 // ErrSourceRepoNotRegistered is ComponentSourceRepo's answer when the
 // checkout was read and the component, its catalog-info.yaml or the
 // github.com/source-repo annotation is absent. Every other error means the

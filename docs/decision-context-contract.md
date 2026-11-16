@@ -198,7 +198,9 @@ A preview apply of a stored deploy plan (`dpl_`) is authorized by a
   commit. `preview_id` and `gitops_ref` are refused in any execute body.
 - Faithful or refused: `preview-deploy` renders the service's GitOps values,
   not the intent's runtime changes. A plan whose intent changes the values
-  (`intent_changes_values`, compared before redaction), or builds from a
+  (`intent_changes_values`, compared before redaction and over the
+  base-service chart defaults at the plan's gitops commit, so a value the
+  chart already defaults to is not a change), or builds from a
   context other than the repository root, is refused with
   `deploy_apply_not_reproducible`.
 - Agent-deploy tenants have no other way (mctl-api#1031). A tenant whose
