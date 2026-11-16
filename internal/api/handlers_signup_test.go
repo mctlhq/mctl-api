@@ -584,3 +584,94 @@ func TestSignupApprovalRefusesUnallocatedLegacyAndTeamMembers(t *testing.T) {
 		})
 	}
 }
+
+// mctl-api#1079: a Google customer is admitted only by the Google public
+// flow, on its Google subject. The GitHub cohort and the GitHub public flow
+// admit no Google customer, the Google public flow admits no GitHub
+// customer, and a principal holding both keys is ambiguous.
+func TestSignupClaimOfAGoogleCustomer(t *testing.T) {
+	s := signupStore(t)
+	ctx := context.Background()
+	number := time.Now().UnixNano()
+	sub := strconv.FormatInt(number, 10)
+	googler, err := s.Provision(ctx, auth.Identity{Provider: auth.ProviderGoogle, Subject: sub, Kind: auth.KindHuman})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupSignupRows(t, googler.ID)
+	githubber, err := s.Provision(ctx, auth.Identity{Provider: auth.ProviderGitHub, Subject: strconv.FormatInt(number+1, 10), Display: "github-only", Kind: auth.KindHuman})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupSignupRows(t, githubber.ID)
+	both, err := s.Provision(ctx, auth.Identity{Provider: auth.ProviderGitHub, Subject: strconv.FormatInt(number+2, 10), Display: "both-keys", Kind: auth.KindHuman})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupSignupRows(t, both.ID)
+	if _, err := s.LinkIdentity(ctx, both.ID, auth.Identity{Provider: auth.ProviderGoogle, Subject: strconv.FormatInt(number+3, 10), Kind: auth.KindHuman}); err != nil {
+		t.Fatal(err)
+	}
+	capacity, err := s.SignupCapacity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSignupCapacity(ctx, capacity.Used+3, "admin", "Reviewed test resource capacity"); err != nil {
+		t.Fatal(err)
+	}
+	claim := func(o *SignupOptions, pid, tenant string) (int, string) {
+		o.Store = s
+		h := &Handlers{opts: Options{Signup: o}}
+		return h.claimSignupPrincipal(ctx, pid, tenant, "512Mi", "500m", "1Gi", "2", "5", "1", "5", "starter")
+	}
+	for name, o := range map[string]*SignupOptions{
+		"Google flow off":         {},
+		"GitHub public flow only": {PublicFlow: true},
+		"Google sub in cohort":    {Cohort: map[string]bool{sub: true}},
+	} {
+		if status, message := claim(o, googler.ID, "google-team"); status != 403 {
+			t.Errorf("%s: Google customer = %d %s, want 403", name, status, message)
+		}
+	}
+	if status, message := claim(&SignupOptions{GooglePublicFlow: true}, githubber.ID, "github-team"); status != 409 {
+		t.Errorf("Google public flow admitted an uninvited GitHub customer: %d %s", status, message)
+	}
+	if status, message := claim(&SignupOptions{GooglePublicFlow: true, PublicFlow: true}, both.ID, "both-team"); status != 409 || !strings.Contains(message, "ambiguous") {
+		t.Errorf("principal with both keys = %d %s, want 409 ambiguous", status, message)
+	}
+	for n := 0; n < 2; n++ {
+		if status, message := claim(&SignupOptions{GooglePublicFlow: true}, googler.ID, "google-team"); status != 0 {
+			t.Fatalf("Google public claim (try %d) = %d %s", n, status, message)
+		}
+	}
+	if status, _ := claim(&SignupOptions{GooglePublicFlow: true}, googler.ID, "google-second"); status != 409 {
+		t.Fatalf("second Google workspace: %d", status)
+	}
+	// A Google subject in the GitHub cohort still spends a slot: with none
+	// left it is refused, not waved through.
+	cohortSub := strconv.FormatInt(number+4, 10)
+	cohortGoogler, err := s.Provision(ctx, auth.Identity{Provider: auth.ProviderGoogle, Subject: cohortSub, Kind: auth.KindHuman})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupSignupRows(t, cohortGoogler.ID)
+	capacity, err = s.SignupCapacity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSignupCapacity(ctx, capacity.Used, "admin", "Reviewed test resource capacity"); err != nil {
+		t.Fatal(err)
+	}
+	if status, message := claim(&SignupOptions{GooglePublicFlow: true, Cohort: map[string]bool{cohortSub: true}}, cohortGoogler.ID, "google-cohort"); status != 409 || message != "signup_capacity_exhausted" {
+		t.Fatalf("Google subject in the cohort at zero capacity = %d %s, want 409 signup_capacity_exhausted", status, message)
+	}
+	conn, err := pgx.Connect(ctx, os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	var googleSub string
+	if err := conn.QueryRow(ctx, `SELECT coalesce(google_sub,'') FROM signup_requests WHERE principal_id=$1 AND github_id IS NULL`, googler.ID).Scan(&googleSub); err != nil || googleSub != sub {
+		t.Fatalf("claim row google_sub=%q %v, want %s", googleSub, err, sub)
+	}
+}

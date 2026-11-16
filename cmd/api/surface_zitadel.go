@@ -120,5 +120,6 @@ func surfaceZitadelOptions(cfg config) *api.SurfaceZitadelOptions {
 	return &api.SurfaceZitadelOptions{
 		ProviderName: entry.Name, Issuer: entry.Issuer, CustomersOrgID: entry.CustomersOrgID,
 		CreateClientID: cfg.MctlWebClientID, SigninClientID: cfg.ZitadelPortalClientID,
+		CustomersGoogle: cfg.customersGoogleIdPID(*entry) != "",
 	}
 }

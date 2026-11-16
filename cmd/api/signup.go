@@ -24,7 +24,9 @@ func signupOptions(cfg config, store *principals.Store) *api.SignupOptions {
 		}
 	}
 	p := &customerdelete.Providers{Issuer: cfg.ZitadelHookIssuer(), ClientID: os.Getenv("ZITADEL_CUSTOMER_LIFECYCLE_CLIENT_ID"), ClientSecret: os.Getenv("ZITADEL_CUSTOMER_LIFECYCLE_CLIENT_SECRET"), SiteBase: envOr("CUSTOMER_DELETION_SITE_URL", "https://mctl.ai"), SessionAudience: os.Getenv("ZITADEL_CUSTOMER_LIFECYCLE_PROJECT_ID")}
-	return &api.SignupOptions{Store: store, SiteCall: p.SignupSite, Cohort: cohort, PublicFlow: public}
+	googleSubs := cfg.ZitadelHook.CustomerCreateGoogleSubs
+	googlePublic := cfg.customersGoogleOrgID() != "" && len(googleSubs) == 1 && googleSubs[0] == "*"
+	return &api.SignupOptions{Store: store, SiteCall: p.SignupSite, Cohort: cohort, PublicFlow: public, GooglePublicFlow: googlePublic}
 }
 func (cfg config) ZitadelHookIssuer() string {
 	p, err := cfg.oauthZitadelProvider()

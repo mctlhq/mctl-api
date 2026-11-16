@@ -45,3 +45,31 @@ func TestSignupFailedConfiguredStoreRemainsUnknown(t *testing.T) {
 		t.Fatalf("unknown treated as %v %v", allowed, err)
 	}
 }
+
+// mctl-api#1079: Google customers are admitted by the public flow only when
+// Google customers are accepted at all and their creation is open to anyone.
+func TestGooglePublicSignupNeedsTheGateAndAnOpenAllowlist(t *testing.T) {
+	const org, gh, goog = "395272528420931285", "395272528420931999", "395272528420932777"
+	cfg := zitadelUpstreamConfig("zitadel")
+	cfg.OIDCProvidersRaw = testCustomersProviders
+	cfg.PrincipalDBConfigured = true
+	cfg.ZitadelHook.CustomersOrgID, cfg.ZitadelHook.GitHubIdPID, cfg.ZitadelHook.GoogleIdPID = org, gh, goog
+	cfg.ZitadelHook.CustomerCreateGoogleSubs = []string{"*"}
+	if o := signupOptions(cfg, nil); o == nil || !o.GooglePublicFlow || o.PublicFlow {
+		t.Fatalf("options = %+v, want the Google public flow alone", o)
+	}
+	for name, mutate := range map[string]func(*config){
+		"no Google IdP":       func(c *config) { c.ZitadelHook.GoogleIdPID = "" },
+		"Google allowlist":    func(c *config) { c.ZitadelHook.CustomerCreateGoogleSubs = []string{"109876543210987654321"} },
+		"no Google allowlist": func(c *config) { c.ZitadelHook.CustomerCreateGoogleSubs = nil },
+		"GitHub open instead": func(c *config) {
+			c.ZitadelHook.CustomerCreateGoogleSubs, c.ZitadelHook.CustomerCreateGitHubIDs = nil, []string{"*"}
+		},
+	} {
+		c := cfg
+		mutate(&c)
+		if o := signupOptions(c, nil); o == nil || o.GooglePublicFlow {
+			t.Errorf("%s: options = %+v, want no Google public flow", name, o)
+		}
+	}
+}

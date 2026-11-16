@@ -66,6 +66,11 @@ type SurfaceZitadelOptions struct {
 	// its purpose answering 503.
 	CreateClientID string
 	SigninClientID string
+	// CustomersGoogle accepts customers proven by Google as well as by
+	// GitHub. It is on only when ZITADEL_HOOK_GOOGLE_IDP_ID names the Google
+	// IdP of this customers organization (customersGoogleIdPID); off, a
+	// Google customer's token is refused as unproven, as before.
+	CustomersGoogle bool
 }
 
 type surfaceZitadel struct {
@@ -154,11 +159,15 @@ func (h *Handlers) ResolveZitadelPrincipal(w http.ResponseWriter, r *http.Reques
 		h.auditSurfaceIdentity(r, user, "principal.resolve_zitadel_refused", "failed", params)
 		writeErrorCode(w, status, code, msg, nil)
 	}
-	customer, err := auth.ReadCustomerProof(claims, z.opts.CustomersOrgID)
+	customer, err := auth.ReadCustomerProofWith(claims, z.opts.CustomersOrgID, z.opts.CustomersGoogle)
 	switch {
 	case errors.Is(err, auth.ErrCustomerUnproven):
-		slog.Warn("surface-principals/zitadel: customer without a proven GitHub identity", "zitadel_subject", idt.Subject, "error", err)
-		refuse(http.StatusForbidden, sidCodeCustomerUnproven, "the customer token carries no proven GitHub identity")
+		proven := "GitHub"
+		if z.opts.CustomersGoogle {
+			proven = "GitHub or Google"
+		}
+		slog.Warn("surface-principals/zitadel: customer without a proven identity", "zitadel_subject", idt.Subject, "accepted", proven, "error", err)
+		refuse(http.StatusForbidden, sidCodeCustomerUnproven, "the customer token carries no proven "+proven+" identity")
 		return
 	case err != nil:
 		// The organization could not be observed: never "not a customer".
@@ -171,7 +180,12 @@ func (h *Handlers) ResolveZitadelPrincipal(w http.ResponseWriter, r *http.Reques
 		refuse(http.StatusBadRequest, sidCodeNotCustomer, "the ID token is not a self-service customer's")
 		return
 	}
-	params["github_id"], params["github_login"] = customer.GitHubID, customer.GitHubLogin
+	params["customer_provider"] = customer.Provider
+	if customer.Provider == auth.ProviderGoogle {
+		params["google_sub"] = customer.GoogleSub
+	} else {
+		params["github_id"], params["github_login"] = customer.GitHubID, customer.GitHubLogin
+	}
 	display, _ := claims["preferred_username"].(string)
 	if display == "" {
 		display = idt.Subject
@@ -182,7 +196,7 @@ func (h *Handlers) ResolveZitadelPrincipal(w http.ResponseWriter, r *http.Reques
 	})
 	switch {
 	case errors.Is(err, principals.ErrCustomerConflict):
-		refuse(http.StatusConflict, sidCodeCustomerConflict, "this ZITADEL identity belongs to another principal than its GitHub id; a platform admin must resolve it")
+		refuse(http.StatusConflict, sidCodeCustomerConflict, "this ZITADEL identity belongs to another principal than its "+customerKeyName(customer)+"; a platform admin must resolve it")
 		return
 	case errors.Is(err, auth.ErrPrincipalDisabled):
 		refuse(http.StatusForbidden, sidCodePrincipalDisabled, "the customer's principal is disabled")
@@ -191,17 +205,33 @@ func (h *Handlers) ResolveZitadelPrincipal(w http.ResponseWriter, r *http.Reques
 		refuse(http.StatusForbidden, sidCodeIdentityRefused, "the customer's identity is refused")
 		return
 	case err != nil:
-		slog.Warn("surface-principals/zitadel: resolution failed", "github_id", customer.GitHubID, "error", err)
+		slog.Warn("surface-principals/zitadel: resolution failed", "customer_provider", customer.Provider, "customer_subject", customer.Subject(), "error", err)
 		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "could not resolve the customer right now", nil)
 		return
 	case !auth.ValidPrincipalID(pid):
-		slog.Error("principal resolver returned no valid principal id", "github_id", customer.GitHubID, "principal", pid)
+		slog.Error("principal resolver returned no valid principal id", "customer_provider", customer.Provider, "customer_subject", customer.Subject(), "principal", pid)
 		writeErrorCode(w, http.StatusServiceUnavailable, sidCodeUnavailable, "could not resolve the customer right now", nil)
 		return
 	}
 	params["principal_id"] = pid
 	h.auditSurfaceIdentity(r, user, "principal.resolve_zitadel", "succeeded", params)
-	writeJSON(w, http.StatusOK, map[string]string{
-		"principalId": pid, "githubId": customer.GitHubID, "githubLogin": customer.GitHubLogin,
-	})
+	// provider names the proof. A GitHub customer keeps githubId and
+	// githubLogin; a Google customer has googleSub and neither of them, so
+	// a client that still requires githubId refuses a Google customer
+	// rather than mistaking one for a GitHub account.
+	resp := map[string]string{"principalId": pid, "provider": customer.Provider}
+	if customer.Provider == auth.ProviderGoogle {
+		resp["googleSub"] = customer.GoogleSub
+	} else {
+		resp["githubId"], resp["githubLogin"] = customer.GitHubID, customer.GitHubLogin
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// customerKeyName names the identity a customer principal is keyed on.
+func customerKeyName(c *auth.CustomerProof) string {
+	if c.Provider == auth.ProviderGoogle {
+		return "Google subject"
+	}
+	return "GitHub id"
 }

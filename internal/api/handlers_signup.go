@@ -24,12 +24,18 @@ import (
 )
 
 type SignupOptions struct {
-	PublicFlow   bool
-	Store        *principals.Store
-	SiteCall     func(context.Context, string, string, []byte) ([]byte, error)
-	Cohort       map[string]bool
-	GitHubClient *http.Client
-	GitHubURL    string
+	PublicFlow bool
+	// GooglePublicFlow admits Google customers through the public flow
+	// (ZITADEL_HOOK_CUSTOMER_CREATE_GOOGLE_SUBS is exactly "*" and Google
+	// customers are accepted). There are no invitations for Google
+	// customers, so without it a Google customer is never admitted; a
+	// Google creation allowlist grants an account, not a workspace.
+	GooglePublicFlow bool
+	Store            *principals.Store
+	SiteCall         func(context.Context, string, string, []byte) ([]byte, error)
+	Cohort           map[string]bool
+	GitHubClient     *http.Client
+	GitHubURL        string
 }
 
 var signupID = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
@@ -514,30 +520,50 @@ func (h *Handlers) claimSignupPrincipal(ctx context.Context, pid, tenant, memory
 		signupFailure(ctx, "claim_identity_read", err, "principal_id", pid)
 		return 503, "identity unreadable"
 	}
-	githubID := ""
+	githubID, googleSub := "", ""
 	for n := range identities {
 		i := &identities[n]
-		if i.Provider == "github" && i.RevokedAt == nil {
+		switch {
+		case i.RevokedAt != nil:
+		case i.Provider == auth.ProviderGitHub:
 			if githubID != "" && githubID != i.Subject {
 				return 409, "ambiguous GitHub identity"
 			}
 			githubID = i.Subject
+		case i.Provider == auth.ProviderGoogle && i.Issuer == "":
+			if googleSub != "" && googleSub != i.Subject {
+				return 409, "ambiguous Google identity"
+			}
+			googleSub = i.Subject
 		}
 	}
-	if !signupID.MatchString(githubID) {
+	// A customer principal is keyed on exactly one of the two
+	// (principals.ResolveCustomer); both is not a customer to admit.
+	provider, subject := auth.ProviderGitHub, githubID
+	switch {
+	case githubID != "" && googleSub != "":
+		return 409, "ambiguous customer identity"
+	case googleSub != "":
+		if !o.GooglePublicFlow {
+			return 403, "GitHub customer identity required"
+		}
+		if !auth.ValidGoogleSubject(googleSub) {
+			return 403, "Google customer identity required"
+		}
+		provider, subject = auth.ProviderGoogle, googleSub
+	case !signupID.MatchString(githubID):
 		return 403, "GitHub customer identity required"
-	}
-	if o.Cohort[githubID] {
+	case o.Cohort[githubID]:
 		return 0, ""
 	}
 	if profile != "starter" || memory != "512Mi" || cpu != "500m" || memoryLimit != "1Gi" || cpuLimit != "2" || !signupBound(pods, 5) || !signupBound(pvcs, 1) || !signupBound(services, 5) {
 		return 409, "workspace profile exceeds funded admission: use workspace_profile=starter (production 500m/512Mi, limits 2 CPU/1Gi, preview 100m/256Mi; PVC storage 10Gi production, no persistent preview disk)"
 	}
 
-	if o.PublicFlow {
-		err = o.Store.ClaimPublicSignup(ctx, githubID, tenant, pid)
+	if (provider == auth.ProviderGitHub && o.PublicFlow) || provider == auth.ProviderGoogle {
+		err = o.Store.ClaimPublicSignup(ctx, provider, subject, tenant, pid)
 	} else {
-		err = o.Store.ClaimSignup(ctx, githubID, tenant, pid)
+		err = o.Store.ClaimSignup(ctx, provider, subject, tenant, pid)
 	}
 	if errors.Is(err, principals.ErrSignupCapacity) {
 		return 409, "signup_capacity_exhausted"

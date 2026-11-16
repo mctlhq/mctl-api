@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/mctlhq/mctl-api/internal/auth"
 )
 
 func importTestSignup(t *testing.T, s *Store) SignupRequest {
@@ -94,13 +95,13 @@ func TestSignupClaimRetryExpiryAndDeliveryLease(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := s.ClaimSignup(ctx, "123", "test-team", principal.ID); err != nil {
+	if err := s.ClaimSignup(ctx, auth.ProviderGitHub, "123", "test-team", principal.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ClaimSignup(ctx, "123", "test-team", principal.ID); err != nil {
+	if err := s.ClaimSignup(ctx, auth.ProviderGitHub, "123", "test-team", principal.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ClaimSignup(ctx, "123", "other-team", principal.ID); !errors.Is(err, ErrSignupConflict) {
+	if err := s.ClaimSignup(ctx, auth.ProviderGitHub, "123", "other-team", principal.ID); !errors.Is(err, ErrSignupConflict) {
 		t.Fatalf("second workspace: %v", err)
 	}
 	lease := uuid.NewString()
@@ -162,7 +163,7 @@ func TestPublicSignupClaimsRemainBoundedUnderConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ClaimPublicSignup(ctx, "7788000", "public-0", zeroPrincipal.ID); !errors.Is(err, ErrSignupCapacity) {
+	if err := s.ClaimPublicSignup(ctx, auth.ProviderGitHub, "7788000", "public-0", zeroPrincipal.ID); !errors.Is(err, ErrSignupCapacity) {
 		t.Fatalf("public zero budget: %v", err)
 	}
 
@@ -180,7 +181,7 @@ func TestPublicSignupClaimsRemainBoundedUnderConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func(id, pid, tenant string) {
 			defer wg.Done()
-			err := s.ClaimPublicSignup(ctx, id, tenant, pid)
+			err := s.ClaimPublicSignup(ctx, auth.ProviderGitHub, id, tenant, pid)
 			if err == nil {
 				accepted.Add(1)
 			} else if !errors.Is(err, ErrSignupCapacity) {
@@ -223,7 +224,7 @@ func TestSignupConcurrentTenantConflictKeepsTheLoserRetryable(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			results[n] = s.ClaimSignup(ctx, fmt.Sprint(9977000+n), "shared-team", pids[n])
+			results[n] = s.ClaimSignup(ctx, auth.ProviderGitHub, fmt.Sprint(9977000+n), "shared-team", pids[n])
 		}(n)
 	}
 	wg.Wait()
@@ -237,7 +238,7 @@ func TestSignupConcurrentTenantConflictKeepsTheLoserRetryable(t *testing.T) {
 			t.Fatalf("expected semantic conflict: %v", err)
 		}
 		conflicted++
-		if err := s.ClaimSignup(ctx, fmt.Sprint(9977000+n), "other-team", pids[n]); err != nil {
+		if err := s.ClaimSignup(ctx, auth.ProviderGitHub, fmt.Sprint(9977000+n), "other-team", pids[n]); err != nil {
 			t.Fatalf("name loser cannot retry: %v", err)
 		}
 	}
@@ -247,5 +248,68 @@ func TestSignupConcurrentTenantConflictKeepsTheLoserRetryable(t *testing.T) {
 	capacity, err := s.SignupCapacity(ctx)
 	if err != nil || capacity.Used != 2 {
 		t.Fatalf("capacity %+v %v", capacity, err)
+	}
+}
+
+// mctl-api#1079: a Google customer is admitted by the public flow on its own
+// key. A GitHub id with the same digits is another customer, the Google
+// customer cannot spend a GitHub reservation, and there are no Google
+// invitations.
+func TestGooglePublicSignupIsKeyedOnTheGoogleSubject(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	const sub = "4455667788"
+	googler, err := s.Provision(ctx, auth.Identity{Provider: auth.ProviderGoogle, Subject: sub, Kind: auth.KindHuman})
+	if err != nil {
+		t.Fatal(err)
+	}
+	githubber, err := s.Provision(ctx, github(4455667788, "same-digits"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSignupCapacity(ctx, 3, "admin", "Reviewed resource budget"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClaimSignup(ctx, auth.ProviderGoogle, sub, "google-invited", googler.ID); !errors.Is(err, ErrSignupNotAllowed) {
+		t.Fatalf("Google invitation claim: %v, want ErrSignupNotAllowed", err)
+	}
+	if err := s.ClaimPublicSignup(ctx, auth.ProviderGitHub, sub, "google-as-github", googler.ID); !errors.Is(err, ErrSignupNotAllowed) {
+		t.Fatalf("Google principal claimed as GitHub: %v", err)
+	}
+	if err := s.ClaimPublicSignup(ctx, auth.ProviderGoogle, sub, "github-as-google", githubber.ID); !errors.Is(err, ErrSignupNotAllowed) {
+		t.Fatalf("GitHub principal claimed as Google: %v", err)
+	}
+	for _, bad := range []string{"", "not-a-sub", "12a"} {
+		if err := s.ClaimPublicSignup(ctx, auth.ProviderGoogle, bad, "google-bad", googler.ID); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("subject %q: %v, want ErrInvalid", bad, err)
+		}
+	}
+	if err := s.ClaimPublicSignup(ctx, "gitlab", sub, "gitlab-team", googler.ID); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unknown provider: %v, want ErrInvalid", err)
+	}
+
+	if err := s.ClaimPublicSignup(ctx, auth.ProviderGoogle, sub, "google-team", googler.ID); err != nil {
+		t.Fatalf("Google public claim: %v", err)
+	}
+	if err := s.ClaimPublicSignup(ctx, auth.ProviderGoogle, sub, "google-team", googler.ID); err != nil {
+		t.Fatalf("Google claim retry: %v", err)
+	}
+	if err := s.ClaimPublicSignup(ctx, auth.ProviderGoogle, sub, "google-other", googler.ID); !errors.Is(err, ErrSignupConflict) {
+		t.Fatalf("second Google workspace: %v, want ErrSignupConflict", err)
+	}
+	// The same digits as a GitHub id are another customer's key.
+	if err := s.ClaimPublicSignup(ctx, auth.ProviderGitHub, sub, "github-team", githubber.ID); err != nil {
+		t.Fatalf("GitHub claim with the Google subject's digits: %v", err)
+	}
+	var githubID, googleSub *string
+	if err := s.pool.QueryRow(ctx, `SELECT github_id,google_sub FROM signup_requests WHERE tenant='google-team'`).Scan(&githubID, &googleSub); err != nil {
+		t.Fatal(err)
+	}
+	if githubID != nil || googleSub == nil || *googleSub != sub {
+		t.Fatalf("Google row github_id=%v google_sub=%v", githubID, googleSub)
+	}
+	capacity, err := s.SignupCapacity(ctx)
+	if err != nil || capacity.Used != 2 {
+		t.Fatalf("capacity %+v %v, want both claims counted", capacity, err)
 	}
 }
