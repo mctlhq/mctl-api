@@ -1,8 +1,9 @@
 # ZITADEL identity hook (customers org)
 
 mctl-api serves three ZITADEL Actions v2 `restCall` targets that make the
-`customers` organization a GitHub-only, self-service sign-up org (mctl-web
-onboarding plan, B1). Payload shapes and failure semantics were checked
+`customers` organization a self-service sign-up org reached only through
+its IdPs (mctl-web onboarding plan, B1): GitHub, and optionally Google
+(mctl-api#1079, see "Google" below). Payload shapes and failure semantics were checked
 against the ZITADEL **v4.19.2** source. The proto fields the hook writes:
 `RetrieveIdentityProviderIntentResponse` oneof `user_action` with
 `create_user` (6) and `update_user` (7), the deprecated `add_human_user` (4)
@@ -64,7 +65,8 @@ Service.
 Runs on the response of `RetrieveIdentityProviderIntent`, which Login V2
 reads to decide whether to create or update the user.
 
-- Any IdP other than `ZITADEL_HOOK_GITHUB_IDP_ID` passes through untouched.
+- `ZITADEL_HOOK_GOOGLE_IDP_ID`, when set, is handled as in "Google" below.
+- Any other IdP than these passes through untouched.
 - The GitHub id must be numeric and the login a valid GitHub login.
   `rawInformation` (GitHub's `/user` body) must carry `type` = `User`, so
   organizations and bots are refused, an `id` equal to the intent's user id,
@@ -149,6 +151,66 @@ users of other organizations are not affected. To invite someone, add their
 GitHub id (`gh api users/<login> --jq .id`) and roll mctl-api. The env var is
 read at start.
 
+## Google
+
+Slice 1 of mctl-api#1079. With `ZITADEL_HOOK_GOOGLE_IDP_ID` set, the
+customers Google IdP gets the treatment below. Relying parties do not accept
+a Google account yet: `auth.ReadCustomerProof` refuses any customers token
+whose `mctl:idp` is not `github`, so until slice 2 (principal resolution by
+`(google, sub)`) a Google account exists in ZITADEL but signs in nowhere.
+
+**Identity.** The OIDC subject (`sub`), stable and never reused by Google.
+The email is never an identity; relying parties must not authorize on it.
+Only numeric subjects are accepted (`^[0-9]{1,64}$`); anything else is a
+refusal, never normalised.
+
+**Intent.** ZITADEL's Google provider is OIDC: it exchanges the code,
+validates the ID token, and reads Google's userinfo server-side, which
+becomes `rawInformation`. Unlike GitHub's, Google's `email_verified` is
+Google's own statement, so the hook makes **no outbound call** for Google.
+
+- `rawInformation.sub` must be a string equal to the intent's user id.
+- A new account needs `email_verified` = `true` (a JSON boolean) and a
+  well-formed `email`; otherwise `412`.
+- **New user, subject not on the Google creation allowlist** → `403`
+  (`intent_customer_create_not_allowed:google:<sub>`). The reason carries
+  the subject, never the email.
+- **Existing user**: `updateUser` with the profile and, when verified, the
+  email. No metadata: `google_sub` never changes.
+- **New user**: `createUser` with `organizationId` = customers, `username`
+  = `google.<sub>@mctl.ai`, the verified email, exactly one Google
+  `idpLinks` entry (`userName` = the email) and metadata `google_sub` only.
+
+**Username.** Google has no username. `google.<sub>` contains a dot, which a
+GitHub login cannot, so it never equals a GitHub-derived `<login>@mctl.ai`;
+and `sub` is unique, so two Google users never collide. The email local part
+was rejected: it collides between people and could imitate an admin or
+tenant login. ZITADEL's unique-username constraint remains the backstop: a
+collision fails creation, it never merges accounts.
+
+**Reserved logins** do not apply. They protect grants keyed on a GitHub
+login, and a Google account has none, so the tenant checkout is not read.
+
+**Creation allowlist.** `ZITADEL_HOOK_CUSTOMER_CREATE_GOOGLE_SUBS`, with the
+GitHub list's semantics: unset is nobody, exactly `*` is anyone, a malformed
+value refuses boot. Enforced in `/intent` and in the gate. The signup
+invitation store and the deletion probe are keyed on the GitHub id and are
+**not** consulted for Google; Google customers cannot be deleted through the
+current flow, so there is no pending deletion to miss. Slice 3 must add both
+before Google signup or deletion exists.
+
+**Linking.** Off on the Google IdP, and the link methods are gated for every
+customers IdP. A person who signs in once with GitHub and once with Google
+gets two separate accounts (and, from slice 2, two principals), even with the
+same email. Merging them is an admin action, never automatic. The update
+path writes a verified email onto the user ZITADEL resolved for the Google
+link; the hard constraint above applies to the Google IdP as well: an org IdP
+of customers only.
+
+**One identity per account.** The gate refuses a GitHub creation that
+carries `google_sub` and a Google creation that carries `github_id` or
+`github_login`; the token hook refuses an account that has both.
+
 ## Create gate (`/create-user`)
 
 ### Method inventory (v4.19.2)
@@ -195,6 +257,7 @@ RPC in v4.19.2). Keys are matched as raw text in the request:
   caller is the Login V2 service user, which syncs the login the hook set on
   `/intent`. It is allowed elsewhere because `zitadel-iac` writes it for
   admin and tenant users (`github-login.tf`).
+- `google_sub` is refused in every org, like `github_id`.
 - Any other key passes.
 
 A request that names neither the customers org nor a customers context can
@@ -209,7 +272,8 @@ It is the one exception to the invariant and must stay unused for customers.
 any of these hold:
 
 - the call's context org is customers;
-- the customers org ID or the GitHub IdP ID appears anywhere in the request;
+- the customers org ID or any customers IdP ID (GitHub, Google) appears
+  anywhere in the request;
 - it carries any `orgDomain`/`org_domain` field, whatever the value
   (customers also has its generated `<org>.<instance domain>` domain, and the
   hook cannot resolve a domain to an organization);
@@ -235,9 +299,10 @@ Everything else passes through. In scope, all of these must hold:
 3. The user is human, not a machine.
 4. There is no password, hashed password or TOTP secret.
 5. There is exactly one IdP link, and it is to the GitHub IdP, with a numeric
-   id and a valid login.
+   id and a valid login (Google links: see below).
 6. Metadata `github_id` equals the link's user id and `github_login` equals
-   its login. The same key given twice with different values is refused.
+   its login, and there is no `google_sub`. The same key given twice with
+   different values is refused.
 7. The email is verified.
 8. `username` is `<lowercase login>@mctl.ai`.
 9. The link's GitHub id is on the creation allowlist (as above).
@@ -246,18 +311,30 @@ Everything else passes through. In scope, all of these must hold:
 Rules 1–10 are exactly what `/intent` produces, so a hook-shaped request passes
 its own gate. A test pins this.
 
+A link to the Google IdP keeps rules 1–4 and replaces the rest: a numeric
+`sub`; metadata `google_sub` equal to it and no `github_id`/`github_login`;
+a verified, well-formed email equal (case-insensitively) to the link's
+`userName`; `username` = `google.<sub>@mctl.ai`; the subject on the Google
+creation allowlist. A test pins that the Google intent's output passes too.
+With `ZITADEL_HOOK_GOOGLE_IDP_ID` unset, a Google link fails rule 5.
+
 ## Token claims (`/token-claims`)
 
 For a user in customers and a client id in `ZITADEL_HOOK_CLAIM_CLIENT_IDS`,
 the hook appends `mctl:org=customers`, `mctl:idp=github`, `mctl:github_id` and
-`mctl:github_login`, read from user metadata.
+`mctl:github_login`, read from user metadata. A Google account (metadata
+`google_sub`) gets `mctl:org=customers`, `mctl:idp=google` and
+`mctl:google_sub` instead, and no `mctl:github_*`.
 
 It appends `mctl:refused` instead in two cases:
 
 - metadata `github_id` or `github_login` is missing or invalid →
   `mctl:refused=no_github_identity`;
 - the login is in the static reserved list (for example, a customer renamed
-  their GitHub account to an admin login) → `mctl:refused=login_reserved`.
+  their GitHub account to an admin login) → `mctl:refused=login_reserved`;
+- `google_sub` is present but malformed → `mctl:refused=no_google_identity`;
+- `google_sub` and any `github_*` key are both present →
+  `mctl:refused=ambiguous_identity`.
 
 Relying parties (mctl-web, and later C0) must refuse any token that carries
 `mctl:refused`, or that lacks `mctl:github_id`, and must key identity on
@@ -270,11 +347,13 @@ Relying parties (mctl-web, and later C0) must refuse any token that carries
 |---|---|---|
 | `ZITADEL_HOOK_CUSTOMERS_ORG_ID` | yes (unset = hook off) | customers org ID |
 | `ZITADEL_HOOK_GITHUB_IDP_ID` | yes | customers GitHub IdP ID; also the IdP the OAuth chooser's customer "Sign in with GitHub" sends ZITADEL to (`docs/principals.md`). Must be digits: never offered otherwise, and the boot is refused where that entry can be wired (not under `MCTL_FEDERATION_DISABLED`) |
+| `ZITADEL_HOOK_GOOGLE_IDP_ID` | no (unset = Google not handled) | customers Google IdP ID. Must be digits and differ from the GitHub IdP ID; otherwise boot is refused |
 | `ZITADEL_HOOK_LOGIN_CLIENT_USER_ID` | yes | Login V2 service user ID (the only allowed `CreateUser` caller in customers) |
 | `ZITADEL_HOOK_CLAIM_CLIENT_IDS` | yes | CSV of OIDC client IDs that get `mctl:*` claims (`mctl-web`, `mctl-web-dev`) |
 | `ZITADEL_HOOK_USERNAME_DOMAIN` | no, default `mctl.ai` | username suffix (`<login>@<domain>`) only; org domains are not compared |
 | `ZITADEL_HOOK_RESERVED_LOGINS` | no | CSV of extra reserved logins; `ADMIN_USERS` is always added |
 | `ZITADEL_HOOK_CUSTOMER_CREATE_GITHUB_IDS` | no (unset = nobody) | CSV of GitHub numeric ids that may create a new customers account, or exactly `*` for anyone. A malformed value refuses boot |
+| `ZITADEL_HOOK_CUSTOMER_CREATE_GOOGLE_SUBS` | no (unset = nobody) | CSV of numeric Google subjects that may create a new customers account, or exactly `*` for anyone. A malformed value refuses boot |
 | `ZITADEL_HOOK_INTENT_SIGNING_KEYS` | yes, in practice | CSV; signing key(s) of the intent target |
 | `ZITADEL_HOOK_CREATE_SIGNING_KEYS` | yes, in practice | CSV; signing key(s) of the create-user target |
 | `ZITADEL_HOOK_TOKEN_SIGNING_KEYS` | yes, in practice | CSV; signing key(s) of the token target |
