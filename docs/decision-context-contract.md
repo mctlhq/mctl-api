@@ -201,8 +201,15 @@ A preview apply of a stored deploy plan (`dpl_`) is authorized by a
   the plan and its digest, revision, gitops commit, preview id and host, the
   grant and the principal who decided it, and who applied it. If that write
   fails, nothing is submitted and the spent grant is not reusable
-  (`503 deploy_apply_unavailable`; request a new grant). Status moves once,
-  from `submitting` to `submitted` (with the workflow name) or `submit_failed`.
+  (`503 deploy_apply_unavailable`; request a new grant). A plan applies once:
+  grants are per requester, so a second holder's apply is refused with
+  `409 deploy_plan_already_applied` before their grant is spent (or, if it
+  loses a race after that check, after the spend with nothing submitted), and
+  a record store that cannot be read refuses with 503 before the spend.
+  Status moves once, from `submitting` to `submitted` (with the workflow
+  name) or to `submit_failed` only when the submit certainly created no
+  workflow; an ambiguous submit error leaves it in `submitting` (outcome not
+  recorded), since a guess could not be corrected later.
   `image_digest`, `argo_revision`, `health` and `health_url` are written once
   when observed; until then health reads `unknown`, which never means healthy.
   Planned and granted fields are immutable and rows are never deleted

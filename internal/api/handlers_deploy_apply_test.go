@@ -207,7 +207,13 @@ func (f *grantFixture) request(t *testing.T, user *auth.User, planID string, wan
 // will, and returns its id.
 func (f *grantFixture) grant(t *testing.T, planID string) string {
 	t.Helper()
-	body := f.request(t, f.dev, planID, http.StatusCreated)
+	return f.grantAs(t, f.dev, planID)
+}
+
+// grantAs is grant for another requester of the tenant.
+func (f *grantFixture) grantAs(t *testing.T, requester *auth.User, planID string) string {
+	t.Helper()
+	body := f.request(t, requester, planID, http.StatusCreated)
 	id := body["approval"].(map[string]any)["id"].(string)
 	digest := body["decision_context"].(map[string]any)["context_digest"].(string)
 	if _, err := f.wi.DecideDeployApproval(context.Background(), workitems.ActionDecisionInput{

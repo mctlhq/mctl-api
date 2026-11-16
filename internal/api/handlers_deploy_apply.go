@@ -53,6 +53,7 @@ const (
 	codeDeployApplyGrantRequired   = "deploy_apply_grant_required"
 	codeDeployApplyNotReproducible = "deploy_apply_not_reproducible"
 	codeDeployApplyUnavailable     = "deploy_apply_unavailable"
+	codeDeployPlanAlreadyApplied   = "deploy_plan_already_applied"
 	codeDeployPlanExpired          = "deploy_plan_expired"
 	codeDeployPlanNotFound         = "deploy_plan_not_found"
 
@@ -373,6 +374,19 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A plan applies once (mctl-api#1047): grants are per requester, so a
+	// second holder must be refused before spending theirs. A record store
+	// that cannot be read is not "not applied".
+	switch _, err := h.opts.DeployRecords.RecordForPlan(r.Context(), p.ID); {
+	case err == nil:
+		a.refuse(w, http.StatusConflict, codeDeployPlanAlreadyApplied, "this plan was already applied; create a new plan to deploy again")
+		return
+	case !errors.Is(err, deployplan.ErrRecordNotFound):
+		slog.Error("deploy apply: reading the deployment record", "plan", p.ID, "error", err)
+		a.refuse(w, http.StatusServiceUnavailable, codeDeployApplyUnavailable, "the deployment record store is not available; the grant was not spent")
+		return
+	}
+
 	// Revalidate the decider's ownership, then spend, then submit. Ownership
 	// lives in the gitops checkout, not in the ledger, so it cannot be read
 	// inside the spend's compare-and-set: a demotion landing between the two
@@ -408,6 +422,13 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 	}
 	rec, err := h.opts.DeployRecords.InsertRecord(r.Context(),
 		deployplan.NewRecord(p, spent.ID, spent.DecidedByPrincipalID, appliedBy, h.deployPlanNow()))
+	if errors.Is(err, deployplan.ErrRecordExists) {
+		// Another apply of this plan won the race after the check above.
+		a.set("denied", "denied:"+codeDeployPlanAlreadyApplied)
+		writeErrorCode(w, http.StatusConflict, codeDeployPlanAlreadyApplied,
+			"this plan was applied concurrently; nothing was submitted for this grant, and the plan cannot be applied again", nil)
+		return
+	}
 	if err != nil {
 		slog.Error("deploy apply: recording the deployment", "plan", p.ID, "approval", spent.ID, "error", err)
 		a.set("error", "error:record_failed")
@@ -429,7 +450,7 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := h.opts.Executor.Submit(submitCtx, op, input, user.ID, p.Tenant)
 	note := executionEnded(result, err)
-	h.recordSubmission(rec.ID, result, err)
+	h.recordSubmission(r.Context(), rec.ID, result, err)
 	if err != nil {
 		h.logAudit(r, audit.Entry{UserID: user.ID, Operation: previewDeployOp, Parameters: auditParams, Status: "failed",
 			RiskLevel: string(op.RiskLevel), Message: "submit failed: " + err.Error()})
@@ -503,18 +524,26 @@ func (h *Handlers) revalidateDeployGrant(w http.ResponseWriter, r *http.Request,
 	return res, true
 }
 
-// recordSubmission writes the submit's outcome into the deployment record.
-// It runs after the side effect, so a failure here cannot undo it: the
-// record stays in submitting, which reads as "outcome not recorded", never
-// as success, and the error is logged for the operator.
-func (h *Handlers) recordSubmission(id string, result *operations.SubmitResult, submitErr error) {
-	status, workflow := deployplan.RecordSubmitted, ""
-	if submitErr != nil || result == nil || result.WorkflowName == "" {
+// recordSubmission writes the submit's outcome into the deployment record,
+// only when the outcome is certain: submitted with a workflow name, or
+// failed before any Workflow was created. An ambiguous failure (the create
+// may have been accepted) leaves the record in submitting, which reads as
+// "outcome not recorded", never as success or failure; the status moves
+// only once, so a guess could not be corrected later. A failure to write
+// cannot undo the side effect either; it is logged for the operator.
+func (h *Handlers) recordSubmission(reqCtx context.Context, id string, result *operations.SubmitResult, submitErr error) {
+	var status, workflow string
+	switch {
+	case submitErr == nil && result != nil && result.WorkflowName != "":
+		status, workflow = deployplan.RecordSubmitted, result.WorkflowName
+	case submitErr != nil && operations.IsNotCreated(submitErr):
 		status = deployplan.RecordSubmitFailed
-	} else {
-		workflow = result.WorkflowName
+	default:
+		slog.Warn("deploy apply: submit outcome is ambiguous; the record stays in submitting",
+			"deployment", id, "error", submitErr)
+		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(reqCtx), 10*time.Second)
 	defer cancel()
 	if _, err := h.opts.DeployRecords.SetRecordSubmission(ctx, id, status, workflow); err != nil {
 		slog.Error("deploy apply: recording the submission outcome; the record stays in submitting",

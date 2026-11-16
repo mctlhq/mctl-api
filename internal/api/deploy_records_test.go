@@ -12,11 +12,14 @@ import (
 	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
-// failingSubmit is the fake executor with a submit that fails.
-type failingSubmit struct{ *fakeExecutor }
+// failingSubmit is the fake executor with a submit that fails with err.
+type failingSubmit struct {
+	*fakeExecutor
+	err error
+}
 
-func (failingSubmit) Submit(context.Context, operations.Operation, map[string]string, string, string) (*operations.SubmitResult, error) {
-	return nil, errors.New("argo unavailable")
+func (s failingSubmit) Submit(context.Context, operations.Operation, map[string]string, string, string) (*operations.SubmitResult, error) {
+	return nil, s.err
 }
 
 // mctl-api#1047: an apply leaves one record of what was planned, who
@@ -100,17 +103,69 @@ func TestDeployApply_NoRecordStoreRefusesBeforeSpend(t *testing.T) {
 	}
 }
 
-// A failed submit is recorded as failed, never as submitted.
-func TestDeployApply_FailedSubmitIsRecorded(t *testing.T) {
-	var f *grantFixture
-	f = newGrantFixture(t, faithfulValues, func(o *mctlapi.Options) { o.Executor = failingSubmit{&fakeExecutor{}} })
+// A submit that certainly created nothing is recorded as failed; one whose
+// create may have been accepted stays submitting, since the status moves
+// only once and a guess could never be corrected.
+func TestDeployApply_FailedSubmitIsRecordedOnlyWhenCertain(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"not created": {operations.NotCreated(errors.New("no cluster client")), deployplan.RecordSubmitFailed},
+		"ambiguous":   {errors.New("context deadline exceeded"), deployplan.RecordSubmitting},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newGrantFixture(t, faithfulValues, func(o *mctlapi.Options) { o.Executor = failingSubmit{&fakeExecutor{}, tc.err} })
+			planID := f.newPlan(t, faithfulIntent())
+			grant := f.grant(t, planID)
+			w := f.apply(t, f.dev, map[string]any{"plan_id": planID, "approval_id": grant})
+			assertStatus(t, w, http.StatusBadGateway)
+			rec, n := f.records.only()
+			if n != 1 || rec.Status != tc.want || rec.Workflow != "" || rec.Health != deployplan.HealthUnknown {
+				t.Fatalf("records = %d, %+v, want status %s", n, rec, tc.want)
+			}
+		})
+	}
+}
+
+// A plan applies once. A second requester's grant for an applied plan is
+// refused before it is spent; one that loses the race after the check is
+// spent but answered 409, with nothing submitted. A record store that cannot
+// be read refuses before the spend, never as "not applied".
+func TestDeployApply_PlanAppliesOnce(t *testing.T) {
+	f := newGrantFixture(t, faithfulValues)
+	f.members.roles["acme|prn_grantdev2"] = "developer"
+	bob := f.human(t, "bob", "prn_grantdev2")
 	planID := f.newPlan(t, faithfulIntent())
-	grant := f.grant(t, planID)
-	w := f.apply(t, f.dev, map[string]any{"plan_id": planID, "approval_id": grant})
-	assertStatus(t, w, http.StatusBadGateway)
-	rec, n := f.records.only()
-	if n != 1 || rec.Status != deployplan.RecordSubmitFailed || rec.Workflow != "" || rec.Health != deployplan.HealthUnknown {
-		t.Fatalf("records = %d, %+v", n, rec)
+	aliceGrant := f.grant(t, planID)
+	bobGrant := f.grantAs(t, bob, planID)
+	if aliceGrant == bobGrant {
+		t.Fatal("two requesters share one grant; the test needs two")
+	}
+	assertStatus(t, f.apply(t, f.dev, map[string]any{"plan_id": planID, "approval_id": aliceGrant}), http.StatusAccepted)
+
+	w := f.apply(t, bob, map[string]any{"plan_id": planID, "approval_id": bobGrant})
+	if w.Code != http.StatusConflict || errCode(t, w) != "deploy_plan_already_applied" {
+		t.Fatalf("second apply = %d %s", w.Code, w.Body.String())
+	}
+	if f.state(t, bobGrant) != workitems.ApprovalApproved || len(f.exec.submitted) != 1 {
+		t.Fatalf("refused apply spent %s or submitted %v", f.state(t, bobGrant), f.exec.submitted)
+	}
+
+	f.records.getErr = errors.New("db down")
+	w = f.apply(t, bob, map[string]any{"plan_id": planID, "approval_id": bobGrant})
+	if w.Code != http.StatusServiceUnavailable || f.state(t, bobGrant) != workitems.ApprovalApproved {
+		t.Fatalf("unreadable store = %d %s, grant %s", w.Code, w.Body.String(), f.state(t, bobGrant))
+	}
+	f.records.getErr = nil
+
+	f.records.missOnLookup = true
+	w = f.apply(t, bob, map[string]any{"plan_id": planID, "approval_id": bobGrant})
+	if w.Code != http.StatusConflict || errCode(t, w) != "deploy_plan_already_applied" {
+		t.Fatalf("raced apply = %d %s", w.Code, w.Body.String())
+	}
+	if f.state(t, bobGrant) != workitems.ApprovalConsumed || len(f.exec.submitted) != 1 {
+		t.Fatalf("raced apply: grant %s, submitted %v", f.state(t, bobGrant), f.exec.submitted)
 	}
 }
 

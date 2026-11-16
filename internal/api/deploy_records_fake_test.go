@@ -16,6 +16,9 @@ type fakeRecordStore struct {
 	insertErr error
 	setErr    error
 	getErr    error
+	// missOnLookup makes RecordForPlan miss a record that exists, as a
+	// concurrent apply landing after the pre-spend check would.
+	missOnLookup bool
 }
 
 func newFakeRecordStore() *fakeRecordStore {
@@ -72,6 +75,9 @@ func (s *fakeRecordStore) RecordForPlan(_ context.Context, planID string) (*depl
 	defer s.mu.Unlock()
 	if s.getErr != nil {
 		return nil, s.getErr
+	}
+	if s.missOnLookup {
+		return nil, deployplan.ErrRecordNotFound
 	}
 	for _, r := range s.byID {
 		if r.PlanID == planID {
