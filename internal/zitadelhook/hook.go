@@ -22,7 +22,9 @@
 //     from GitHub, refuses reserved and non-user logins and new accounts
 //     whose GitHub id is not on the creation allowlist, and replaces the
 //     user action with a fully specified createUser (organization set
-//     explicitly) or updateUser. Interrupts on error.
+//     explicitly) or updateUser. The customers Google IdP, when configured,
+//     gets the same treatment keyed on the Google subject (see
+//     intentGoogle). Interrupts on error.
 //   - CreateGate: a request execution on every user-creating method. A user
 //     can enter "customers" only through v2 CreateUser called by the Login V2
 //     service user with exactly the shape Intent produces; every other path
@@ -52,10 +54,14 @@ import (
 	"github.com/mctlhq/mctl-api/internal/gitops"
 )
 
-// Metadata keys written on customers accounts.
+// Metadata keys written on customers accounts. A GitHub account carries
+// github_id and github_login; a Google account carries google_sub only. No
+// account ever carries both (the create gate refuses it, and the token hook
+// refuses an account that does).
 const (
 	MetaGitHubID    = "github_id"
 	MetaGitHubLogin = "github_login"
+	MetaGoogleSub   = "google_sub"
 )
 
 // Claims appended to tokens of customers accounts.
@@ -64,13 +70,26 @@ const (
 	ClaimIdP         = "mctl:idp"
 	ClaimGitHubID    = "mctl:github_id"
 	ClaimGitHubLogin = "mctl:github_login"
+	ClaimGoogleSub   = "mctl:google_sub"
 	ClaimRefused     = "mctl:refused"
+)
+
+// Values of ClaimIdP.
+const (
+	IdPGitHub = "github"
+	IdPGoogle = "google"
 )
 
 // Refusal reasons put into ClaimRefused.
 const (
 	RefusedNoGitHubIdentity = "no_github_identity"
 	RefusedLoginReserved    = "login_reserved"
+	// RefusedNoGoogleIdentity: google_sub metadata is present but malformed.
+	RefusedNoGoogleIdentity = "no_google_identity"
+	// RefusedAmbiguousIdentity: an account carries both a GitHub and a
+	// Google identity. The gate never creates one; it is refused rather
+	// than resolved to either.
+	RefusedAmbiguousIdentity = "ambiguous_identity"
 )
 
 // Full gRPC method names of the user-creating methods in ZITADEL v4.19.2.
@@ -135,6 +154,18 @@ var githubLoginRE = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9]|-[A-Za-z0-9])
 
 var digitsRE = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
 
+// googleSubRE is the Google subject the hook accepts. Google documents sub
+// as up to 255 case-sensitive ASCII characters; every sub observed is a
+// decimal number. Only that form is accepted: it is safe in a username
+// (case-insensitive in ZITADEL) and in a log reason. Anything else is
+// refused, never normalised.
+var googleSubRE = regexp.MustCompile(`^[0-9]{1,64}$`)
+
+// googleUsernamePrefix starts every Google customers username. It contains
+// a dot, which GitHub logins cannot, so google.<sub>@<domain> never equals
+// a GitHub-derived <login>@<domain>.
+const googleUsernamePrefix = "google."
+
 // Config is the hook's static configuration. Every ID is required; New
 // refuses an incomplete config so a half-wired hook never runs.
 type Config struct {
@@ -142,6 +173,11 @@ type Config struct {
 	CustomersOrgID string
 	// GitHubIdPID is the ID of the GitHub IdP configured on that org.
 	GitHubIdPID string
+	// GoogleIdPID is the ID of the Google IdP configured on that org.
+	// Optional: empty means the hook does not handle Google, and the create
+	// gate refuses every Google link into customers (only the configured
+	// IdPs are allowed shapes).
+	GoogleIdPID string
 	// LoginClientUserID is the user ID of the Login V2 service user, the
 	// only caller allowed to create a customers account.
 	LoginClientUserID string
@@ -157,7 +193,14 @@ type Config struct {
 	// a NEW customers account (ParseCustomerCreateAllowlist). Empty allows
 	// nobody, so creation is closed until it is listed; exactly "*" allows
 	// anyone (the public cutover). Existing accounts sign in regardless.
-	CustomerCreateGitHubIDs   []string
+	CustomerCreateGitHubIDs []string
+	// CustomerCreateGoogleSubs is the same allowlist for Google accounts,
+	// keyed on the Google subject (ParseCustomerCreateGoogleAllowlist).
+	// Empty allows nobody; exactly "*" allows anyone. The signup invitation
+	// store is keyed on GitHub ids and is not consulted for Google.
+	CustomerCreateGoogleSubs []string
+	// CustomerInvitationAllowed and CreationPending are keyed on the GitHub
+	// id and are consulted for GitHub accounts only.
 	CustomerInvitationAllowed func(context.Context, string) (bool, error)
 	// CreationPending refuses re-registration until a durable deletion completes.
 	CreationPending func(context.Context, string) (bool, error)
@@ -184,6 +227,21 @@ func ParseCustomerCreateAllowlist(entries []string) ([]string, error) {
 	return entries, nil
 }
 
+// ParseCustomerCreateGoogleAllowlist validates the Google creation
+// allowlist: numeric Google subjects, or exactly CreateAnyone alone. An
+// empty list is valid and allows nobody.
+func ParseCustomerCreateGoogleAllowlist(entries []string) ([]string, error) {
+	if len(entries) == 1 && entries[0] == CreateAnyone {
+		return entries, nil
+	}
+	for _, e := range entries {
+		if !googleSubRE.MatchString(e) {
+			return nil, fmt.Errorf("google customer creation allowlist entry %q: want numeric Google subjects, or exactly %q alone", e, CreateAnyone)
+		}
+	}
+	return entries, nil
+}
+
 // TenantLister reads tenant membership from the gitops checkout. A read
 // failure is an error, never an empty list.
 type TenantLister interface {
@@ -197,9 +255,12 @@ type Hook struct {
 	// createAnyone and createIDs are CustomerCreateGitHubIDs.
 	createAnyone bool
 	createIDs    map[string]bool
-	clients      map[string]bool
-	tenants      TenantLister
-	http         *http.Client
+	// googleCreateAnyone and googleCreateSubs are CustomerCreateGoogleSubs.
+	googleCreateAnyone bool
+	googleCreateSubs   map[string]bool
+	clients            map[string]bool
+	tenants            TenantLister
+	http               *http.Client
 }
 
 // New validates cfg and returns a Hook. tenants may not be nil: reserving
@@ -227,6 +288,9 @@ func New(cfg Config, tenants TenantLister, client *http.Client) (*Hook, error) {
 	if _, err := ParseCustomerCreateAllowlist(cfg.CustomerCreateGitHubIDs); err != nil {
 		return nil, fmt.Errorf("zitadelhook: %w", err)
 	}
+	if _, err := ParseCustomerCreateGoogleAllowlist(cfg.CustomerCreateGoogleSubs); err != nil {
+		return nil, fmt.Errorf("zitadelhook: %w", err)
+	}
 	if cfg.UsernameDomain == "" {
 		cfg.UsernameDomain = defaultUsernameDomain
 	}
@@ -236,12 +300,19 @@ func New(cfg Config, tenants TenantLister, client *http.Client) (*Hook, error) {
 	if client == nil {
 		client = &http.Client{Timeout: githubRequestTimeout}
 	}
-	h := &Hook{cfg: cfg, reserved: map[string]bool{}, clients: map[string]bool{}, createIDs: map[string]bool{}, tenants: tenants, http: client}
+	h := &Hook{cfg: cfg, reserved: map[string]bool{}, clients: map[string]bool{}, createIDs: map[string]bool{}, googleCreateSubs: map[string]bool{}, tenants: tenants, http: client}
 	for _, id := range cfg.CustomerCreateGitHubIDs {
 		if id == CreateAnyone {
 			h.createAnyone = true
 		} else {
 			h.createIDs[id] = true
+		}
+	}
+	for _, sub := range cfg.CustomerCreateGoogleSubs {
+		if sub == CreateAnyone {
+			h.googleCreateAnyone = true
+		} else {
+			h.googleCreateSubs[sub] = true
 		}
 	}
 	for _, l := range cfg.ReservedLogins {
@@ -313,6 +384,15 @@ const msgNoVerifiedEmail = "Verify an email address in GitHub, then sign in agai
 
 const msgNotAllowed = "This GitHub account cannot create an MCTL account."
 
+const msgGoogleNotAllowed = "This Google account cannot create an MCTL account."
+
+// Message shown to a Google user whose address Google has not verified.
+const msgNoVerifiedGoogleEmail = "Verify your email address with Google, then sign in again."
+
+// msgCreateOnlyBySignIn is the create gate's refusal for every path into
+// customers other than the hook-shaped one.
+const msgCreateOnlyBySignIn = "Customer accounts are created only through GitHub or Google sign-in."
+
 // Message shown to a person whose GitHub account is not (yet) allowed to
 // create a customers account.
 const msgCreateNotAllowed = "New MCTL accounts are by invitation only for now. Contact mctl support to be invited."
@@ -327,6 +407,37 @@ func (h *Hook) mayCreate(ctx context.Context, githubID string) (bool, error) {
 		return h.cfg.CustomerInvitationAllowed(ctx, githubID)
 	}
 	return false, nil
+}
+
+// mayCreateGoogle reports whether the Google subject may create a new
+// customers account. The invitation store is keyed on GitHub ids, so only
+// the static list applies.
+func (h *Hook) mayCreateGoogle(sub string) bool {
+	return h.googleCreateAnyone || h.googleCreateSubs[sub]
+}
+
+// isGoogleIdP reports whether id is the configured customers Google IdP.
+// An unconfigured Google IdP matches nothing, not the empty id.
+func (h *Hook) isGoogleIdP(id string) bool {
+	return h.cfg.GoogleIdPID != "" && id == h.cfg.GoogleIdPID
+}
+
+// customerIdPIDs are the IdP ids configured on customers.
+func (h *Hook) customerIdPIDs() []string {
+	if h.cfg.GoogleIdPID == "" {
+		return []string{h.cfg.GitHubIdPID}
+	}
+	return []string{h.cfg.GitHubIdPID, h.cfg.GoogleIdPID}
+}
+
+// namesCustomerIdP reports whether raw mentions any customers IdP id.
+func (h *Hook) namesCustomerIdP(raw string) bool {
+	for _, id := range h.customerIdPIDs() {
+		if strings.Contains(raw, id) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------- intent
@@ -362,6 +473,9 @@ func (h *Hook) Intent(ctx context.Context, body []byte) Result {
 	var info idpInformation
 	if err := json.Unmarshal(rawInfo, &info); err != nil {
 		return failure("intent_unparsable_idp_information")
+	}
+	if h.isGoogleIdP(info.IDPID) {
+		return h.intentGoogle(p, info)
 	}
 	if info.IDPID != h.cfg.GitHubIdPID {
 		return pass("intent_other_idp")
@@ -439,16 +553,7 @@ func (h *Hook) Intent(ctx context.Context, body []byte) Result {
 		// GitHub outage keeps the stored one instead of locking everyone out.
 	}
 
-	resp := make(map[string]json.RawMessage, len(p.Response))
-	for k, v := range p.Response {
-		switch k {
-		case "addHumanUser", "updateHumanUser", "createUser", "updateUser",
-			"add_human_user", "update_human_user", "create_user", "update_user":
-			// Replaced below: the hook alone decides the user action.
-		default:
-			resp[k] = v
-		}
-	}
+	resp := withoutUserActions(p.Response)
 
 	profile := map[string]any{"givenName": name, "familyName": "-", "displayName": name}
 	if existingUserID != "" {
@@ -500,8 +605,118 @@ func (h *Hook) Intent(ctx context.Context, body []byte) Result {
 	return replace("intent_create", resp)
 }
 
+// withoutUserActions copies an intent response without any user action
+// ZITADEL proposed: the hook alone sets one.
+func withoutUserActions(in map[string]json.RawMessage) map[string]json.RawMessage {
+	resp := make(map[string]json.RawMessage, len(in))
+	for k, v := range in {
+		switch k {
+		case "addHumanUser", "updateHumanUser", "createUser", "updateUser",
+			"add_human_user", "update_human_user", "create_user", "update_user":
+		default:
+			resp[k] = v
+		}
+	}
+	return resp
+}
+
+// intentGoogle handles the intent of the customers Google IdP.
+//
+// ZITADEL's Google provider is OIDC: it exchanges the code, validates the
+// ID token and reads Google's userinfo server-side, and rawInformation is
+// that userinfo. Unlike GitHub's (where ZITADEL reports every address as
+// verified), Google's email_verified is Google's own statement, so the hook
+// makes no outbound call here.
+//
+// The identity is the subject (sub), never the email. A new account gets
+// username google.<sub>@<domain>, one Google IdP link and google_sub
+// metadata, and no GitHub metadata. Reserved logins do not apply: they
+// protect grants keyed on a GitHub login, and a Google account has none.
+func (h *Hook) intentGoogle(p intentPayload, info idpInformation) Result {
+	sub := info.UserID
+	if !googleSubRE.MatchString(sub) {
+		return refuse(http.StatusForbidden, "intent_bad_google_identity", msgGoogleNotAllowed)
+	}
+	// The userinfo must name the same subject ZITADEL projected; an absent
+	// field is a refusal, not a pass.
+	if rawSub, _ := info.RawInformation["sub"].(string); rawSub != sub {
+		return refuse(http.StatusForbidden, "intent_google_sub_mismatch", msgGoogleNotAllowed)
+	}
+	email, _ := info.RawInformation["email"].(string)
+	emailVerified, _ := info.RawInformation["email_verified"].(bool)
+	hasVerifiedEmail := emailVerified && validEmail(email)
+
+	name, _ := info.RawInformation["name"].(string)
+	name = strings.TrimSpace(name)
+	if name == "" && hasVerifiedEmail {
+		name = email[:strings.IndexByte(email, '@')]
+	}
+	if name == "" {
+		name = "MCTL user"
+	}
+
+	var existingUserID string
+	if raw, ok := p.Response["userId"]; ok {
+		if err := json.Unmarshal(raw, &existingUserID); err != nil {
+			return failure("intent_unparsable_user_id")
+		}
+	}
+
+	if existingUserID == "" {
+		// The reason carries the subject, never the email, so a refused
+		// person can be put on the list.
+		if !h.mayCreateGoogle(sub) {
+			return refuse(http.StatusForbidden, "intent_customer_create_not_allowed:google:"+sub, msgCreateNotAllowed)
+		}
+		if !hasVerifiedEmail {
+			return refuse(http.StatusPreconditionFailed, "intent_no_verified_email", msgNoVerifiedGoogleEmail)
+		}
+	}
+
+	resp := withoutUserActions(p.Response)
+	profile := map[string]any{"givenName": name, "familyName": "-", "displayName": name}
+	if existingUserID != "" {
+		human := map[string]any{"profile": profile}
+		if hasVerifiedEmail {
+			human["email"] = map[string]any{"email": email, "isVerified": true}
+		}
+		// No metadata: google_sub never changes, and nothing else is kept.
+		raw, err := json.Marshal(map[string]any{"userId": existingUserID, "human": human})
+		if err != nil {
+			return failure("marshal_failed")
+		}
+		resp["updateUser"] = raw
+		return replace("intent_update", resp)
+	}
+
+	create := map[string]any{
+		"organizationId": h.cfg.CustomersOrgID,
+		"username":       h.googleUsername(sub),
+		"human": map[string]any{
+			"profile": profile,
+			"email":   map[string]any{"email": email, "isVerified": true},
+			"idpLinks": []map[string]string{{
+				"idpId":    h.cfg.GoogleIdPID,
+				"userId":   sub,
+				"userName": email,
+			}},
+		},
+		"metadata": []map[string]string{metadataEntry(MetaGoogleSub, sub)},
+	}
+	raw, err := json.Marshal(create)
+	if err != nil {
+		return failure("marshal_failed")
+	}
+	resp["createUser"] = raw
+	return replace("intent_create", resp)
+}
+
 func (h *Hook) username(login string) string {
 	return strings.ToLower(login) + "@" + h.cfg.UsernameDomain
+}
+
+func (h *Hook) googleUsername(sub string) string {
+	return googleUsernamePrefix + sub + "@" + h.cfg.UsernameDomain
 }
 
 func metadataEntry(key, value string) map[string]string {
@@ -674,7 +889,7 @@ func (h *Hook) CreateGate(ctx context.Context, body []byte) Result {
 			return failure("gate_unparsable_request")
 		}
 		if scoped {
-			return refuse(http.StatusForbidden, "gate_path_closed", "Customer accounts are created only through GitHub sign-in.")
+			return refuse(http.StatusForbidden, "gate_path_closed", msgCreateOnlyBySignIn)
 		}
 		return pass("gate_other_org")
 	case MethodMgmtSetUserMetadata, MethodMgmtBulkSetUserMetadata, MethodV2SetUserMetadata, MethodV2UpdateUser:
@@ -695,10 +910,14 @@ func (h *Hook) CreateGate(ctx context.Context, body []byte) Result {
 //     Login V2 (the same caller the create path trusts), which syncs after
 //     /intent the login the hook itself set. Relying parties authorize on
 //     mctl:github_id, never on mctl:github_login.
+//   - google_sub is treated like github_id: only the create path writes it.
 func (h *Hook) gateIdentityMetadata(p requestPayload) Result {
 	raw := string(p.Request)
 	if strings.Contains(raw, MetaGitHubID) {
 		return refuse(http.StatusForbidden, "gate_github_id_immutable", "The GitHub identity of an account cannot be changed.")
+	}
+	if strings.Contains(raw, MetaGoogleSub) {
+		return refuse(http.StatusForbidden, "gate_google_sub_immutable", "The Google identity of an account cannot be changed.")
 	}
 	if !strings.Contains(raw, MetaGitHubLogin) {
 		return pass("gate_metadata_other_key")
@@ -717,9 +936,9 @@ func (h *Hook) gateIdentityMetadata(p requestPayload) Result {
 }
 
 // touchesCustomers reports whether a non-CreateUser creation request could
-// put a user into customers or link one to its GitHub IdP. It is
+// put a user into customers or link one to one of its IdPs. It is
 // deliberately coarse: the org resolved from the call's context, or the
-// customers org ID, the GitHub IdP ID or the customers domain anywhere in
+// customers org ID, any customers IdP ID or the customers domain anywhere in
 // the request. A false positive refuses an admin call; it never lets a user
 // in.
 func (h *Hook) touchesCustomers(p requestPayload) (bool, error) {
@@ -727,7 +946,7 @@ func (h *Hook) touchesCustomers(p requestPayload) (bool, error) {
 		return true, nil
 	}
 	raw := string(p.Request)
-	if strings.Contains(raw, h.cfg.CustomersOrgID) || strings.Contains(raw, h.cfg.GitHubIdPID) {
+	if strings.Contains(raw, h.cfg.CustomersOrgID) || h.namesCustomerIdP(raw) {
 		return true, nil
 	}
 	var anyReq any
@@ -768,11 +987,11 @@ func (h *Hook) gateCreateUser(ctx context.Context, p requestPayload) Result {
 	if err := json.Unmarshal(p.Request, &req); err != nil {
 		return failure("gate_unparsable_request")
 	}
-	linksGitHub := false
+	linksCustomerIdP := false
 	if req.Human != nil {
 		for _, l := range req.Human.IDPLinks {
-			if l.IDPID == h.cfg.GitHubIdPID {
-				linksGitHub = true
+			if l.IDPID == h.cfg.GitHubIdPID || h.isGoogleIdP(l.IDPID) {
+				linksCustomerIdP = true
 			}
 		}
 	}
@@ -795,13 +1014,14 @@ func (h *Hook) gateCreateUser(ctx context.Context, p requestPayload) Result {
 	intoCustomers := req.OrganizationID == h.cfg.CustomersOrgID ||
 		(req.OrganizationID == "" && p.OrgID == h.cfg.CustomersOrgID) ||
 		strings.Contains(raw, h.cfg.CustomersOrgID)
-	if !intoCustomers && !linksGitHub && !strings.Contains(raw, h.cfg.GitHubIdPID) {
+	if !intoCustomers && !linksCustomerIdP && !h.namesCustomerIdP(raw) {
 		return pass("gate_other_org")
 	}
 	no := func(reason string) Result {
-		return refuse(http.StatusForbidden, reason, "Customer accounts are created only through GitHub sign-in.")
+		return refuse(http.StatusForbidden, reason, msgCreateOnlyBySignIn)
 	}
-	// A GitHub-linked user outside customers would skip every rule below.
+	// A user linked to a customers IdP outside customers would skip every
+	// rule below.
 	if req.OrganizationID != h.cfg.CustomersOrgID {
 		return no("gate_github_link_outside_customers")
 	}
@@ -816,19 +1036,30 @@ func (h *Hook) gateCreateUser(ctx context.Context, p requestPayload) Result {
 	if len(req.Human.Password) > 0 || len(req.Human.HashedPassword) > 0 || req.Human.TOTPSecret != nil {
 		return no("gate_local_credentials")
 	}
-	if len(req.Human.IDPLinks) != 1 || req.Human.IDPLinks[0].IDPID != h.cfg.GitHubIdPID {
+	if len(req.Human.IDPLinks) != 1 {
+		return no("gate_idp_links")
+	}
+	meta, ok := decodeMetadata(append(append([]metadataJSON{}, req.Metadata...), req.Human.Metadata...))
+	if !ok {
+		return no("gate_bad_metadata")
+	}
+	if h.isGoogleIdP(req.Human.IDPLinks[0].IDPID) {
+		return h.gateCreateGoogleUser(req, meta, no)
+	}
+	if req.Human.IDPLinks[0].IDPID != h.cfg.GitHubIdPID {
 		return no("gate_idp_links")
 	}
 	link := req.Human.IDPLinks[0]
 	if !digitsRE.MatchString(link.UserID) || !githubLoginRE.MatchString(link.UserName) {
 		return no("gate_bad_link")
 	}
-	meta, ok := decodeMetadata(append(append([]metadataJSON{}, req.Metadata...), req.Human.Metadata...))
-	if !ok {
-		return no("gate_bad_metadata")
-	}
 	if meta[MetaGitHubID] != link.UserID || !strings.EqualFold(meta[MetaGitHubLogin], link.UserName) {
 		return no("gate_metadata_mismatch")
+	}
+	// One identity per account: the token hook refuses an account that
+	// carries both.
+	if _, has := meta[MetaGoogleSub]; has {
+		return no("gate_metadata_mixed_identity")
 	}
 	if req.Human.Email == nil || !req.Human.Email.IsVerified || !validEmail(req.Human.Email.Email) {
 		return no("gate_email_not_verified")
@@ -861,6 +1092,38 @@ func (h *Hook) gateCreateUser(ctx context.Context, p requestPayload) Result {
 	}
 	if reserved {
 		return no("gate_login_reserved")
+	}
+	return pass("gate_customer_create")
+}
+
+// gateCreateGoogleUser holds the Google-specific create rules. The caller
+// has already checked the org, the caller, the human shape, the absence of
+// local credentials, exactly one link (to the Google IdP) and the metadata
+// encoding. Every rule mirrors what intentGoogle produces.
+func (h *Hook) gateCreateGoogleUser(req createUserRequest, meta map[string]string, no func(string) Result) Result {
+	link := req.Human.IDPLinks[0]
+	if !googleSubRE.MatchString(link.UserID) {
+		return no("gate_bad_link")
+	}
+	if meta[MetaGoogleSub] != link.UserID {
+		return no("gate_metadata_mismatch")
+	}
+	_, hasID := meta[MetaGitHubID]
+	_, hasLogin := meta[MetaGitHubLogin]
+	if hasID || hasLogin {
+		return no("gate_metadata_mixed_identity")
+	}
+	if req.Human.Email == nil || !req.Human.Email.IsVerified || !validEmail(req.Human.Email.Email) {
+		return no("gate_email_not_verified")
+	}
+	if !strings.EqualFold(link.UserName, req.Human.Email.Email) {
+		return no("gate_bad_link")
+	}
+	if req.Username != h.googleUsername(link.UserID) {
+		return no("gate_username")
+	}
+	if !h.mayCreateGoogle(link.UserID) {
+		return refuse(http.StatusForbidden, "gate_customer_create_not_allowed:google:"+link.UserID, msgCreateNotAllowed)
 	}
 	return pass("gate_customer_create")
 }
@@ -938,6 +1201,23 @@ func (h *Hook) TokenClaims(_ context.Context, body []byte) Result {
 			"append_claims": []appendClaim{{Key: ClaimRefused, Value: reason}},
 		})
 	}
+	_, hasGitHubID := meta[MetaGitHubID]
+	_, hasGitHubLogin := meta[MetaGitHubLogin]
+	if sub, hasGoogle := meta[MetaGoogleSub]; hasGoogle {
+		if hasGitHubID || hasGitHubLogin {
+			return refused(RefusedAmbiguousIdentity)
+		}
+		if !googleSubRE.MatchString(sub) {
+			return refused(RefusedNoGoogleIdentity)
+		}
+		return replace("token_claims", map[string]any{
+			"append_claims": []appendClaim{
+				{Key: ClaimOrg, Value: "customers"},
+				{Key: ClaimIdP, Value: IdPGoogle},
+				{Key: ClaimGoogleSub, Value: sub},
+			},
+		})
+	}
 	if !digitsRE.MatchString(id) || !githubLoginRE.MatchString(login) {
 		return refused(RefusedNoGitHubIdentity)
 	}
@@ -950,7 +1230,7 @@ func (h *Hook) TokenClaims(_ context.Context, body []byte) Result {
 	return replace("token_claims", map[string]any{
 		"append_claims": []appendClaim{
 			{Key: ClaimOrg, Value: "customers"},
-			{Key: ClaimIdP, Value: "github"},
+			{Key: ClaimIdP, Value: IdPGitHub},
 			{Key: ClaimGitHubID, Value: id},
 			{Key: ClaimGitHubLogin, Value: login},
 		},
