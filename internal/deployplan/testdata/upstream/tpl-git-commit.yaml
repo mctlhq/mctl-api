@@ -45,6 +45,15 @@ spec:
             default: ""
           - name: image_user      # `uid` or `uid:gid` from check-image-user
             default: ""
+      # The mctl-gitops main commit this step left behind: its own commit, or
+      # main's head when there was nothing to change. deploy-service's health
+      # gate waits for Argo CD to be Synced at a revision containing it.
+      outputs:
+        parameters:
+          - name: commit_sha
+            valueFrom:
+              path: /tmp/commit_sha
+              default: ""
       script:
         image: ghcr.io/mctlhq/mctl-workflow-tools:1.0.0@sha256:5e367f737d4bffaa1b6ea04a29681dc760fd476790f80bf93cbc4571d4ccfe6b
         command: [sh]
@@ -697,12 +706,17 @@ spec:
           fi
 
           # ── 5. Push with rebase retry ──────────────────────────────────────
+          # Baseline for the commit_sha output: the head this step started
+          # from. Written before the loop so the file always exists; the push
+          # below replaces it with the head it actually left on main.
+          git rev-parse HEAD > /tmp/commit_sha
           MAX_RETRIES=5
           for i in $(seq 1 $MAX_RETRIES); do
             # On every attempt: a rebase below brings in main's current gate.
             sh platform-gitops/argo-workflows/scripts/release-gate-guard.sh outgoing origin/main || exit 1
             if git push origin HEAD:main; then
               echo "✅ Pushed successfully"
+              git rev-parse HEAD > /tmp/commit_sha
               break
             fi
             if [ $i -lt $MAX_RETRIES ]; then
