@@ -14,6 +14,7 @@ import (
 // a different set turns the test red.
 var previewSetKeys = []string{
 	"image.tag",
+	"image.digest",
 	"ingress.enabled",
 	"ingress.className",
 	`ingress.annotations.cert-manager\.io/cluster-issuer`,
@@ -214,6 +215,7 @@ func applyIntent(v map[string]any, in Intent) {
 
 func applyPreviewOverrides(v map[string]any, in Intent, previewID, host string) {
 	sub(v, "image")["tag"] = "rev-" + in.Spec.Source.Revision
+	sub(v, "image")["digest"] = ""
 	ing := sub(v, "ingress")
 	ing["enabled"] = true
 	ing["className"] = "traefik"

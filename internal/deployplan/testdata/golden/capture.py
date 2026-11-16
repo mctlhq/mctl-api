@@ -167,6 +167,7 @@ def effective(case, base, intent):
         out = yaml.safe_load(open(dst, encoding="utf-8"))
     subst = {
         "${TAG}": "rev-" + case["revision"],
+        "${DIGEST}": "",
         "${HOST}": case["host"],
         "${RELEASE}": "preview-%s-%s" % (case["service"], case["preview_id"]),
         "${PREVIEW_ID}": case["preview_id"],
