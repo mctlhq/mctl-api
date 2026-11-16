@@ -314,3 +314,12 @@ glovoBasketUISecret: ""
 # needs DEPLOY_APPROVAL_UI_ENABLED="true", SELF_URL and /deploy in
 # ingress.extraPaths. Empty by default: renders nothing.
 deployApprovalUISecret: ""
+
+# Optional: Secret holding RELEASE_APPROVAL_UI_CLIENT_ID and
+# RELEASE_APPROVAL_UI_CLIENT_SECRET, the confidential ZITADEL client of the
+# release approval page (mctlhq/mctl-api#1022). In production the zitadel-iac
+# Job writes both into the same Secret as MCTL_OIDC_PROVIDERS. The page also
+# needs RELEASE_APPROVAL_UI_ENABLED="true", RELEASE_APPROVAL_DECIDERS,
+# SELF_URL and /release in ingress.extraPaths. Empty by default: renders
+# nothing.
+releaseApprovalUISecret: ""
