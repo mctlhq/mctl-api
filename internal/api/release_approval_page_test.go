@@ -2,10 +2,11 @@ package api
 
 import (
 	"context"
+	crand "crypto/rand"
 	"encoding/json"
 	"fmt"
 	"html"
-	mrand "math/rand/v2"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -107,7 +108,11 @@ func releaseRouter(h *Handlers) http.Handler {
 // pendingRelease publishes a release to the resolver and opens its grant.
 func (e *releasePageEnv) pendingRelease() (string, workitems.ReleaseArtifact) {
 	e.t.Helper()
-	version := fmt.Sprintf("88.%d.%d", mrand.IntN(1_000_000_000), releasePageSeq.Add(1))
+	n, err := crand.Int(crand.Reader, big.NewInt(1_000_000_000))
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	version := fmt.Sprintf("88.%d.%d", n.Int64(), releasePageSeq.Add(1))
 	art := workitems.ReleaseArtifact{Repository: "mctlhq/mctl-api", Version: version,
 		TagCommit: strings.Repeat("a", 40), ImageDigest: "sha256:" + strings.Repeat("b", 64)}
 	e.resolver.set(version, &art, nil)
