@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/mctlhq/mctl-api/internal/auth"
 )
 
 // Decisions and the global slot budget share a PostgreSQL transaction lock.
@@ -28,6 +29,9 @@ CREATE TABLE IF NOT EXISTS signup_requests (
 CREATE UNIQUE INDEX IF NOT EXISTS signup_live_github ON signup_requests(github_id)
  WHERE status IN ('approved','claimed');
 CREATE UNIQUE INDEX IF NOT EXISTS signup_claimed_tenant ON signup_requests(tenant) WHERE status='claimed';
+ALTER TABLE signup_requests ADD COLUMN IF NOT EXISTS google_sub text;
+CREATE UNIQUE INDEX IF NOT EXISTS signup_live_google ON signup_requests(google_sub)
+ WHERE status IN ('approved','claimed');
 `
 
 var ErrSignupLeaseLost = errors.New("signup delivery lease lost")
@@ -199,23 +203,45 @@ func (s *Store) SignupAllowed(ctx context.Context, githubID string) (bool, error
 	return allowed, err
 }
 
+// signupKeyColumn is the signup_requests column a customer key is kept in.
+// A GitHub customer is keyed on github_id and a Google customer on
+// google_sub; a row never carries both. Invitations (DecideSignup) are
+// decided by GitHub login and so exist for GitHub customers only: a Google
+// customer is admitted by the public flow alone.
+func signupKeyColumn(provider, subject string) (string, error) {
+	switch {
+	case provider == auth.ProviderGitHub && subject != "":
+		return "github_id", nil
+	case provider == auth.ProviderGoogle && auth.ValidGoogleSubject(subject):
+		return "google_sub", nil
+	}
+	return "", ErrInvalid
+}
+
 // ClaimSignup pins one reservation to one workspace before any provisioning.
 // Ambiguous workflow submission keeps the claim; it is never freed by a timeout.
-func (s *Store) ClaimSignup(ctx context.Context, githubID, tenant, pid string) error {
-	return s.claimSignup(ctx, githubID, tenant, pid, false)
+// provider and subject are the customer's key (signupKeyColumn).
+func (s *Store) ClaimSignup(ctx context.Context, provider, subject, tenant, pid string) error {
+	return s.claimSignup(ctx, provider, subject, tenant, pid, false)
 }
 
 // Public mode still spends the same bounded durable budget; '*' never bypasses it.
-func (s *Store) ClaimPublicSignup(ctx context.Context, githubID, tenant, pid string) error {
-	return s.claimSignup(ctx, githubID, tenant, pid, true)
+func (s *Store) ClaimPublicSignup(ctx context.Context, provider, subject, tenant, pid string) error {
+	return s.claimSignup(ctx, provider, subject, tenant, pid, true)
 }
-func (s *Store) claimSignup(ctx context.Context, githubID, tenant, pid string, public bool) error {
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+func (s *Store) claimSignup(ctx context.Context, provider, subject, tenant, pid string, public bool) error {
+	column, err := signupKeyColumn(provider, subject)
+	if err != nil {
+		return err
+	}
+	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if err := lockPrincipalTx(ctx, tx, pid); err != nil {
 			return err
 		}
+		// A Google identity is issuer-less by construction (validIdentity);
+		// the GitHub check is left as it was.
 		var active bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM principals p JOIN external_identities x ON x.principal_id=p.id WHERE p.id=$1 AND p.status='active' AND p.kind='human' AND x.provider='github' AND x.subject=$2 AND x.revoked_at IS NULL)`, pid, githubID).Scan(&active); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM principals p JOIN external_identities x ON x.principal_id=p.id WHERE p.id=$1 AND p.status='active' AND p.kind='human' AND x.provider=$3 AND x.subject=$2 AND (x.provider<>'google' OR x.issuer='') AND x.revoked_at IS NULL)`, pid, subject, provider).Scan(&active); err != nil {
 			return err
 		}
 		if !active {
@@ -228,7 +254,7 @@ func (s *Store) claimSignup(ctx context.Context, githubID, tenant, pid string, p
 			return err
 		}
 		var id, status, currentTenant, currentPID string
-		err := tx.QueryRow(ctx, `SELECT id::text,status,coalesce(tenant,''),coalesce(principal_id,'') FROM signup_requests WHERE github_id=$1 AND status IN ('approved','claimed') FOR UPDATE`, githubID).Scan(&id, &status, &currentTenant, &currentPID)
+		err := tx.QueryRow(ctx, `SELECT id::text,status,coalesce(tenant,''),coalesce(principal_id,'') FROM signup_requests WHERE `+column+`=$1 AND status IN ('approved','claimed') FOR UPDATE`, subject).Scan(&id, &status, &currentTenant, &currentPID)
 		if errors.Is(err, pgx.ErrNoRows) && public {
 			var slots, used int
 			if err := tx.QueryRow(ctx, `SELECT slots,(SELECT count(*) FROM signup_requests WHERE status IN ('approved','claimed')) FROM signup_capacity WHERE singleton=true`).Scan(&slots, &used); err != nil {
@@ -237,7 +263,7 @@ func (s *Store) claimSignup(ctx context.Context, githubID, tenant, pid string, p
 			if used >= slots {
 				return ErrSignupCapacity
 			}
-			_, err = tx.Exec(ctx, `INSERT INTO signup_requests(id,created_at,status,github_id,actor,reason,decided_at,tenant,principal_id) VALUES($1,now(),'claimed',$2,$3,'Public signup admission',now(),$4,$3)`, uuid.NewString(), githubID, pid, tenant)
+			_, err = tx.Exec(ctx, `INSERT INTO signup_requests(id,created_at,status,`+column+`,actor,reason,decided_at,tenant,principal_id) VALUES($1,now(),'claimed',$2,$3,'Public signup admission',now(),$4,$3)`, uuid.NewString(), subject, pid, tenant)
 			return err
 		}
 		if errors.Is(err, pgx.ErrNoRows) {

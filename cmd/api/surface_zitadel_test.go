@@ -161,6 +161,9 @@ func TestCustomersGoogleIdPWiring(t *testing.T) {
 	if got := cfg.customersGoogleOrgID(); got != org {
 		t.Fatalf("customersGoogleOrgID = %q, want %s", got, org)
 	}
+	if s := surfaceZitadelOptions(cfg); s == nil || !s.CustomersGoogle {
+		t.Fatalf("surface options = %+v, want Google customers accepted", s)
+	}
 	for name, mutate := range map[string]func(*config){
 		"unset":            func(c *config) { c.ZitadelHook.GoogleIdPID = "" },
 		"malformed":        func(c *config) { c.ZitadelHook.GoogleIdPID = "google" },
@@ -175,6 +178,9 @@ func TestCustomersGoogleIdPWiring(t *testing.T) {
 		}
 		if got := c.customersGoogleOrgID(); got != "" {
 			t.Errorf("%s: Google customers accepted for org %q", name, got)
+		}
+		if s := surfaceZitadelOptions(c); s != nil && s.CustomersGoogle {
+			t.Errorf("%s: surface-principals/zitadel accepts Google customers", name)
 		}
 	}
 }

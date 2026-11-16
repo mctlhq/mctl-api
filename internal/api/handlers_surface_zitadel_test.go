@@ -277,3 +277,107 @@ func TestResolveZitadelPrincipal_RefusalsAreAudited(t *testing.T) {
 		}
 	}
 }
+
+// googleTokenClaims turns idToken's GitHub customer into a Google one.
+func googleTokenClaims() map[string]any {
+	over := googleCustomerClaims()
+	over[auth.ClaimCustomerGitHubID], over[auth.ClaimCustomerGitHubLogin] = nil, nil
+	over["preferred_username"] = "google." + testGoogleSub + "@mctl.ai"
+	return over
+}
+
+// With Google accepted, the portal gets the principal of the Google subject
+// the token proved, for both purposes, and the answer names the provider
+// instead of carrying an empty GitHub id.
+func TestResolveZitadelPrincipal_CustomerByProvenGoogleSubject(t *testing.T) {
+	for purpose, client := range map[string]string{"create": testWebClient, "signin": testPortalClient} {
+		t.Run(purpose, func(t *testing.T) {
+			e := newSurfaceZitadelEnv(t, signinResolver{prn: testCustomerPID}, func(o *SurfaceZitadelOptions) { o.CustomersGoogle = true })
+			code, body := e.resolve(e.idp.idToken(t, client, googleTokenClaims()), purpose)
+			if code != http.StatusOK || body["principalId"] != testCustomerPID || body["provider"] != "google" || body["googleSub"] != testGoogleSub {
+				t.Fatalf("resolve = %d %v", code, body)
+			}
+			if _, ok := body["githubId"]; ok {
+				t.Fatalf("a Google customer answered with a githubId: %v", body)
+			}
+			if _, ok := body["githubLogin"]; ok {
+				t.Fatalf("a Google customer answered with a githubLogin: %v", body)
+			}
+			if len(e.pr.ids) != 1 {
+				t.Fatalf("resolver asked %+v", e.pr.ids)
+			}
+			id := e.pr.ids[0]
+			if id.Provider != "zitadel" || id.Subject != "z-sub" || id.Customer == nil ||
+				id.Customer.Provider != auth.ProviderGoogle || id.Customer.GoogleSub != testGoogleSub || id.Customer.GitHubID != "" {
+				t.Fatalf("resolver asked %+v, want the ZITADEL identity with its Google proof", id)
+			}
+			found := false
+			for _, entry := range e.audit.List(100) {
+				if entry.Operation == "principal.resolve_zitadel" && entry.Status == "succeeded" &&
+					entry.Parameters["customer_provider"] == "google" && entry.Parameters["google_sub"] == testGoogleSub &&
+					entry.Parameters["github_id"] == "" {
+					found = true
+				}
+			}
+			if !found {
+				t.Error("no audit entry naming the Google subject")
+			}
+		})
+	}
+}
+
+// A GitHub customer's answer names its provider too, and keeps the GitHub
+// fields existing clients read.
+func TestResolveZitadelPrincipal_GitHubAnswerNamesItsProvider(t *testing.T) {
+	e := newSurfaceZitadelEnv(t, signinResolver{prn: testCustomerPID}, func(o *SurfaceZitadelOptions) { o.CustomersGoogle = true })
+	code, body := e.resolve(e.idp.idToken(t, testWebClient, nil), "create")
+	if code != http.StatusOK || body["provider"] != "github" || body["githubId"] != "268260640" || body["githubLogin"] != "mctl-reviewer" {
+		t.Fatalf("resolve = %d %v", code, body)
+	}
+	if _, ok := body["googleSub"]; ok {
+		t.Fatalf("a GitHub customer answered with a googleSub: %v", body)
+	}
+}
+
+// Dark by default: without CustomersGoogle a Google customer is unproven and
+// never reaches the resolver.
+func TestResolveZitadelPrincipal_GoogleIsDarkByDefault(t *testing.T) {
+	e := newSurfaceZitadelEnv(t, signinResolver{prn: testCustomerPID}, nil)
+	code, body := e.resolve(e.idp.idToken(t, testWebClient, googleTokenClaims()), "create")
+	if code != http.StatusForbidden || body["code"] != sidCodeCustomerUnproven {
+		t.Fatalf("resolve = %d %v, want 403 %s", code, body, sidCodeCustomerUnproven)
+	}
+	if msg, _ := body["error"].(string); strings.Contains(msg, "Google") {
+		t.Errorf("dark refusal names Google: %q", msg)
+	}
+	if len(e.pr.ids) != 0 {
+		t.Fatalf("resolver reached: %+v", e.pr.ids)
+	}
+}
+
+// A token proving both providers, or naming one and proving the other, is
+// unproven with Google on.
+func TestResolveZitadelPrincipal_MixedGoogleTokensAreRefused(t *testing.T) {
+	e := newSurfaceZitadelEnv(t, signinResolver{prn: testCustomerPID}, func(o *SurfaceZitadelOptions) { o.CustomersGoogle = true })
+	both := googleCustomerClaims()
+	github := map[string]any{auth.ClaimCustomerGoogleSub: testGoogleSub}
+	for name, over := range map[string]map[string]any{"google idp with GitHub claims": both, "github idp with a Google sub": github} {
+		code, body := e.resolve(e.idp.idToken(t, testWebClient, over), "create")
+		if msg, _ := body["error"].(string); code != http.StatusForbidden || body["code"] != sidCodeCustomerUnproven || !strings.Contains(msg, "GitHub or Google") {
+			t.Errorf("%s = %d %v, want 403 %s naming both providers", name, code, body, sidCodeCustomerUnproven)
+		}
+	}
+	if len(e.pr.ids) != 0 {
+		t.Fatalf("resolver reached: %+v", e.pr.ids)
+	}
+}
+
+// The conflict page names the key the principal is held by.
+func TestResolveZitadelPrincipal_GoogleConflictNamesTheSubject(t *testing.T) {
+	conflict := signinResolver{err: fmt.Errorf("%w: %w: %w", auth.ErrIdentityRefused, principals.ErrCustomerConflict, principals.ErrIdentityOwnedElsewhere)}
+	e := newSurfaceZitadelEnv(t, conflict, func(o *SurfaceZitadelOptions) { o.CustomersGoogle = true })
+	code, body := e.resolve(e.idp.idToken(t, testWebClient, googleTokenClaims()), "create")
+	if msg, _ := body["error"].(string); code != http.StatusConflict || body["code"] != sidCodeCustomerConflict || !strings.Contains(msg, "Google subject") {
+		t.Fatalf("resolve = %d %v", code, body)
+	}
+}

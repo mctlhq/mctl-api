@@ -738,8 +738,13 @@ as an audience and as `azp`: the mctl-web site's client
 (`MCTL_WEB_CLIENT_ID`) for `create`, the portal's (`ZITADEL_PORTAL_CLIENT_ID`)
 for `signin`. Any other client, the dev client included, is `401
 id_token_invalid`; a purpose whose client is not configured is `503`. The
-route answers `{"principalId", "githubId", "githubLogin"}`, keyed on the
-GitHub id the token proved. A token of another organization is `400
+route answers `{"principalId", "provider": "github", "githubId",
+"githubLogin"}`, keyed on the GitHub id the token proved. When Google
+customers are accepted (`ZITADEL_HOOK_GOOGLE_IDP_ID`, `docs/federation.md`,
+"Google customers") a Google customer's answer is `{"principalId",
+"provider": "google", "googleSub"}`, keyed on the Google subject, with no
+`githubId`: a client that still requires one refuses a Google customer
+instead of taking it for a GitHub account. A token of another organization is `400
 not_a_customer`, an unproven customer `403 customer_unproven`, a conflict
 `409 customer_conflict`, a disabled principal or refused identity `403`, a
 failed read `503`. Only the portal surface may call it. Resolutions are

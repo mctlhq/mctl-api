@@ -357,11 +357,25 @@ A customer may sign in with Google instead. The identity hook then issues
   conflict (409), never re-keyed.
 - **Mixed tokens are refused.** A Google token with any `mctl:github_*`
   claim, or a GitHub token with `mctl:google_sub`, is unproven.
-- **Not yet everywhere.** `POST /api/v1/surface-principals/zitadel`, signup
-  requests and customer deletion still read GitHub proofs only; a Google
-  customer gets `customer_unproven` there until slice 3. A Google customer
-  has no GitHub login, so routes that act as the caller's GitHub login
-  (repository sync) answer as for any principal without one.
+- **Portal resolution (slice 3).** `POST /api/v1/surface-principals/zitadel`
+  accepts a Google customer under the same condition and answers
+  `provider: "google"` and `googleSub` instead of the GitHub fields
+  (`docs/principals.md`).
+- **Workspaces.** A workspace claim (`POST
+  /api/v1/surface-principals/signup-claim`) is keyed on the customer's
+  provider: `signup_requests.github_id` for GitHub, `google_sub` for Google,
+  never both. Invitations are decided by GitHub login, so there are none
+  for Google: a Google customer is admitted by the public flow only, which
+  is on when `ZITADEL_HOOK_CUSTOMER_CREATE_GOOGLE_SUBS` is exactly `*` and
+  Google customers are accepted. It spends the same slot budget as GitHub
+  claims. A Google creation allowlist grants an account, not a workspace,
+  and no Google subject joins the GitHub pilot cohort. A principal holding
+  both a GitHub and a Google identity is refused as ambiguous.
+- **Not yet everywhere.** Customer deletion still reads GitHub identities
+  only, so a Google customer's deletion is refused until it is keyed by
+  provider too. A Google customer has no GitHub login, so routes that act
+  as the caller's GitHub login (repository sync) answer as for any
+  principal without one.
 
 ## GitHub Actions: CI deploys (mctl-api#530)
 

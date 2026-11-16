@@ -90,7 +90,7 @@ func TestCustomerDeletionRemovesOldIdentityAndPermitsFreshSubject(t *testing.T) 
 	if _, err := s.DecideSignup(ctx, signup.ID, "approved", "730001", "delete-customer", "admin", "Welcome"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ClaimSignup(ctx, "730001", "delete-test", p.ID); err != nil {
+	if err := s.ClaimSignup(ctx, auth.ProviderGitHub, "730001", "delete-test", p.ID); err != nil {
 		t.Fatal(err)
 	}
 	d, err := s.PrepareCustomerDeletion(ctx, "delete-test", p.ID, old.Issuer, "admin-approval")
