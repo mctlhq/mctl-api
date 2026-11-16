@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/glovoc2control"
 )
@@ -153,5 +154,88 @@ func TestGlovoC2KillSwitchDarkByDefault(t *testing.T) {
 	}
 	if !(&GlovoC2KillSwitch{}).mounted() {
 		t.Fatal("configured options must mount the route")
+	}
+}
+
+// killRouter builds the real router with an auth middleware that injects u, so
+// the mount decision in NewRouter is exercised, not just the nil helper.
+func killRouter(u *auth.User, k *GlovoC2KillSwitch) http.Handler {
+	return NewRouter(Options{
+		GlovoC2KillSwitch: k,
+		AuthMiddleware: func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				next.ServeHTTP(w, r.WithContext(auth.WithUser(r.Context(), u)))
+			})
+		},
+	})
+}
+
+func killRouterPost(h http.Handler, body string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest("POST", "/api/v1"+glovoC2KillSwitchPath, strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w
+}
+
+func TestGlovoC2KillSwitchRouteNotRegisteredWhenDark(t *testing.T) {
+	// Even an admin must see the router's own not-found: the route does not exist.
+	w := killRouterPost(killRouter(signupAdminUser(t), nil), `{"killed":true}`)
+	if w.Code != http.StatusNotFound && w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("dark router answered %d, want 404/405: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGlovoC2KillSwitchRouteEnabledGatesByPrincipal(t *testing.T) {
+	f := &fakeKillSetter{}
+	k := &GlovoC2KillSwitch{Setter: f}
+
+	w := killRouterPost(killRouter(auth.NewGitHubUser("customer", nil), k), `{"killed":true}`)
+	if w.Code != http.StatusForbidden || len(f.calls) != 0 {
+		t.Fatalf("non-admin: status %d calls %v body %s", w.Code, f.calls, w.Body.String())
+	}
+
+	w = killRouterPost(killRouter(signupAdminUser(t), k), `{"killed":true}`)
+	if w.Code != http.StatusOK || len(f.calls) != 1 || !f.calls[0] {
+		t.Fatalf("admin: status %d calls %v body %s", w.Code, f.calls, w.Body.String())
+	}
+}
+
+func TestGlovoC2KillSwitchAuditsSuccessAndFailure(t *testing.T) {
+	cases := map[string]struct {
+		setter *fakeKillSetter
+		status string
+		state  string
+	}{
+		"success":  {&fakeKillSetter{}, "succeeded", "confirmed"},
+		"error":    {&fakeKillSetter{err: errors.New("boom")}, "failed", "unknown"},
+		"mismatch": {&fakeKillSetter{ignore: true}, "failed", "unknown"},
+	}
+	for name, tc := range cases {
+		log := audit.NewLogger()
+		admin := signupAdminUser(t)
+		h, r := killReq(admin, `{"killed":true}`)
+		h.opts.AuditLog = log
+		h.opts.GlovoC2KillSwitch = &GlovoC2KillSwitch{Setter: tc.setter}
+		h.SetGlovoC2KillSwitch(httptest.NewRecorder(), r)
+		entries := log.List(10)
+		if len(entries) != 1 {
+			t.Fatalf("%s: %d audit entries", name, len(entries))
+		}
+		e := entries[0]
+		if e.Operation != glovoC2KillSwitchOperation || e.Status != tc.status || e.RiskLevel != "high" || e.UserID != admin.ID ||
+			e.Parameters["requested"] != "true" || e.Parameters["state"] != tc.state {
+			t.Fatalf("%s: entry %+v", name, e)
+		}
+	}
+}
+
+func TestGlovoC2KillSwitchRefusalWritesNoAudit(t *testing.T) {
+	log := audit.NewLogger()
+	h, r := killReq(auth.NewGitHubUser("customer", nil), `{"killed":true}`)
+	h.opts.AuditLog = log
+	h.opts.GlovoC2KillSwitch = &GlovoC2KillSwitch{Setter: &fakeKillSetter{}}
+	h.SetGlovoC2KillSwitch(httptest.NewRecorder(), r)
+	if n := len(log.List(10)); n != 0 {
+		t.Fatalf("refused caller wrote %d entries", n)
 	}
 }

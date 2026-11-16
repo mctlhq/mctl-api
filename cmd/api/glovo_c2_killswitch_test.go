@@ -30,13 +30,23 @@ func TestGlovoC2KillSwitchConfigDarkAndFailClosed(t *testing.T) {
 		{"GLOVO_C2_KILLSWITCH_ENABLED": "yes"},
 		{"GLOVO_C2_KILLSWITCH_ENABLED": "true"},
 		{"GLOVO_C2_KILLSWITCH_ENABLED": "true", "GLOVO_C2_CONTROL_URL": "http://x"},
-		{"GLOVO_C2_KILLSWITCH_ENABLED": "true", "GLOVO_C2_CONTROL_TOKEN": "t"},
+		{"GLOVO_C2_KILLSWITCH_ENABLED": "true", "GLOVO_C2_CONTROL_TOKEN_FILE": "/var/run/glovo/token"},
 	} {
 		if k, err := configureGlovoC2KillSwitch(killLookupOf(m)); k != nil || err == nil {
 			t.Fatalf("%v: k=%v err=%v", m, k, err)
 		}
 	}
-	k, err := configureGlovoC2KillSwitch(killLookupOf(map[string]string{"GLOVO_C2_KILLSWITCH_ENABLED": "true", "GLOVO_C2_CONTROL_URL": "http://x", "GLOVO_C2_CONTROL_TOKEN": "t"}))
+	for _, rel := range []string{"token", "./token", "relative/token"} {
+		m := map[string]string{"GLOVO_C2_KILLSWITCH_ENABLED": "true", "GLOVO_C2_CONTROL_URL": "http://x", "GLOVO_C2_CONTROL_TOKEN_FILE": rel}
+		if k, err := configureGlovoC2KillSwitch(killLookupOf(m)); k != nil || err == nil {
+			t.Fatalf("relative token path %q accepted", rel)
+		}
+	}
+	// The retired static token alone must not enable the route.
+	if k, err := configureGlovoC2KillSwitch(killLookupOf(map[string]string{"GLOVO_C2_KILLSWITCH_ENABLED": "true", "GLOVO_C2_CONTROL_URL": "http://x", "GLOVO_C2_CONTROL_TOKEN": "t"})); k != nil || err == nil {
+		t.Fatalf("static token accepted: k=%v err=%v", k, err)
+	}
+	k, err := configureGlovoC2KillSwitch(killLookupOf(map[string]string{"GLOVO_C2_KILLSWITCH_ENABLED": "true", "GLOVO_C2_CONTROL_URL": "http://x", "GLOVO_C2_CONTROL_TOKEN_FILE": "/var/run/glovo/token"}))
 	if k == nil || err != nil {
 		t.Fatalf("k=%v err=%v", k, err)
 	}

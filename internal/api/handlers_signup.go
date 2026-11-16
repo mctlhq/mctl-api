@@ -45,17 +45,24 @@ type SignupOptions struct {
 var signupID = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
 var signupLogin = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,38}$`)
 
-func (h *Handlers) signupAdmin(w http.ResponseWriter, r *http.Request) bool {
-	u := auth.UserFromContext(r.Context())
-	delegated := false
-	if u != nil {
-		_, delegated = u.DelegatingAgent()
-	}
-	if u == nil || delegated || !isHumanAdmin(u) || u.IsAgent() || u.ViaPrincipalID() != "" || u.PrincipalID() == "" {
-		writeError(w, 403, "direct human platform administrator required")
+// directHumanAdmin reports whether u is a direct human platform administrator:
+// never a service, relay, surface, agent or delegated caller.
+func directHumanAdmin(u *auth.User) bool {
+	if u == nil {
 		return false
 	}
-	if identity, proven := u.Identity(); !proven || identity.Kind != auth.KindHuman {
+	if _, delegated := u.DelegatingAgent(); delegated {
+		return false
+	}
+	if !isHumanAdmin(u) || u.IsAgent() || u.ViaPrincipalID() != "" || u.PrincipalID() == "" {
+		return false
+	}
+	identity, proven := u.Identity()
+	return proven && identity.Kind == auth.KindHuman
+}
+
+func (h *Handlers) signupAdmin(w http.ResponseWriter, r *http.Request) bool {
+	if !directHumanAdmin(auth.UserFromContext(r.Context())) {
 		writeError(w, 403, "direct human platform administrator required")
 		return false
 	}

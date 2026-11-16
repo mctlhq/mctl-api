@@ -21,14 +21,19 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
+	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/glovoc2control"
 )
 
 // glovoC2KillSwitchPath is relative to /api/v1.
 const glovoC2KillSwitchPath = "/admin/glovo-c2/kill-switch"
+
+// glovoC2KillSwitchOperation is the audit operation name of every flip attempt.
+const glovoC2KillSwitchOperation = "glovo.c2.killswitch.set"
 
 // GlovoC2KillSwitchSetter flips mctl-glovo's runtime kill switch.
 type GlovoC2KillSwitchSetter interface {
@@ -55,15 +60,7 @@ type glovoC2KillRequest struct {
 func (h *Handlers) SetGlovoC2KillSwitch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	u := auth.UserFromContext(r.Context())
-	delegated := false
-	if u != nil {
-		_, delegated = u.DelegatingAgent()
-	}
-	if u == nil || delegated || !isHumanAdmin(u) || u.IsAgent() || u.ViaPrincipalID() != "" || u.PrincipalID() == "" {
-		writeError(w, http.StatusForbidden, "direct human platform administrator required")
-		return
-	}
-	if identity, proven := u.Identity(); !proven || identity.Kind != auth.KindHuman {
+	if !directHumanAdmin(u) {
 		writeError(w, http.StatusForbidden, "direct human platform administrator required")
 		return
 	}
@@ -87,14 +84,22 @@ func (h *Handlers) SetGlovoC2KillSwitch(w http.ResponseWriter, r *http.Request) 
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
 	st, err := k.Setter.SetKilled(ctx, *req.Killed)
+	requested := strconv.FormatBool(*req.Killed)
 	if err != nil || st.Killed != *req.Killed {
-		slog.Error("glovo c2 kill switch flip not confirmed", "requested", *req.Killed, "principal", u.PrincipalID())
+		// err is token-free by construction (glovoc2control keeps a coarse class).
+		slog.Error("glovo c2 kill switch flip not confirmed", "requested", *req.Killed, "principal", u.PrincipalID(), "error", err)
+		msg := "state unknown"
+		if err != nil {
+			msg = err.Error()
+		}
+		h.logAudit(r, audit.Entry{UserID: u.ID, Operation: glovoC2KillSwitchOperation, Status: "failed", RiskLevel: "high", Message: msg, Parameters: map[string]string{"requested": requested, "state": "unknown"}})
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"error": "kill switch state could not be confirmed",
 			"state": "unknown",
 		})
 		return
 	}
+	h.logAudit(r, audit.Entry{UserID: u.ID, Operation: glovoC2KillSwitchOperation, Status: "succeeded", RiskLevel: "high", Parameters: map[string]string{"requested": requested, "state": "confirmed"}})
 	slog.Warn("glovo c2 kill switch set", "killed", st.Killed, "principal", u.PrincipalID())
 	writeJSON(w, http.StatusOK, map[string]any{"killed": st.Killed, "confirmed": true})
 }

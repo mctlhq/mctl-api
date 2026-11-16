@@ -22,7 +22,8 @@ import (
 )
 
 // configureGlovoC2KillSwitch is dark unless GLOVO_C2_KILLSWITCH_ENABLED is
-// "true". Enabled without GLOVO_C2_CONTROL_URL and GLOVO_C2_CONTROL_TOKEN (or
+// "true". Enabled without GLOVO_C2_CONTROL_URL and GLOVO_C2_CONTROL_TOKEN_FILE (an absolute path to a
+// short-lived ZITADEL machine-user token, re-read per call; or
 // with an invalid flag value) is a configuration error that refuses the boot,
 // never a silently absent route.
 func configureGlovoC2KillSwitch(lookup func(string) (string, bool)) (*mctlapi.GlovoC2KillSwitch, error) {
@@ -34,10 +35,10 @@ func configureGlovoC2KillSwitch(lookup func(string) (string, bool)) (*mctlapi.Gl
 		return nil, fmt.Errorf("GLOVO_C2_KILLSWITCH_ENABLED must be true or false")
 	}
 	base, _ := lookup("GLOVO_C2_CONTROL_URL")
-	token, _ := lookup("GLOVO_C2_CONTROL_TOKEN")
-	c, err := glovoc2control.New(base, token, nil)
+	tokenFile, _ := lookup("GLOVO_C2_CONTROL_TOKEN_FILE")
+	c, err := glovoc2control.New(base, tokenFile, nil)
 	if err != nil {
-		return nil, fmt.Errorf("GLOVO_C2_KILLSWITCH_ENABLED needs a valid GLOVO_C2_CONTROL_URL and GLOVO_C2_CONTROL_TOKEN: %w", err)
+		return nil, fmt.Errorf("GLOVO_C2_KILLSWITCH_ENABLED needs a valid GLOVO_C2_CONTROL_URL and GLOVO_C2_CONTROL_TOKEN_FILE: %w", err)
 	}
 	return &mctlapi.GlovoC2KillSwitch{Setter: c}, nil
 }
