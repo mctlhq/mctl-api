@@ -102,6 +102,10 @@ type Options struct {
 	// ReleaseGrants mounts the release grant routes (mctl-api#1022). Nil, or
 	// without a resolver or repositories, leaves them unmounted.
 	ReleaseGrants *ReleaseGrantOptions
+	// ReleaseApproval is the release approval page (mctl-api#1022 S2), the
+	// only place a release grant is decided. Mounted only when complete and
+	// ReleaseGrants is enabled.
+	ReleaseApproval *ReleaseApprovalPageOptions
 	// DeployRecords keeps one record per applied plan (mctl-api#1047). Nil
 	// refuses every apply before its grant is spent, and answers
 	// GET /deploy/deployments/{id} with 503.
@@ -448,6 +452,8 @@ type Handlers struct {
 	glovoBasketApproval *basketDecider
 	// deployApproval is the deploy approval page; nil when not mounted.
 	deployApproval *deployDecider
+	// releaseApproval is the release approval page; nil when not mounted.
+	releaseApproval *releaseDecider
 }
 
 // NewRouter creates the HTTP router with all API routes.
@@ -467,6 +473,9 @@ func NewRouter(opts Options) http.Handler {
 	}
 	if opts.DeployApproval.enabled() && opts.WorkItems != nil && opts.DeployPlans != nil {
 		h.deployApproval = newDeployDecider(opts.DeployApproval)
+	}
+	if opts.ReleaseApproval.enabled() && opts.ReleaseGrants.enabled() && opts.WorkItems != nil {
+		h.releaseApproval = newReleaseDecider(opts.ReleaseApproval)
 	}
 	if opts.OAuthZitadel != nil {
 		h.oauthZitadel = &oauthZitadel{opts: opts.OAuthZitadel, lazyOIDCProvider: lazyOIDCProvider{issuer: opts.OAuthZitadel.Issuer}}
@@ -570,6 +579,13 @@ func NewRouter(opts Options) http.Handler {
 			r.Get(deployCallbackPath, h.handleDeployApprovalCallback)
 			r.Post(deployConfirmPath, h.handleDeployApprovalConfirm)
 			r.Get(deployPagePrefix+"{approval_ref}", h.handleDeployApprovalPage)
+		}
+		// Release approval page (mctl-api#1022 S2): dark unless configured.
+		if h.releaseApproval != nil {
+			r.Post(releaseStartPath, h.handleReleaseApprovalStart)
+			r.Get(releaseCallbackPath, h.handleReleaseApprovalCallback)
+			r.Post(releaseConfirmPath, h.handleReleaseApprovalConfirm)
+			r.Get(releasePagePrefix+"{approval_ref}", h.handleReleaseApprovalPage)
 		}
 	})
 	r.Group(func(r chi.Router) {

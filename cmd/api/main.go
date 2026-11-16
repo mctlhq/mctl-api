@@ -1491,6 +1491,11 @@ func main() {
 	// DEPLOY_APPROVAL_UI_ENABLED is true and everything it reads is up.
 	deployApprovalPage := deployApprovalOptions(cfg, deployApprovalUIEnvFromOS(), principalResolver, principalAuthz,
 		oauthFlowStore(oauthServer), workItemsStore != nil, deployPlans != nil)
+	releaseGrants := releaseGrantOptions(releaseGrantEnvFromOS(), gitOpsTokenSource(), workItemsStore != nil)
+	// Release approval page (mctl-api#1022 S2): dark unless
+	// RELEASE_APPROVAL_UI_ENABLED is true and everything it reads is up.
+	releaseApprovalPage := releaseApprovalOptions(cfg, releaseApprovalUIEnvFromOS(), principalResolver, principalAuthz,
+		oauthFlowStore(oauthServer), workItemsStore != nil, releaseGrants != nil)
 	router := mctlapi.NewRouter(mctlapi.Options{
 		Signup:                         signup,
 		Registry:                       registry,
@@ -1523,7 +1528,8 @@ func main() {
 		DevLoopDecide:                  devLoopDecideOptions(cfg, principalResolver, principalAuthz),
 		GlovoBasketApproval:            glovoBasketPage,
 		DeployApproval:                 deployApprovalPage,
-		ReleaseGrants:                  releaseGrantOptions(releaseGrantEnvFromOS(), gitOpsTokenSource(), workItemsStore != nil),
+		ReleaseGrants:                  releaseGrants,
+		ReleaseApproval:                releaseApprovalPage,
 		OAuthUpstream:                  cfg.oauthUpstreamMode(),
 		OAuthZitadel:                   oauthZitadelOptions(cfg, principalStore, oauthServer),
 		SurfaceZitadel:                 surfaceZitadelOptions(cfg),
