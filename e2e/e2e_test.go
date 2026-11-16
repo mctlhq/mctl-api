@@ -769,15 +769,15 @@ func TestE2E_MCPDestructiveEphemeralTenantSmoke(t *testing.T) {
 	waitForWorkflowPhase(t, c, provisionWorkflow, "Succeeded", 15*time.Minute)
 
 	deployText := mcpToolText(t, c, sessionID, "mctl_deploy_service", map[string]interface{}{
-		"action":           "onboard",
-		"team_name":        tenant,
-		"component_name":   service,
-		"component_type":   "worker-service",
-		"dockerfile_repo":  "mctlhq/spring-test",
-		"git_tag":          "main",
-		"port":             "8080",
+		"action":             "onboard",
+		"team_name":          tenant,
+		"component_name":     service,
+		"component_type":     "worker-service",
+		"dockerfile_repo":    "mctlhq/spring-test",
+		"git_tag":            "main",
+		"port":               "8080",
 		"provision_database": "true",
-		"service_template": "spring-worker",
+		"service_template":   "spring-worker",
 	}, 102)
 	deployWorkflow, deployNS := mustWorkflowRef(t, "mctl_deploy_service", deployText)
 	t.Logf("✓ deploy service workflow: https://workflows.mctl.ai/workflows/%s/%s", deployNS, deployWorkflow)
