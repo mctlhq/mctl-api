@@ -112,6 +112,9 @@ func ciReleaseGrantReadAllowed(r *http.Request) bool {
 type releaseGrantView struct {
 	Approval *workitems.ActionApprovalRequest `json:"approval"`
 	Artifact workitems.ReleaseArtifact        `json:"artifact"`
+	// Decision is the evidence of the sign-in that decided the grant,
+	// verified against the row; absent while it is pending.
+	Decision *workitems.ReleaseEvidence `json:"decision,omitempty"`
 }
 
 func (h *Handlers) releaseGrantAudit(r *http.Request, user *auth.User, op, status, msg string, params map[string]string) {
@@ -211,12 +214,17 @@ func (h *Handlers) RequestReleaseGrant(w http.ResponseWriter, r *http.Request) {
 	} else {
 		h.releaseGrantAudit(r, user, "release.grant.request", "succeeded", "replayed", params)
 	}
-	writeJSON(w, createdStatus(created), map[string]any{
-		"schema_version":     workitems.ActionApprovalSchemaVersion,
-		"grant":              releaseGrantView{Approval: approval, Artifact: art},
-		"decided_by":         "the owner, signed in fresh with a second factor on the release approval page; a bearer token cannot decide it",
-		"decide_unavailable": "the release approval page does not exist yet (mctl-api#1022 S2), so this grant cannot be decided",
-	})
+	out := map[string]any{
+		"schema_version": workitems.ActionApprovalSchemaVersion,
+		"grant":          releaseGrantView{Approval: approval, Artifact: art},
+		"decided_by":     "the owner, signed in fresh with a second factor on the release approval page; a bearer token cannot decide it",
+	}
+	if h.releaseApproval != nil {
+		out["decide_url"] = h.releaseApproval.decideURL(approval.ID)
+	} else {
+		out["decide_unavailable"] = "the release approval page is not enabled on this server, so this grant cannot be decided"
+	}
+	writeJSON(w, createdStatus(created), out)
 }
 
 // ListReleaseGrants answers GET /api/v1/release/grants.
@@ -256,15 +264,19 @@ func (h *Handlers) ListReleaseGrants(w http.ResponseWriter, r *http.Request) {
 	out := make([]releaseGrantView, 0, len(rows))
 	for i := range rows {
 		art, err := workitems.ReleaseArtifactOf(&rows[i])
+		var decision *workitems.ReleaseEvidence
+		if err == nil {
+			decision, err = workitems.ReleaseDecisionOf(&rows[i])
+		}
 		if err != nil {
 			slog.Error("release grant: inconsistent record", "id", rows[i].ID, "error", err)
 			params["approval_id"] = rows[i].ID
 			h.releaseGrantAudit(r, user, "release.grant.list", "error", codeReleaseGrantInconsistent, params)
 			writeErrorCode(w, http.StatusInternalServerError, codeReleaseGrantInconsistent,
-				"a release grant record does not reproduce its digest", map[string]any{"approval_id": rows[i].ID})
+				"a release grant record does not reproduce its digests", map[string]any{"approval_id": rows[i].ID})
 			return
 		}
-		out = append(out, releaseGrantView{Approval: &rows[i], Artifact: art})
+		out = append(out, releaseGrantView{Approval: &rows[i], Artifact: art, Decision: decision})
 	}
 	h.releaseGrantAudit(r, user, "release.grant.list", "succeeded", "succeeded", params)
 	writeJSON(w, http.StatusOK, map[string]any{

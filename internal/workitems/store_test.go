@@ -32,6 +32,13 @@ func newStoreForTest(t *testing.T) *Store {
 			storeTestExecution); err != nil {
 			t.Fatal(err)
 		}
+		// Release grants bind the tag commit as execution_id, and are
+		// idempotent per version: without this a second run reuses the
+		// rows, decided ones included, of the first.
+		if _, err := s.pool.Exec(ctx, "DELETE FROM action_approval_requests WHERE action_kind = $1 AND execution_id = $2",
+			ActionKindReleaseGrant, releaseArtifactForTest("0.0.0").TagCommit); err != nil {
+			t.Fatal(err)
+		}
 	}
 	wipe()
 	t.Cleanup(func() {
