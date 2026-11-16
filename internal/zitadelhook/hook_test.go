@@ -853,8 +853,8 @@ func TestIntentBlocksCreationDuringDeletion(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHook(t, nil, verified, 0)
-			h.cfg.CreationPending = func(_ context.Context, id string) (bool, error) {
-				if id != "4242" {
+			h.cfg.CreationPending = func(_ context.Context, provider, id string) (bool, error) {
+				if provider != IdPGitHub || id != "4242" {
 					t.Fatalf("unexpected identity %s", id)
 				}
 				return tc.pending, tc.err

@@ -371,11 +371,20 @@ A customer may sign in with Google instead. The identity hook then issues
   claims. A Google creation allowlist grants an account, not a workspace,
   and no Google subject joins the GitHub pilot cohort. A principal holding
   both a GitHub and a Google identity is refused as ambiguous.
-- **Not yet everywhere.** Customer deletion still reads GitHub identities
-  only, so a Google customer's deletion is refused until it is keyed by
-  provider too. A Google customer has no GitHub login, so routes that act
-  as the caller's GitHub login (repository sync) answer as for any
-  principal without one.
+- **Deletion.** A Google customer's deletion manifest names its Google
+  subject and no GitHub login (`google_sub` in the manifest; stored as
+  `google:<sub>` in `customer_deletions.github_id`, so the existing
+  one-active-deletion index covers both providers, and a release without
+  Google support never progresses a Google row). The IdP check expects one
+  link to the Google IdP (`ZITADEL_HOOK_GOOGLE_IDP_ID`) naming that subject;
+  while it is unset, a Google deletion fails closed there. The site's
+  sessions are revoked by `{google_sub, subject}`, the signup reservation is
+  released by `google_sub`, and the identity hook refuses to re-create the
+  Google account until the deletion is released, as for GitHub.
+- **Not yet everywhere.** A Google customer has no GitHub login, so routes
+  that act as the caller's GitHub login (repository sync) answer as for any
+  principal without one. The portal's cleanup and lifecycle calls receive an
+  empty `login` for a Google customer.
 
 ## GitHub Actions: CI deploys (mctl-api#530)
 

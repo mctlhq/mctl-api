@@ -18,8 +18,13 @@ import (
 	"github.com/mctlhq/mctl-api/internal/principals"
 )
 
+// Providers are the external systems a customer deletion observes and
+// changes. GoogleIDP is the customers org's Google IdP (mctl-api#1079); it is
+// optional, and while it is "" a Google customer's deletion fails closed at
+// the IdP link check.
 type Providers struct {
 	Issuer, CustomerOrg, GitHubIDP string
+	GoogleIDP                      string
 	ClientID, ClientSecret         string
 	SiteBase, SessionAudience      string
 	PortalBase, PortalToken        string
@@ -127,8 +132,17 @@ func (p *Providers) verifyCustomer(ctx context.Context, d *principals.CustomerDe
 	if err := json.Unmarshal(data, &links); err != nil {
 		return false, err
 	}
-	if (string(links.Details.Total) != "1" && string(links.Details.Total) != `"1"`) || len(links.Result) != 1 || links.Result[0].IDP != p.GitHubIDP || links.Result[0].User != d.GitHubID {
-		return false, fmt.Errorf("customer GitHub identity link mismatch")
+	// Exactly one link, to the IdP of the customer's provider, naming the
+	// approved account.
+	wantIDP, wantUser, name := p.GitHubIDP, d.GitHubID, "GitHub"
+	if d.GoogleSub != "" {
+		wantIDP, wantUser, name = p.GoogleIDP, d.GoogleSub, "Google"
+	}
+	if wantIDP == "" || wantUser == "" || d.GitHubID != "" && d.GoogleSub != "" {
+		return false, fmt.Errorf("customer %s identity link not verifiable", name)
+	}
+	if (string(links.Details.Total) != "1" && string(links.Details.Total) != `"1"`) || len(links.Result) != 1 || links.Result[0].IDP != wantIDP || links.Result[0].User != wantUser {
+		return false, fmt.Errorf("customer %s identity link mismatch", name)
 	}
 	return true, nil
 }
@@ -179,7 +193,12 @@ func (p *Providers) RevokeSiteSessions(ctx context.Context, d *principals.Custom
 	if err != nil {
 		return err
 	}
-	body, _ := json.Marshal(map[string]string{"github_id": d.GitHubID, "subject": d.Subject})
+	// The site keys a session on exactly one of github_id and google_sub.
+	field, key := "github_id", d.GitHubID
+	if d.GoogleSub != "" {
+		field, key = "google_sub", d.GoogleSub
+	}
+	body, _ := json.Marshal(map[string]string{field: key, "subject": d.Subject})
 	status, data, err := p.request(ctx, "POST", strings.TrimRight(p.SiteBase, "/")+"/api/internal/customer-sessions/revoke", token, "application/json", body)
 	if err != nil {
 		return err
@@ -187,12 +206,8 @@ func (p *Providers) RevokeSiteSessions(ctx context.Context, d *principals.Custom
 	if status != 200 {
 		return fmt.Errorf("site session revocation not complete (HTTP %d)", status)
 	}
-	var result struct {
-		GitHubID string `json:"github_id"`
-		Subject  string `json:"subject"`
-		Complete bool   `json:"complete"`
-	}
-	if json.Unmarshal(data, &result) != nil || result.GitHubID != d.GitHubID || result.Subject != d.Subject || !result.Complete {
+	var result map[string]any
+	if json.Unmarshal(data, &result) != nil || result[field] != key || result["subject"] != d.Subject || result["complete"] != true {
 		return fmt.Errorf("site session revocation response malformed")
 	}
 	return nil

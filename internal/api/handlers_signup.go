@@ -544,8 +544,10 @@ func (h *Handlers) claimSignupPrincipal(ctx context.Context, pid, tenant, memory
 	case githubID != "" && googleSub != "":
 		return 409, "ambiguous customer identity"
 	case googleSub != "":
+		// Google customers have no invitations: only the open public
+		// flow admits one (SignupOptions.GooglePublicFlow).
 		if !o.GooglePublicFlow {
-			return 403, "GitHub customer identity required"
+			return 403, "Google customers are not admitted to a workspace"
 		}
 		if !auth.ValidGoogleSubject(googleSub) {
 			return 403, "Google customer identity required"

@@ -216,3 +216,81 @@ func TestSignupSiteUsesLifecycleCredentialAndReportsSafeFailureStage(t *testing.
 		})
 	}
 }
+
+// mctl-api#1079: a Google customer's IdP link must be to the Google IdP and
+// name its Google subject, and its site sessions are revoked by that subject.
+func TestProvidersGoogleCustomer(t *testing.T) {
+	const sub = "109876543210987654321"
+	d := &principals.CustomerDeletion{Tenant: "acme", PrincipalID: "prn_01M45DR1GWC87109EH88VBJX25", Subject: "7001", GoogleSub: sub}
+	link := `{"details":{"totalResult":"1"},"result":[{"idpId":"google-idp","userId":"` + sub + `"}]}`
+	revokeAnswer := `{"google_sub":"` + sub + `","subject":"7001","complete":true}`
+	var revokeBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/oauth/v2/token":
+			_, _ = w.Write([]byte(`{"access_token":"machine-jwt"}`))
+		case "/v2/users/7001":
+			_ = json.NewEncoder(w).Encode(map[string]any{"user": map[string]any{"userId": "7001", "human": map[string]any{}, "details": map[string]string{"resourceOwner": "customers"}}})
+		case "/v2/users/7001/links/_search":
+			_, _ = w.Write([]byte(link))
+		case "/api/internal/customer-sessions/revoke":
+			revokeBody = nil
+			if err := json.NewDecoder(r.Body).Decode(&revokeBody); err != nil {
+				t.Error(err)
+			}
+			_, _ = w.Write([]byte(revokeAnswer))
+		default:
+			t.Errorf("unexpected provider path %s", r.URL.Path)
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+	p := &Providers{Issuer: server.URL, CustomerOrg: "customers", GitHubIDP: "github-idp", GoogleIDP: "google-idp", ClientID: "lifecycle", ClientSecret: "secret", SessionAudience: "worker-project", SiteBase: server.URL, PortalBase: server.URL, PortalToken: "portal"}
+	ctx := context.Background()
+	if err := p.VerifyCustomer(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	for name, bad := range map[string]string{
+		"GitHub IdP link":  `{"details":{"totalResult":"1"},"result":[{"idpId":"github-idp","userId":"` + sub + `"}]}`,
+		"another subject":  `{"details":{"totalResult":"1"},"result":[{"idpId":"google-idp","userId":"109876543210987654322"}]}`,
+		"two links":        `{"details":{"totalResult":"2"},"result":[{"idpId":"google-idp","userId":"` + sub + `"},{"idpId":"github-idp","userId":"1"}]}`,
+		"unknown response": `{"result":[]}`,
+	} {
+		link = bad
+		if err := p.VerifyCustomer(ctx, d); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	link = `{"details":{"totalResult":"1"},"result":[{"idpId":"google-idp","userId":"` + sub + `"}]}`
+	// Without a configured Google IdP the link cannot be verified.
+	unconfigured := *p
+	unconfigured.GoogleIDP = ""
+	if err := unconfigured.VerifyCustomer(ctx, d); err == nil {
+		t.Error("Google customer verified without a Google IdP")
+	}
+	// A manifest naming both keys is not verifiable.
+	both := *d
+	both.GitHubID = "123"
+	if err := p.VerifyCustomer(ctx, &both); err == nil {
+		t.Error("manifest with both keys verified")
+	}
+
+	if err := p.RevokeSiteSessions(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	if len(revokeBody) != 2 || revokeBody["google_sub"] != sub || revokeBody["subject"] != "7001" {
+		t.Fatalf("revocation body %v, want only google_sub and subject", revokeBody)
+	}
+	for name, bad := range map[string]string{
+		"GitHub answer":   `{"github_id":"` + sub + `","subject":"7001","complete":true}`,
+		"another subject": `{"google_sub":"1","subject":"7001","complete":true}`,
+		"incomplete":      `{"google_sub":"` + sub + `","subject":"7001","complete":false}`,
+		"complete string": `{"google_sub":"` + sub + `","subject":"7001","complete":"true"}`,
+	} {
+		revokeAnswer = bad
+		if err := p.RevokeSiteSessions(ctx, d); err == nil {
+			t.Errorf("revocation answer %s accepted", name)
+		}
+	}
+}

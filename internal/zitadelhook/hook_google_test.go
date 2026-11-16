@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -58,9 +59,13 @@ func newGoogleHook(t *testing.T, googleSubs []string) (*Hook, *atomic.Int32) {
 			t.Error("the GitHub invitation store must not be consulted for Google")
 			return false, nil
 		},
-		CreationPending: func(context.Context, string) (bool, error) {
-			t.Error("the GitHub deletion probe must not be consulted for Google")
-			return true, nil
+		// The deletion probe is consulted for a Google creation too, keyed
+		// on the Google subject; it reports nothing pending here.
+		CreationPending: func(_ context.Context, provider, subject string) (bool, error) {
+			if provider != IdPGoogle || !googleSubRE.MatchString(subject) {
+				t.Errorf("deletion probe asked for %s %q, want a Google subject", provider, subject)
+			}
+			return false, nil
 		},
 	}, fakeTenants{err: errFakeTenants}, gh.Client())
 	if err != nil {
@@ -425,5 +430,60 @@ func TestGateGoogleLinkOutsideCustomersReason(t *testing.T) {
 	g["organizationId"] = orgAdmins
 	if r := h.CreateGate(context.Background(), createBodyFrom(t, g, loginClient)); r.Reason != "gate_github_link_outside_customers" {
 		t.Fatalf("GitHub reason changed: %s", r.Reason)
+	}
+}
+
+// mctl-api#1079: a Google customer cannot be re-created while a deletion of
+// that Google subject is unfinished, at Intent or at the create gate, and an
+// unreadable probe is a failure, never a pass. An existing account signs in
+// without the probe.
+func TestGoogleCreationWaitsForDeletion(t *testing.T) {
+	for name, tc := range map[string]struct {
+		pending          bool
+		err              error
+		intent, gate     string
+		gateRefusedFully bool
+	}{
+		"pending":  {true, nil, "intent_deletion_in_progress", "gate_deletion_in_progress", true},
+		"unknown":  {false, errors.New("unavailable"), "intent_deletion_unreadable", "gate_deletion_unreadable", false},
+		"complete": {false, nil, "intent_create", "gate_customer_create", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, _ := newGoogleHook(t, []string{CreateAnyone})
+			var asked []string
+			h.cfg.CreationPending = func(_ context.Context, provider, subject string) (bool, error) {
+				asked = append(asked, provider+":"+subject)
+				return tc.pending, tc.err
+			}
+			r := h.Intent(context.Background(), googleIntentBody(idpGoogle, googleSub, "", googleRaw()))
+			if r.Reason != tc.intent {
+				t.Fatalf("intent reason %s, want %s", r.Reason, tc.intent)
+			}
+			if tc.pending {
+				refusedWith(t, r, http.StatusForbidden)
+			}
+			if tc.err != nil && r.Status != http.StatusServiceUnavailable {
+				t.Fatalf("unreadable intent probe status %d", r.Status)
+			}
+			g := h.CreateGate(context.Background(), createBodyFrom(t, goodGoogleCreate(), loginClient))
+			if g.Reason != tc.gate {
+				t.Fatalf("gate reason %s, want %s", g.Reason, tc.gate)
+			}
+			if tc.gateRefusedFully {
+				refusedWith(t, g, http.StatusForbidden)
+			}
+			if tc.err != nil && g.Status != http.StatusServiceUnavailable {
+				t.Fatalf("unreadable gate probe status %d", g.Status)
+			}
+			if len(asked) != 2 || asked[0] != "google:"+googleSub || asked[1] != "google:"+googleSub {
+				t.Fatalf("deletion probe asked %v, want the Google subject twice", asked)
+			}
+			// An existing account is updated without asking.
+			asked = nil
+			r = h.Intent(context.Background(), googleIntentBody(idpGoogle, googleSub, "existing-user", googleRaw()))
+			if r.Reason != "intent_update" || len(asked) != 0 {
+				t.Fatalf("existing Google account: %s, probe asked %v", r.Reason, asked)
+			}
+		})
 	}
 }

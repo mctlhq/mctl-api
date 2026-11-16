@@ -96,22 +96,26 @@ func (zc zitadelHookConfig) validate() error {
 	return nil
 }
 
+// zitadelHookProbes are the store reads the hook consults at creation
+// (zitadelhook.Config's CreationPending and CustomerInvitationAllowed).
+type zitadelHookProbes struct {
+	creationPending   func(ctx context.Context, provider, subject string) (bool, error)
+	invitationAllowed func(context.Context, string) (bool, error)
+}
+
 // zitadelHookOptions builds the hook, or returns nil (routes answer 503)
 // when it is not configured or the configuration is incomplete. ADMIN_USERS
 // are always reserved logins.
-func zitadelHookOptions(cfg config, tenants zitadelhook.TenantLister, pending ...func(context.Context, string) (bool, error)) *api.ZitadelHookOptions {
+func zitadelHookOptions(cfg config, tenants zitadelhook.TenantLister, probes ...zitadelHookProbes) *api.ZitadelHookOptions {
 	zc := cfg.ZitadelHook
 	if zc.CustomersOrgID == "" {
 		return nil
 	}
-	var creationPending func(context.Context, string) (bool, error)
-	if len(pending) > 0 {
-		creationPending = pending[0]
+	var p zitadelHookProbes
+	if len(probes) > 0 {
+		p = probes[0]
 	}
-	var invitationAllowed func(context.Context, string) (bool, error)
-	if len(pending) > 1 {
-		invitationAllowed = pending[1]
-	}
+	creationPending, invitationAllowed := p.creationPending, p.invitationAllowed
 	hook, err := zitadelhook.New(zitadelhook.Config{
 		CreationPending:           creationPending,
 		CustomerInvitationAllowed: invitationAllowed,

@@ -28,10 +28,18 @@ import (
 
 // CustomerDeletion is a frozen, explicitly approved teardown target. It survives
 // tenant and principal removal so a retry never resolves a replacement account.
+//
+// The customer is keyed by exactly one of GitHubID (with its Login) and
+// GoogleSub (mctl-api#1079; no login). Storage keeps both in the github_id
+// column, a Google customer as "google:<sub>" (customerDeletionKey), so the
+// existing unique index fences one active deletion per customer of either
+// provider, and code without Google support never matches, or progresses, a
+// Google row: its identity check refuses a Google principal.
 type CustomerDeletion struct {
 	Tenant      string `json:"tenant_name"`
 	PrincipalID string `json:"principal_id"`
 	GitHubID    string `json:"github_id"`
+	GoogleSub   string `json:"google_sub,omitempty"`
 	Login       string `json:"login"`
 	Issuer      string `json:"issuer"`
 	Subject     string `json:"subject"`
@@ -60,10 +68,42 @@ CREATE INDEX IF NOT EXISTS customer_deletion_principal ON customer_deletions(pri
 const customerDeletionColumns = `tenant_name,principal_id,github_id,login,issuer,subject,actor,status`
 const customerDeletionSelectColumns = customerDeletionColumns + `,cancelled_at IS NOT NULL`
 
+// googleDeletionKeyPrefix marks a Google customer in customer_deletions'
+// github_id column. A GitHub id is numeric, so the two never collide.
+const googleDeletionKeyPrefix = "google:"
+
+// customerDeletionKey is the stored customer key of a provider and subject,
+// or "" for anything else.
+func customerDeletionKey(provider, subject string) string {
+	switch {
+	case provider == auth.ProviderGitHub && subject != "" && !strings.HasPrefix(subject, googleDeletionKeyPrefix):
+		return subject
+	case provider == auth.ProviderGoogle && auth.ValidGoogleSubject(subject):
+		return googleDeletionKeyPrefix + subject
+	}
+	return ""
+}
+
+func (d *CustomerDeletion) key() string {
+	if d.GoogleSub != "" {
+		return customerDeletionKey(auth.ProviderGoogle, d.GoogleSub)
+	}
+	return customerDeletionKey(auth.ProviderGitHub, d.GitHubID)
+}
+
 func scanCustomerDeletion(row pgx.Row) (*CustomerDeletion, error) {
 	var d CustomerDeletion
-	if err := row.Scan(&d.Tenant, &d.PrincipalID, &d.GitHubID, &d.Login, &d.Issuer, &d.Subject, &d.Actor, &d.Status, &d.Cancelled); err != nil {
+	var key string
+	if err := row.Scan(&d.Tenant, &d.PrincipalID, &key, &d.Login, &d.Issuer, &d.Subject, &d.Actor, &d.Status, &d.Cancelled); err != nil {
 		return nil, err
+	}
+	if sub, ok := strings.CutPrefix(key, googleDeletionKeyPrefix); ok {
+		if !auth.ValidGoogleSubject(sub) {
+			return nil, fmt.Errorf("%w: malformed customer deletion key", ErrUnresolved)
+		}
+		d.GoogleSub = sub
+	} else {
+		d.GitHubID = key
 	}
 	return &d, nil
 }
@@ -137,8 +177,9 @@ func (s *Store) WithCustomerDeletionLock(ctx context.Context, tenant, pid string
 	return err
 }
 
-// PrepareCustomerDeletion accepts a human with exactly a GitHub identity and a
-// customer ZITADEL identity, never a staff/service account or a mixed principal.
+// PrepareCustomerDeletion accepts a human with exactly one GitHub or Google
+// identity and a customer ZITADEL identity, never a staff/service account or a
+// mixed principal.
 // The caller must independently verify ownership, all memberships and IdP org.
 func (s *Store) PrepareCustomerDeletion(ctx context.Context, tenant, pid, issuer, actor string, validate ...func(*CustomerDeletion) error) (*CustomerDeletion, error) {
 	if tenant == "" || !auth.ValidPrincipalID(pid) || issuer == "" || actor == "" {
@@ -199,7 +240,7 @@ func (s *Store) PrepareCustomerDeletion(ctx context.Context, tenant, pid, issuer
 			return nil
 		}
 		d := result
-		_, err := tx.Exec(ctx, `INSERT INTO customer_deletions (`+customerDeletionColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, d.Tenant, d.PrincipalID, d.GitHubID, d.Login, d.Issuer, d.Subject, d.Actor, d.Status)
+		_, err := tx.Exec(ctx, `INSERT INTO customer_deletions (`+customerDeletionColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, d.Tenant, d.PrincipalID, d.key(), d.Login, d.Issuer, d.Subject, d.Actor, d.Status)
 		return err
 	})
 	return result, customerDeletionStorageError(err)
@@ -214,7 +255,7 @@ func (s *Store) CustomerTenantDeletionPending(ctx context.Context, tenant string
 }
 
 // ReleaseCustomerDeletion records the final portal acknowledgment. Until it
-// is durable, both GitHub registration and administrator name reuse stay frozen.
+// is durable, both re-registration and administrator name reuse stay frozen.
 func (s *Store) ReleaseCustomerDeletion(ctx context.Context, tenant, pid string) error {
 	tag, err := s.pool.Exec(ctx, `UPDATE customer_deletions SET released_at=COALESCE(released_at,now()) WHERE tenant_name=$1 AND principal_id=$2 AND status='complete'`, tenant, pid)
 	if err != nil {
@@ -226,9 +267,16 @@ func (s *Store) ReleaseCustomerDeletion(ctx context.Context, tenant, pid string)
 	return nil
 }
 
-func (s *Store) CustomerDeletionPending(ctx context.Context, githubID string) (bool, error) {
+// CustomerDeletionPending reports whether a deletion of the customer with this
+// provider (github or google) and subject is unfinished or unreleased. Any
+// other provider, or a malformed subject, is ErrInvalid: never "not pending".
+func (s *Store) CustomerDeletionPending(ctx context.Context, provider, subject string) (bool, error) {
+	key := customerDeletionKey(provider, subject)
+	if key == "" {
+		return false, ErrInvalid
+	}
 	var pending bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customer_deletions WHERE github_id=$1 AND cancelled_at IS NULL AND (status<>'complete' OR released_at IS NULL))`, githubID).Scan(&pending)
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customer_deletions WHERE github_id=$1 AND cancelled_at IS NULL AND (status<>'complete' OR released_at IS NULL))`, key).Scan(&pending)
 	return pending, err
 }
 
@@ -267,7 +315,7 @@ func (s *Store) BeginCustomerDeletion(ctx context.Context, tenant, pid string) e
 			if err != nil {
 				return err
 			}
-			if current.GitHubID != approved.GitHubID || current.Subject != approved.Subject || !strings.EqualFold(current.Login, approved.Login) {
+			if current.GitHubID != approved.GitHubID || current.GoogleSub != approved.GoogleSub || current.Subject != approved.Subject || !strings.EqualFold(current.Login, approved.Login) {
 				return fmt.Errorf("%w: approved customer identities changed before begin", ErrInvalid)
 			}
 		}
@@ -299,9 +347,18 @@ func (s *Store) FinishCustomerDeletion(ctx context.Context, tenant, pid string) 
 		if err := lockPrincipalTx(ctx, tx, pid); err != nil {
 			return err
 		}
-		var status, login, githubID string
-		if err := tx.QueryRow(ctx, `SELECT status,login,github_id FROM customer_deletions WHERE tenant_name=$1 AND principal_id=$2 FOR UPDATE`, tenant, pid).Scan(&status, &login, &githubID); err != nil {
+		var status, login, key string
+		if err := tx.QueryRow(ctx, `SELECT status,login,github_id FROM customer_deletions WHERE tenant_name=$1 AND principal_id=$2 FOR UPDATE`, tenant, pid).Scan(&status, &login, &key); err != nil {
 			return err
+		}
+		// The signup reservation is keyed like the deletion (signupKeyColumn).
+		provider, signupSubject := auth.ProviderGitHub, key
+		if sub, ok := strings.CutPrefix(key, googleDeletionKeyPrefix); ok {
+			provider, signupSubject = auth.ProviderGoogle, sub
+		}
+		signupColumn, err := signupKeyColumn(provider, signupSubject)
+		if err != nil {
+			return fmt.Errorf("%w: malformed customer deletion key", ErrInvalid)
 		}
 		if status == "complete" {
 			return nil
@@ -328,7 +385,14 @@ func (s *Store) FinishCustomerDeletion(ctx context.Context, tenant, pid string) 
 			}
 			args := []any{pid}
 			if cleanup.table != "oauth_refresh_tokens" {
-				args = append(args, "github:"+strings.ToLower(login))
+				// A Google customer has no login, so no login-keyed links:
+				// the second arm repeats the principal instead of matching
+				// "github:".
+				legacy := pid
+				if login != "" {
+					legacy = "github:" + strings.ToLower(login)
+				}
+				args = append(args, legacy)
 			}
 			if _, err := tx.Exec(ctx, cleanup.query, args...); err != nil {
 				return err
@@ -337,7 +401,7 @@ func (s *Store) FinishCustomerDeletion(ctx context.Context, tenant, pid string) 
 		if err := signupLock(ctx, tx); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE signup_requests SET status='released',notification_pending=false WHERE (principal_id=$1 OR github_id=$2) AND status IN ('approved','claimed')`, pid, githubID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE signup_requests SET status='released',notification_pending=false WHERE (principal_id=$1 OR `+signupColumn+`=$2) AND status IN ('approved','claimed')`, pid, signupSubject); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM external_identities WHERE principal_id=$1`, pid); err != nil {
@@ -383,8 +447,9 @@ func (s *Store) customerDeletionTx(ctx context.Context, tx pgx.Tx, tenant, pid s
 	return scanCustomerDeletion(tx.QueryRow(ctx, `SELECT `+customerDeletionSelectColumns+` FROM customer_deletions WHERE tenant_name=$1 AND principal_id=$2`, tenant, pid))
 }
 
-// Authentication identities are exactly GitHub + the customer issuer. Proven
-// surface mirrors (live or revoked) are owned data to purge, not extra accounts.
+// Authentication identities are exactly one of GitHub or Google, plus the
+// customer issuer. Proven surface mirrors (live or revoked) are owned data to
+// purge, not extra accounts.
 func customerDeletionIdentityTx(ctx context.Context, tx pgx.Tx, tenant, pid, issuer, actor string) (*CustomerDeletion, error) {
 	var hasSurface bool
 	if err := tx.QueryRow(ctx, `SELECT to_regclass('public.surface_identity_links') IS NOT NULL`).Scan(&hasSurface); err != nil {
@@ -419,9 +484,11 @@ func customerDeletionIdentityTx(ctx context.Context, tx pgx.Tx, tenant, pid, iss
 			continue
 		}
 		switch {
-		case provider == auth.ProviderGitHub && iss == "":
+		case provider == auth.ProviderGitHub && iss == "" && customerDeletionKey(provider, sub) != "":
 			d.GitHubID = sub
 			d.Login = display
+		case provider == auth.ProviderGoogle && iss == "" && auth.ValidGoogleSubject(sub):
+			d.GoogleSub = sub
 		case provider == "zitadel" && iss == issuer:
 			d.Subject = sub
 		default:
@@ -431,7 +498,8 @@ func customerDeletionIdentityTx(ctx context.Context, tx pgx.Tx, tenant, pid, iss
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if invalid || count != 2 || d.GitHubID == "" || d.Subject == "" || strings.TrimSpace(d.Login) == "" {
+	github, google := d.GitHubID != "", d.GoogleSub != ""
+	if invalid || count != 2 || github == google || d.Subject == "" || (github && strings.TrimSpace(d.Login) == "") {
 		return nil, fmt.Errorf("%w: unrelated, revoked or unproven customer authentication identity", ErrInvalid)
 	}
 	return d, nil

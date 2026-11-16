@@ -13,7 +13,7 @@ func TestCustomerDeletionPendingDistinguishesDisabledAndUnavailableStore(t *test
 	if callback == nil {
 		t.Fatal("configured but unavailable store became observed absence")
 	}
-	if pending, err := callback(context.Background(), "123"); err == nil || pending {
+	if pending, err := callback(context.Background(), "github", "123"); err == nil || pending {
 		t.Fatalf("unavailable store must be unknown: %v %v", pending, err)
 	}
 }

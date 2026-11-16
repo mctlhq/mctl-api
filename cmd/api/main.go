@@ -1589,7 +1589,7 @@ func main() {
 		ArgoWebhookSecret:              cfg.ArgoWebhookSecret,
 		GitHubWebhookSecret:            cfg.GitHubWebhookSecret,
 		GitHubWebhookOwners:            cfg.GitHubWebhookOwners,
-		ZitadelHook:                    zitadelHookOptions(cfg, gitReader, customerDeletionPending(principalStore, deletionProbeRequired), signupInvitationAllowed(cfg, principalStore)),
+		ZitadelHook:                    zitadelHookOptions(cfg, gitReader, zitadelHookProbes{creationPending: customerDeletionPending(principalStore, deletionProbeRequired), invitationAllowed: signupInvitationAllowed(cfg, principalStore)}),
 		GitHubEventOutbox:              githubEventOutboxOption(githubEventOutbox),
 		GitHubEventNotify:              githubEventNotify(githubEventRelay),
 		OAuthRegistrationToken:         cfg.OAuthRegistrationToken,
