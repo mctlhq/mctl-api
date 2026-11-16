@@ -18,10 +18,30 @@ func TestConfiguredSignupCannotFailOpenWithoutDatabase(t *testing.T) {
 	}
 }
 func TestPublicSignupUsesBudgetedModeInsteadOfExemptingEveryone(t *testing.T) {
-	cfg := config{PrincipalDBConfigured: true, ZitadelHook: zitadelHookConfig{CustomersOrgID: "customers", CustomerCreateGitHubIDs: []string{"*"}}}
+	cfg := config{PrincipalDBConfigured: true, SignupPublicWorkspaces: true, ZitadelHook: zitadelHookConfig{CustomersOrgID: "customers", CustomerCreateGitHubIDs: []string{"*"}}}
 	options := signupOptions(cfg, nil)
 	if options == nil || !options.PublicFlow || len(options.Cohort) != 0 {
 		t.Fatal("public signup must use bounded public claims")
+	}
+}
+
+// An open creation allowlist creates accounts; without
+// SIGNUP_PUBLIC_WORKSPACES it reserves no workspace for either provider.
+func TestOpenAllowlistAloneAdmitsNoWorkspace(t *testing.T) {
+	const org, gh, goog = "395272528420931285", "395272528420931999", "395272528420932777"
+	cfg := zitadelUpstreamConfig("zitadel")
+	cfg.OIDCProvidersRaw = testCustomersProviders
+	cfg.PrincipalDBConfigured = true
+	cfg.ZitadelHook.CustomersOrgID, cfg.ZitadelHook.GitHubIdPID, cfg.ZitadelHook.GoogleIdPID = org, gh, goog
+	cfg.ZitadelHook.CustomerCreateGitHubIDs = []string{"*"}
+	cfg.ZitadelHook.CustomerCreateGoogleSubs = []string{"*"}
+	o := signupOptions(cfg, nil)
+	if o == nil || o.PublicFlow || o.GooglePublicFlow {
+		t.Fatalf("options = %+v, want no public workspace flow without SIGNUP_PUBLIC_WORKSPACES", o)
+	}
+	cfg.SignupPublicWorkspaces = true
+	if o := signupOptions(cfg, nil); o == nil || !o.PublicFlow || !o.GooglePublicFlow {
+		t.Fatalf("options = %+v, want both public flows with SIGNUP_PUBLIC_WORKSPACES", o)
 	}
 }
 
@@ -53,6 +73,7 @@ func TestGooglePublicSignupNeedsTheGateAndAnOpenAllowlist(t *testing.T) {
 	cfg := zitadelUpstreamConfig("zitadel")
 	cfg.OIDCProvidersRaw = testCustomersProviders
 	cfg.PrincipalDBConfigured = true
+	cfg.SignupPublicWorkspaces = true
 	cfg.ZitadelHook.CustomersOrgID, cfg.ZitadelHook.GitHubIdPID, cfg.ZitadelHook.GoogleIdPID = org, gh, goog
 	cfg.ZitadelHook.CustomerCreateGoogleSubs = []string{"*"}
 	if o := signupOptions(cfg, nil); o == nil || !o.GooglePublicFlow || o.PublicFlow {
@@ -62,6 +83,7 @@ func TestGooglePublicSignupNeedsTheGateAndAnOpenAllowlist(t *testing.T) {
 		"no Google IdP":       func(c *config) { c.ZitadelHook.GoogleIdPID = "" },
 		"Google allowlist":    func(c *config) { c.ZitadelHook.CustomerCreateGoogleSubs = []string{"109876543210987654321"} },
 		"no Google allowlist": func(c *config) { c.ZitadelHook.CustomerCreateGoogleSubs = nil },
+		"no workspace flag":   func(c *config) { c.SignupPublicWorkspaces = false },
 		"GitHub open instead": func(c *config) {
 			c.ZitadelHook.CustomerCreateGoogleSubs, c.ZitadelHook.CustomerCreateGitHubIDs = nil, []string{"*"}
 		},

@@ -366,9 +366,11 @@ A customer may sign in with Google instead. The identity hook then issues
   provider: `signup_requests.github_id` for GitHub, `google_sub` for Google,
   never both. Invitations are decided by GitHub login, so there are none
   for Google: a Google customer is admitted by the public flow only, which
-  is on when `ZITADEL_HOOK_CUSTOMER_CREATE_GOOGLE_SUBS` is exactly `*` and
-  Google customers are accepted. It spends the same slot budget as GitHub
-  claims. A Google creation allowlist grants an account, not a workspace,
+  is on when `ZITADEL_HOOK_CUSTOMER_CREATE_GOOGLE_SUBS` is exactly `*`,
+  Google customers are accepted and `SIGNUP_PUBLIC_WORKSPACES` is exactly
+  `true`. It spends the same slot budget as GitHub claims. The same flag
+  gates the GitHub public flow: an open creation allowlist alone creates
+  accounts, never workspaces. A Google creation allowlist grants an account, not a workspace,
   and no Google subject joins the GitHub pilot cohort. A principal holding
   both a GitHub and a Google identity is refused as ambiguous.
 - **Deletion.** A Google customer's deletion manifest names its Google

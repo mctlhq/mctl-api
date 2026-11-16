@@ -24,12 +24,16 @@ import (
 )
 
 type SignupOptions struct {
+	// PublicFlow admits any GitHub customer through bounded public claims
+	// (ZITADEL_HOOK_CUSTOMER_CREATE_GITHUB_IDS is exactly "*" and
+	// SIGNUP_PUBLIC_WORKSPACES is "true").
 	PublicFlow bool
 	// GooglePublicFlow admits Google customers through the public flow
-	// (ZITADEL_HOOK_CUSTOMER_CREATE_GOOGLE_SUBS is exactly "*" and Google
-	// customers are accepted). There are no invitations for Google
-	// customers, so without it a Google customer is never admitted; a
-	// Google creation allowlist grants an account, not a workspace.
+	// (ZITADEL_HOOK_CUSTOMER_CREATE_GOOGLE_SUBS is exactly "*", Google
+	// customers are accepted and SIGNUP_PUBLIC_WORKSPACES is "true").
+	// There are no invitations for Google customers, so without it a
+	// Google customer is never admitted; a Google creation allowlist
+	// grants an account, not a workspace.
 	GooglePublicFlow bool
 	Store            *principals.Store
 	SiteCall         func(context.Context, string, string, []byte) ([]byte, error)
