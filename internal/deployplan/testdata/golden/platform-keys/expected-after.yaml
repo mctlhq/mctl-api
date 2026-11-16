@@ -11,6 +11,7 @@ externalSecret:
   storeKind: ClusterSecretStore
   targetSecret: ghcr-pull
 image:
+  digest: ''
   repository: ghcr.io/acme/api
   tag: rev-0123456789abcdef0123456789abcdef01234567
 imagePullSecrets:

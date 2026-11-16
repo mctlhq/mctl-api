@@ -27,6 +27,7 @@ extraExternalSecrets:
     storeKind: SecretStore
     targetSecret: smtp
 image:
+  digest: ''
   tag: rev-0123456789abcdef0123456789abcdef01234567
 ingress:
   annotations:

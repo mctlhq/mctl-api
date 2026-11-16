@@ -37,6 +37,7 @@ p{margin:0 0 .75rem;overflow-wrap:anywhere}
 .actions a,.actions button{display:block;width:100%;padding:.75rem 1rem;border:1px solid var(--primary);border-radius:.5rem;background:var(--primary);color:var(--on-primary);font:inherit;font-weight:600;text-align:center;text-decoration:none;cursor:pointer}
 .actions a.secondary,.actions button.secondary{background:transparent;color:var(--primary)}
 .actions a:focus-visible,.actions button:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+.actions button:disabled{opacity:.6;cursor:not-allowed}
 .legacy{margin:1.25rem 0 0;text-align:center;font-size:.875rem}.legacy a{color:var(--muted)}
 @media (max-width:30rem){body{align-items:flex-start;padding:1rem 1rem 2rem}.card{padding:1.5rem 1.25rem}}
 </style></head>
