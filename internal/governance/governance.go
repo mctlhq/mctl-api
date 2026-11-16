@@ -111,6 +111,14 @@ var Policies = PolicySet{
 		Reasons:    []string{workitems.DeployApplyPolicyRuleID},
 		SideEffect: "write",
 	},
+	// The owner grants one release (repository, version, tag commit, image
+	// digest) to production (mctl-api#1022).
+	workitems.ReleaseGrantPolicyRuleID: {
+		Version:    workitems.ReleaseGrantPolicyVersion,
+		Decision:   "require_approval",
+		Reasons:    []string{workitems.ReleaseGrantPolicyRuleID},
+		SideEffect: "write",
+	},
 }
 
 // Policy status values returned by Check.

@@ -89,7 +89,8 @@ func ciRouteAllowed(r *http.Request) bool {
 		return false
 	}
 	return (r.Method == http.MethodPost && r.URL.Path == ciDeployRoute) ||
-		(r.Method == http.MethodGet && r.URL.Path == ciBuildBindingRoute)
+		(r.Method == http.MethodGet && r.URL.Path == ciBuildBindingRoute) ||
+		ciReleaseGrantReadAllowed(r)
 }
 
 // authorizeCIDeploy decides a CI principal's deploy request on the raw,

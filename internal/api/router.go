@@ -99,6 +99,9 @@ type Options struct {
 	// DeployPlans stores immutable deploy plans (POST /deploy/plan). Nil
 	// answers 503 deploy_plan_store_unavailable.
 	DeployPlans DeployPlanStore
+	// ReleaseGrants mounts the release grant routes (mctl-api#1022). Nil, or
+	// without a resolver or repositories, leaves them unmounted.
+	ReleaseGrants *ReleaseGrantOptions
 	// DeployRecords keeps one record per applied plan (mctl-api#1047). Nil
 	// refuses every apply before its grant is spent, and answers
 	// GET /deploy/deployments/{id} with 503.
@@ -748,6 +751,10 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/deploy/plans/{id}", h.GetDeployPlan)
 			r.Post("/deploy/plans/{id}/approval", h.RequestDeployApproval)
 			r.Post("/deploy/apply", h.DeployApply)
+			if h.opts.ReleaseGrants.enabled() && h.opts.WorkItems != nil {
+				r.Post("/release/grants", h.RequestReleaseGrant)
+				r.Get("/release/grants", h.ListReleaseGrants)
+			}
 			r.Get("/deploy/deployments/{id}", h.GetDeployment)
 			r.Get("/status/{team}/{app}", h.GetServiceStatus)
 			r.Get("/workflows", h.ListWorkflows)
