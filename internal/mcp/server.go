@@ -264,6 +264,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolGetRepoBinding())
 	srv.AddTool(s.toolDeployPlan())
 	srv.AddTool(s.toolGetDeployPlan())
+	srv.AddTool(s.toolGetDeployment())
 	srv.AddTool(s.toolRequestDeployApproval())
 	srv.AddTool(s.toolDeployApply())
 	srv.AddTool(s.toolListWorkflows())

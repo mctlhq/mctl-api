@@ -196,6 +196,28 @@ A preview apply of a stored deploy plan (`dpl_`) is authorized by a
   grant to the plan's intent hash, revalidates the decider, spends the grant
   once, and submits `preview-deploy` with the plan's preview id and gitops
   commit. `preview_id` and `gitops_ref` are refused in any execute body.
+- Deployment record (mctl-api#1047). Right after the grant is spent and before
+  anything is submitted, apply writes one `deploy_records` row (`dep_...`):
+  the plan and its digest, revision, gitops commit, preview id and host, the
+  grant and the principal who decided it, and who applied it. If that write
+  fails, nothing is submitted and the spent grant is not reusable
+  (`503 deploy_apply_unavailable`; request a new grant). A plan applies once:
+  grants are per requester, so a second holder's apply is refused with
+  `409 deploy_plan_already_applied` before their grant is spent (or, if it
+  loses a race after that check, after the spend with nothing submitted), and
+  a record store that cannot be read refuses with 503 before the spend.
+  Status moves once, from `submitting` to `submitted` (with the workflow
+  name) or to `submit_failed` only when the submit certainly created no
+  workflow; an ambiguous submit error leaves it in `submitting` (outcome not
+  recorded), since a guess could not be corrected later.
+  `image_digest`, `argo_revision`, `health` and `health_url` are written once
+  when observed; until then health reads `unknown`, which never means healthy.
+  Planned and granted fields are immutable and rows are never deleted
+  (database triggers). The 202 answer carries `deployment_id`.
+  `GET /api/v1/deploy/deployments/{id}` (MCP `mctl_get_deployment`) takes a
+  `dep_` or the applied plan's `dpl_` id; tenant members and admins only,
+  anyone else gets `404 deployment_not_found`, and an unreadable store answers
+  `503 deploy_record_store_unavailable`.
 - Faithful or refused: `preview-deploy` renders the service's GitOps values,
   not the intent's runtime changes. A plan whose intent changes the values
   (`intent_changes_values`, compared before redaction and over the

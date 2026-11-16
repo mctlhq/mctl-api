@@ -220,6 +220,11 @@
       "reason": "Read-only lookup of a stored preview deploy plan (mctlhq/mctl-api#866); enabling it on the shared portal is a separate owner decision."
     },
     {
+      "name": "mctl_get_deployment",
+      "enabled": false,
+      "reason": "Read-only lookup of the deployment record of an applied plan (mctlhq/mctl-api#1047); enabling it on the shared portal is a separate owner decision."
+    },
+    {
       "name": "mctl_request_deploy_approval",
       "enabled": false,
       "reason": "Opens a pending deploy.apply grant request for a stored plan (mctlhq/mctl-api#1026); grants nothing. Enabling it on the shared portal is a separate owner decision."

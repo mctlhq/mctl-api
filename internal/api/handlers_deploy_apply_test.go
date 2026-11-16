@@ -136,7 +136,7 @@ func newGrantFixture(t *testing.T, values string, edit ...func(*mctlapi.Options)
 	}
 	f := &grantFixture{
 		planFixture: &planFixture{
-			log: audit.NewLogger(), content: &fakeContent{}, store: newFakePlanStore(), exec: &fakeExecutor{},
+			log: audit.NewLogger(), content: &fakeContent{}, store: newFakePlanStore(), records: newFakeRecordStore(), exec: &fakeExecutor{},
 			gitops: &fakePlanGitops{data: values, sourceRepo: "acme/web", exists: true, rev: planBaseSHA},
 			now:    time.Now().UTC(),
 		},
@@ -158,7 +158,7 @@ func newGrantFixture(t *testing.T, values string, edit ...func(*mctlapi.Options)
 		Registry: operations.NewRegistry(), GitReader: &fakeGitReader{tenants: []gitops.Tenant{{Name: "acme"}}}, ArgoCD: &fakeArgoCD{}, AuditLog: f.log, Executor: f.exec,
 		BackstageInternalURL: portal.URL, BackstageGithubAppConnectToken: "tok",
 		SourceRepoBindings:  repoBindings{},
-		DeployContentReader: f.content, DeployPlans: f.store, DeployGitops: f.gitops,
+		DeployContentReader: f.content, DeployPlans: f.store, DeployRecords: f.records, DeployGitops: f.gitops,
 		PlatformDomain: "mctl.ai", Clock: func() time.Time { return f.now },
 		WorkItems: wi, TenantAuthzMode: mctlapi.TenantAuthzPrincipal, PrincipalMembership: f.members,
 		Principals: f.prins, AdminPrincipals: map[string]bool{grantRootPRN: true},
@@ -207,7 +207,13 @@ func (f *grantFixture) request(t *testing.T, user *auth.User, planID string, wan
 // will, and returns its id.
 func (f *grantFixture) grant(t *testing.T, planID string) string {
 	t.Helper()
-	body := f.request(t, f.dev, planID, http.StatusCreated)
+	return f.grantAs(t, f.dev, planID)
+}
+
+// grantAs is grant for another requester of the tenant.
+func (f *grantFixture) grantAs(t *testing.T, requester *auth.User, planID string) string {
+	t.Helper()
+	body := f.request(t, requester, planID, http.StatusCreated)
 	id := body["approval"].(map[string]any)["id"].(string)
 	digest := body["decision_context"].(map[string]any)["context_digest"].(string)
 	if _, err := f.wi.DecideDeployApproval(context.Background(), workitems.ActionDecisionInput{

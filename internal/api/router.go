@@ -99,6 +99,10 @@ type Options struct {
 	// DeployPlans stores immutable deploy plans (POST /deploy/plan). Nil
 	// answers 503 deploy_plan_store_unavailable.
 	DeployPlans DeployPlanStore
+	// DeployRecords keeps one record per applied plan (mctl-api#1047). Nil
+	// refuses every apply before its grant is spent, and answers
+	// GET /deploy/deployments/{id} with 503.
+	DeployRecords DeployRecordStore
 	// DeployGitops reads a service's values and the checkout revision for
 	// deploy plans. Nil answers 503 deploy_gitops_unavailable.
 	DeployGitops DeployPlanGitops
@@ -737,6 +741,7 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/deploy/plans/{id}", h.GetDeployPlan)
 			r.Post("/deploy/plans/{id}/approval", h.RequestDeployApproval)
 			r.Post("/deploy/apply", h.DeployApply)
+			r.Get("/deploy/deployments/{id}", h.GetDeployment)
 			r.Get("/status/{team}/{app}", h.GetServiceStatus)
 			r.Get("/workflows", h.ListWorkflows)
 			r.Get("/workflows/{name}", h.GetWorkflow)

@@ -98,6 +98,10 @@ func (e *notCreatedError) Unwrap() error { return e.err }
 
 func notCreated(err error) error { return &notCreatedError{err: err} }
 
+// NotCreated marks err as a Submit failure raised before any Workflow was
+// created, for executors outside this package and their test doubles.
+func NotCreated(err error) error { return notCreated(err) }
+
 // IsNotCreated reports whether err from Submit certainly means no Workflow
 // was created. Any other Submit error is ambiguous: the create may have been
 // accepted before the failure was seen.
