@@ -59,15 +59,27 @@ func (s *reconcileStore) SetRecordSubmission(_ context.Context, id, status, work
 	return r, nil
 }
 
-func (s *reconcileStore) SetRunResult(_ context.Context, id, result, digest string) (*deployplan.Record, error) {
-	s.results = append(s.results, id+"="+result)
+func (s *reconcileStore) SetRunResult(_ context.Context, id string, o deployplan.RunOutcome) (*deployplan.Record, error) {
+	s.results = append(s.results, id+"="+o.Result)
 	r := s.find(id)
 	if r == nil || r.Status != deployplan.RecordSubmitted || r.RunResult != "" {
 		return nil, errors.New("not awaiting a run result")
 	}
-	r.RunResult = result
+	r.RunResult = o.Result
 	if r.ImageDigest == "" {
-		r.ImageDigest = digest
+		r.ImageDigest = o.ImageDigest
+	}
+	if r.ArgoRevision == "" {
+		r.ArgoRevision = o.ArgoRevision
+	}
+	if r.CommitSHA == "" {
+		r.CommitSHA = o.CommitSHA
+	}
+	if r.Health == deployplan.HealthUnknown && o.Health != "" {
+		r.Health = o.Health
+	}
+	if r.HealthURL == "" {
+		r.HealthURL = o.HealthURL
 	}
 	return r, nil
 }
@@ -209,5 +221,49 @@ func TestDeployRecordReconcile_Pages(t *testing.T) {
 		if rec.RunResult != deployplan.RunSucceeded {
 			t.Fatalf("%s not reached behind running records", rec.ID)
 		}
+	}
+}
+
+// mctl-api#1048 step 1: what a finished workflow reports about the deploy
+// itself. Every shape below is one a wrong reader would get wrong.
+func TestDeployRecordOutcomeFields(t *testing.T) {
+	sha1, sha2 := strings.Repeat("1", 40), strings.Repeat("2", 40)
+	url := "https://svc.example.test"
+	cases := []struct {
+		name  string
+		phase string
+		out   map[string]string
+		want  deployplan.RunOutcome
+	}{
+		{"healthy deploy", "Succeeded",
+			map[string]string{"image_digest": goodDigest, "argo_revision": sha1, "commit_sha": sha2, "health": "healthy", "health_url": url},
+			deployplan.RunOutcome{Result: "succeeded", ImageDigest: goodDigest, ArgoRevision: sha1, CommitSHA: sha2, Health: "healthy", HealthURL: url}},
+		{"red deploy keeps the observed revision and commit, not the digest", "Failed",
+			map[string]string{"image_digest": goodDigest, "argo_revision": sha1, "commit_sha": sha2, "health": "unhealthy", "health_url": url},
+			deployplan.RunOutcome{Result: "failed", ArgoRevision: sha1, CommitSHA: sha2, Health: "unhealthy", HealthURL: url}},
+		{"healthy claimed by a failed run is not recorded", "Failed",
+			map[string]string{"health": "healthy", "health_url": url},
+			deployplan.RunOutcome{Result: "failed"}},
+		{"idle is not a health claim", "Succeeded",
+			map[string]string{"health": "idle", "argo_revision": sha1},
+			deployplan.RunOutcome{Result: "succeeded", ArgoRevision: sha1}},
+		{"unknown stays unknown", "Failed",
+			map[string]string{"health": "unknown"},
+			deployplan.RunOutcome{Result: "failed"}},
+		{"no outputs at all (preview-deploy today)", "Succeeded",
+			map[string]string{},
+			deployplan.RunOutcome{Result: "succeeded"}},
+		{"malformed values are dropped one by one", "Succeeded",
+			map[string]string{"image_digest": goodDigest, "argo_revision": "main", "commit_sha": "abc", "health": "healthy", "health_url": "https://x.test/path"},
+			deployplan.RunOutcome{Result: "succeeded", ImageDigest: goodDigest, Health: "healthy"}},
+	}
+	for _, c := range cases {
+		got, ok := testReconciler(&reconcileStore{}, &outcomeExec{}).outcomeOf("dep_x", "wf", &operations.WorkflowOutcome{Phase: c.phase, Outputs: c.out})
+		if !ok || got != c.want {
+			t.Errorf("%s: got %+v (finished=%v), want %+v", c.name, got, ok, c.want)
+		}
+	}
+	if _, ok := testReconciler(&reconcileStore{}, &outcomeExec{}).outcomeOf("dep_x", "wf", &operations.WorkflowOutcome{Phase: "Running"}); ok {
+		t.Error("a running workflow is not an outcome")
 	}
 }
