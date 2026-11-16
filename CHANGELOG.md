@@ -1,5 +1,19 @@
 # Changelog
 
+## [4.163.0](https://github.com/mctlhq/mctl-api/compare/4.162.0...4.163.0) (2026-11-16)
+
+
+### Features
+
+* **glovo:** personal grant for consenting humans with no team ([b98ae26](https://github.com/mctlhq/mctl-api/commit/b98ae26b0187bb66a5ab752fbadd6b5ce496c2ad))
+* **glovo:** personal grant for consenting humans with no team ([cf3c7e9](https://github.com/mctlhq/mctl-api/commit/cf3c7e94f4650c5427fc744769fc6bad93870dd2)), closes [#1079](https://github.com/mctlhq/mctl-api/issues/1079)
+
+
+### Bug Fixes
+
+* **signup:** an open allowlist creates accounts, not workspaces ([cff5b37](https://github.com/mctlhq/mctl-api/commit/cff5b37683e7f6d17878b465a4621887e3aabeac))
+* **signup:** an open allowlist creates accounts, not workspaces ([81c438f](https://github.com/mctlhq/mctl-api/commit/81c438f65dfc790d2488119bc9014965cd49578e))
+
 ## [4.162.0](https://github.com/mctlhq/mctl-api/compare/4.161.3...4.162.0) (2026-11-16)
 
 
