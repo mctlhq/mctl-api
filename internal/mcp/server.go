@@ -720,7 +720,10 @@ The service domain is auto-generated as {team_name}-{component_name}.{platform_d
 Custom domains can be added after deployment using mctl_add_custom_domain.
 For background workers, set component_type to 'worker-service' (no ingress).
 If the worker has no HTTP health endpoint, also set skip_health_check=true —
-otherwise the post-deploy check will fail waiting on a path that doesn't exist.
+otherwise the liveness/readiness probes will fail on a path that doesn't exist.
+The post-deploy health gate still runs: it checks that Argo CD is Synced and
+Healthy and that every pod runs the expected image digest, with no HTTP check
+for a service without a public host.
 
 Repository access for building:
 - Use mctl_list_repos(team) to see available repos, and mctl_sync_repos(team) to discover new ones.
@@ -769,7 +772,7 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 			mcplib.Description("Secret environment variables, newline-separated KEY=value. Each key must be an environment variable name ([A-Za-z_][A-Za-z0-9_]*); values are single-line. Stored in Vault, never echoed back in logs or responses."),
 		),
 		mcplib.WithString("skip_health_check",
-			mcplib.Description("Skip the post-deploy health check: 'true' or 'false' (default: false). Only set 'true' for a worker-service that has no HTTP health endpoint."),
+			mcplib.Description("Remove the liveness/readiness probes: 'true' or 'false' (default: false). Only set 'true' for a worker-service that has no HTTP health endpoint. It does NOT skip the post-deploy health gate, which checks the Argo CD sync and the running image digest for every service."),
 			mcplib.Enum("true", "false"),
 		),
 		mcplib.WithString("health_check_path",
