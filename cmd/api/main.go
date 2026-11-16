@@ -1480,6 +1480,13 @@ func main() {
 		}
 	}
 
+	glovoC2Kill, gckErr := configureGlovoC2KillSwitch(os.LookupEnv)
+	if gckErr != nil {
+		slog.Error("invalid configuration", "error", gckErr)
+		stopSignals()
+		os.Exit(1)
+	}
+
 	deletionProbeRequired := (cfg.PrincipalDBConfigured && !cfg.PrincipalsDisabled) || os.Getenv("CUSTOMER_DELETION_ENABLED") == "true"
 	signup := signupOptions(cfg, principalStore)
 	if signup != nil && signup.Store != nil {
@@ -1493,6 +1500,7 @@ func main() {
 		oauthFlowStore(oauthServer), workItemsStore != nil, deployPlans != nil)
 	router := mctlapi.NewRouter(mctlapi.Options{
 		Signup:                         signup,
+		GlovoC2KillSwitch:              glovoC2Kill,
 		Registry:                       registry,
 		CustomerDeletion:               customerDeletionOptions(cfg, principalStore, principalCache, oauthServer, quotaReader, argoClient),
 		CustomerTenantDeletionPending:  customerTenantDeletionPending(principalStore, deletionProbeRequired),
