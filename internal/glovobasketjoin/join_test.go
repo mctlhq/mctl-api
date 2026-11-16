@@ -395,3 +395,20 @@ func TestRateLimits(t *testing.T) {
 		t.Fatalf("refusals %+v", e.refusals)
 	}
 }
+
+type joinConsent struct{}
+
+func (joinConsent) HeldSince(context.Context, string, time.Time) (bool, error) { return true, nil }
+
+// The basket service acts for a team member: a personal grant resolves, and
+// the join refuses it as scope_unsupported, not as an outage.
+func TestPersonalScopeRefused(t *testing.T) {
+	e := newEnv(t)
+	e.svc.Resolver.(*scope.Resolver).Consent = joinConsent{}
+	e.grants.g = teamgrant.Grant{ID: "pgr_1", PrincipalID: prnA, Kind: teamgrant.KindPersonal, ClientID: client, Resource: res,
+		State: teamgrant.StateActive, RefreshFamilyID: "fam", CreatedAt: time.Now()}
+	res := e.call(PathResolve, e.token(map[string]any{"tgr": "pgr_1", "stn": "", "tgk": "personal"}), "{}")
+	if res.code == http.StatusOK || res.errCode() != string(glovo.CodeScopeUnsupported) {
+		t.Fatalf("resolve = %d %s", res.code, res.raw)
+	}
+}

@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/auth/teamgrant"
@@ -34,9 +35,12 @@ import (
 	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
-// Scope is the resolved caller scope.
+// Scope is the resolved caller scope. A personal scope (Personal true) is
+// the principal alone: Tenant and Role are empty and must never be read as a
+// team. Every consumer that needs a team refuses it (RequireTeam).
 type Scope struct {
 	PrincipalID string
+	Personal    bool
 	Tenant      string
 	Role        string
 	GrantID     string
@@ -146,6 +150,27 @@ type Resolver struct {
 	// Ready is the kill switch and readiness check (OAuthServer.GlovoReady).
 	// Nil or false answers not_ready before anything else is read.
 	Ready func() bool
+	// Consent admits personal grants (GLOVO_CONSENT_ENABLED). Nil keeps the
+	// team-only resolver: a personal token resolves as it did before, to
+	// ambiguous_tenant, because it carries no team.
+	Consent ConsentChecker
+}
+
+// ConsentChecker is the glovo:c2 consent a personal grant stands on
+// (glovoconsent.ConsentGrants). HeldSince is true only while the principal
+// holds an active consent recorded at or before at; an error is a failed
+// read, never a grant.
+type ConsentChecker interface {
+	HeldSince(ctx context.Context, principalID string, at time.Time) (bool, error)
+}
+
+// RequireTeam refuses a personal scope for a consumer that acts for a team.
+// It is the one place a team-bound route says so; nil means sc names a team.
+func RequireTeam(sc Scope) *glovo.Error {
+	if sc.Personal || sc.Tenant == "" {
+		return refuse(glovo.CodeScopeUnsupported)
+	}
+	return nil
 }
 
 func refuse(c glovo.Code) *glovo.Error { return glovo.Refuse(c) }
@@ -166,6 +191,13 @@ func (r *Resolver) Resolve(ctx context.Context, u *auth.User) (Scope, *glovo.Err
 		return Scope{}, refuse(glovo.CodeNotAuthorized)
 	}
 	prn := u.PrincipalID()
+	// 2'. A personal grant, only while the consent source is configured.
+	// Without it, a personal token is what it was before: no team claims.
+	if r.Consent != nil {
+		if grantID, ok := u.PersonalGrant(); ok {
+			return r.resolvePersonal(ctx, u, prn, grantID)
+		}
+	}
 	// 2. The signed claims name a grant.
 	grantID, tenant, ok := u.TeamGrant()
 	if !ok {
@@ -179,7 +211,7 @@ func (r *Resolver) Resolve(ctx context.Context, u *auth.User) (Scope, *glovo.Err
 	if err != nil {
 		return Scope{}, refuse(glovo.CodeUnavailable)
 	}
-	if g.Tenant != tenant {
+	if g.IsPersonal() || g.Tenant != tenant {
 		return Scope{}, refuse(glovo.CodeAmbiguousTenant)
 	}
 	// 4. System-only tenants, and anything that is not a team, are not
@@ -205,4 +237,29 @@ func (r *Resolver) Resolve(ctx context.Context, u *auth.User) (Scope, *glovo.Err
 	}
 	// 7.
 	return Scope{PrincipalID: prn, Tenant: g.Tenant, Role: string(role), GrantID: g.ID, RefreshFamilyID: g.RefreshFamilyID}, nil
+}
+
+// resolvePersonal resolves a personal grant: the server-held grant must be
+// active, personal and match the token; and the principal must hold, right
+// now, the glovo:c2 consent the grant was created under. Nothing is cached:
+// withdrawing the consent refuses the very next request.
+func (r *Resolver) resolvePersonal(ctx context.Context, u *auth.User, prn, grantID string) (Scope, *glovo.Error) {
+	g, err := r.Grants.Check(ctx, grantID, prn, u.OAuthClientID(), r.Resource)
+	if errors.Is(err, teamgrant.ErrGrantInvalid) {
+		return Scope{}, refuse(glovo.CodeAmbiguousTenant)
+	}
+	if err != nil {
+		return Scope{}, refuse(glovo.CodeUnavailable)
+	}
+	if !g.IsPersonal() || g.Tenant != "" {
+		return Scope{}, refuse(glovo.CodeAmbiguousTenant)
+	}
+	held, err := r.Consent.HeldSince(ctx, prn, g.CreatedAt)
+	if err != nil {
+		return Scope{}, refuse(glovo.CodeUnavailable)
+	}
+	if !held {
+		return Scope{}, refuse(glovo.CodeNotAuthorized)
+	}
+	return Scope{PrincipalID: prn, Personal: true, GrantID: g.ID, RefreshFamilyID: g.RefreshFamilyID}, nil
 }

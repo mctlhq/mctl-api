@@ -378,3 +378,48 @@ func TestPGClaimWaitIsBounded(t *testing.T) {
 		t.Fatalf("a timed-out claim left a consent: %v", err)
 	}
 }
+
+// HeldSince binds a personal grant to the consent it was created under: a
+// consent recorded later (after a withdrawal) never revives the grant, and
+// a failed read is an error, never a grant.
+func TestConsentHeldSince(t *testing.T) {
+	ctx := context.Background()
+	at := time.Now()
+	rec := Record{ID: "gcn_1", PrincipalID: pidA, Version: Version, RecordedAt: at.Add(-time.Minute)}
+	if ok, err := (ConsentGrants{Store: rowStore{rec: rec}}).HeldSince(ctx, pidA, at); !ok || err != nil {
+		t.Fatalf("consent before the grant = %v %v, want held", ok, err)
+	}
+	same := rec
+	same.RecordedAt = at
+	if ok, err := (ConsentGrants{Store: rowStore{rec: same}}).HeldSince(ctx, pidA, at); !ok || err != nil {
+		t.Fatalf("consent at the grant = %v %v, want held", ok, err)
+	}
+	later := rec
+	later.RecordedAt = at.Add(time.Second)
+	if ok, err := (ConsentGrants{Store: rowStore{rec: later}}).HeldSince(ctx, pidA, at); ok || err != nil {
+		t.Fatalf("consent recorded after the grant = %v %v, want not held", ok, err)
+	}
+	old := rec
+	old.Version = "c2-link-v0"
+	if ok, err := (ConsentGrants{Store: rowStore{rec: old}}).HeldSince(ctx, pidA, at); ok || err != nil {
+		t.Fatalf("older version = %v %v, want not held", ok, err)
+	}
+	if ok, err := (ConsentGrants{Store: failingStore{ErrNoConsent}}).HeldSince(ctx, pidA, at); ok || err != nil {
+		t.Fatalf("no consent = %v %v, want not held", ok, err)
+	}
+	if ok, err := (ConsentGrants{Store: failingStore{errors.New("db down")}}).HeldSince(ctx, pidA, at); ok || err == nil {
+		t.Fatalf("db error = %v %v, want an error and not held", ok, err)
+	}
+	if ok, err := (ConsentGrants{}).HeldSince(ctx, pidA, at); ok || err == nil {
+		t.Fatalf("no store = %v %v", ok, err)
+	}
+	other := rec
+	other.PrincipalID = pidB
+	revoked := rec
+	revoked.RevokedAt = &at
+	for name, r := range map[string]Record{"another principal": other, "revoked": revoked} {
+		if ok, err := (ConsentGrants{Store: rowStore{rec: r}}).HeldSince(ctx, pidA, at); ok || err == nil {
+			t.Errorf("%s row = %v %v, want an error and not held", name, ok, err)
+		}
+	}
+}

@@ -19,6 +19,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/mctlhq/mctl-api/internal/api"
+	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/glovo/scope"
 	"github.com/mctlhq/mctl-api/internal/glovoconsent"
 )
 
@@ -100,6 +103,45 @@ func TestConfigureGlovoConsent(t *testing.T) {
 		}
 		if name != "store open fails" && opened != before {
 			t.Errorf("%s: opened a store for a configuration that stays off", name)
+		}
+	}
+}
+
+// Personal grants exist only with the Glovo routes and the consent routes
+// both on; with either off the OAuth server and the resolver stay team-only.
+func TestWireGlovoPersonalGrants(t *testing.T) {
+	setup := func() (*auth.OAuthServer, *api.GlovoRoutes, *api.GlovoConsentRoutes) {
+		return &auth.OAuthServer{}, &api.GlovoRoutes{Enabled: true, Resolver: &scope.Resolver{}},
+			&api.GlovoConsentRoutes{Enabled: true, Store: nopConsentStore{}}
+	}
+	o, routes, consent := setup()
+	if !wireGlovoPersonalGrants(o, routes, consent) || o.GlovoConsent == nil || routes.Resolver.Consent == nil {
+		t.Fatal("personal grants not wired with both routes on")
+	}
+	for name, off := range map[string]func(*api.GlovoRoutes, *api.GlovoConsentRoutes) (*api.GlovoRoutes, *api.GlovoConsentRoutes){
+		"consent flag off": func(r *api.GlovoRoutes, c *api.GlovoConsentRoutes) (*api.GlovoRoutes, *api.GlovoConsentRoutes) {
+			c.Enabled = false
+			return r, c
+		},
+		"no consent routes": func(r *api.GlovoRoutes, _ *api.GlovoConsentRoutes) (*api.GlovoRoutes, *api.GlovoConsentRoutes) {
+			return r, nil
+		},
+		"no consent store": func(r *api.GlovoRoutes, c *api.GlovoConsentRoutes) (*api.GlovoRoutes, *api.GlovoConsentRoutes) {
+			c.Store = nil
+			return r, c
+		},
+		"glovo routes off": func(r *api.GlovoRoutes, c *api.GlovoConsentRoutes) (*api.GlovoRoutes, *api.GlovoConsentRoutes) {
+			r.Enabled = false
+			return r, c
+		},
+		"no glovo routes": func(_ *api.GlovoRoutes, c *api.GlovoConsentRoutes) (*api.GlovoRoutes, *api.GlovoConsentRoutes) {
+			return nil, c
+		},
+	} {
+		o, routes, consent := setup()
+		r, c := off(routes, consent)
+		if wireGlovoPersonalGrants(o, r, c) || o.GlovoConsent != nil || routes.Resolver.Consent != nil {
+			t.Errorf("%s: personal grants wired", name)
 		}
 	}
 }

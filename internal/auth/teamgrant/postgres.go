@@ -49,6 +49,7 @@ func (s *PostgresStore) SharesRefreshPool() {}
 
 // Create implements Store.
 func (s *PostgresStore) Create(ctx context.Context, g Grant) (Grant, error) {
+	g = normalize(g)
 	if err := validate(g); err != nil {
 		return Grant{}, err
 	}
@@ -71,9 +72,9 @@ func (s *PostgresStore) Create(ctx context.Context, g Grant) (Grant, error) {
 		return Grant{}, fmt.Errorf("team grant: supersede: %w", err)
 	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO oauth_team_grants (grant_id, principal_id, tenant, resource, client_id, state, created_at, expires_at)
-		 VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7)`,
-		id, g.PrincipalID, g.Tenant, g.Resource, g.ClientID, now, g.ExpiresAt.UTC()); err != nil {
+		`INSERT INTO oauth_team_grants (grant_id, principal_id, kind, tenant, resource, client_id, state, created_at, expires_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)`,
+		id, g.PrincipalID, g.Kind, g.Tenant, g.Resource, g.ClientID, now, g.ExpiresAt.UTC()); err != nil {
 		return Grant{}, fmt.Errorf("team grant: insert: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -86,13 +87,17 @@ func (s *PostgresStore) Create(ctx context.Context, g Grant) (Grant, error) {
 // ActivateTx moves a pending grant to active and binds it to the refresh
 // family, on tx. It is the only gate at code exchange: zero rows (unknown,
 // not pending, expired by the database clock, or a different principal,
-// client or resource) is ErrGrantInvalid, and the caller must roll back.
-func ActivateTx(ctx context.Context, tx pgx.Tx, grantID, principalID, clientID, resource string, familyID uuid.UUID) error {
+// client, resource or kind) is ErrGrantInvalid, and the caller must roll
+// back. kind "" is KindTeam.
+func ActivateTx(ctx context.Context, tx pgx.Tx, grantID, principalID, clientID, resource, kind string, familyID uuid.UUID) error {
+	if kind == "" {
+		kind = KindTeam
+	}
 	tag, err := tx.Exec(ctx,
 		`UPDATE oauth_team_grants SET state = 'active', refresh_family_id = $5
 		 WHERE grant_id = $1 AND principal_id = $2 AND client_id = $3 AND resource = $4
-		   AND state = 'pending' AND expires_at > now()`,
-		grantID, principalID, clientID, resource, familyID)
+		   AND kind = $6 AND state = 'pending' AND expires_at > now()`,
+		grantID, principalID, clientID, resource, familyID, kind)
 	if err != nil {
 		return fmt.Errorf("team grant: activate: %w", err)
 	}
@@ -102,7 +107,7 @@ func ActivateTx(ctx context.Context, tx pgx.Tx, grantID, principalID, clientID, 
 	return nil
 }
 
-const checkSQL = `SELECT grant_id, principal_id, tenant, resource, client_id, COALESCE(refresh_family_id::text, ''), state, created_at, expires_at
+const checkSQL = `SELECT grant_id, principal_id, kind, tenant, resource, client_id, COALESCE(refresh_family_id::text, ''), state, created_at, expires_at
 	 FROM oauth_team_grants
 	 WHERE grant_id = $1 AND principal_id = $2 AND client_id = $3 AND resource = $4
 	   AND state = 'active' AND expires_at > now()`
@@ -114,7 +119,7 @@ type queryRower interface {
 func check(ctx context.Context, q queryRower, grantID, principalID, clientID, resource string) (Grant, error) {
 	var g Grant
 	err := q.QueryRow(ctx, checkSQL, grantID, principalID, clientID, resource).Scan(
-		&g.ID, &g.PrincipalID, &g.Tenant, &g.Resource, &g.ClientID, &g.RefreshFamilyID, &g.State, &g.CreatedAt, &g.ExpiresAt)
+		&g.ID, &g.PrincipalID, &g.Kind, &g.Tenant, &g.Resource, &g.ClientID, &g.RefreshFamilyID, &g.State, &g.CreatedAt, &g.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Grant{}, ErrGrantInvalid
 	}

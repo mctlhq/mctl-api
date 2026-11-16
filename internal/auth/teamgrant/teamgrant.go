@@ -39,6 +39,15 @@ const (
 	StateRevoked = "revoked"
 )
 
+// Grant kinds. A team grant names the one team the human chose; a personal
+// grant names no team at all and scopes the principal alone. It exists only
+// for a principal with no eligible team that holds the glovo:c2 consent, and
+// is never read as a team grant with an empty tenant.
+const (
+	KindTeam     = "team"
+	KindPersonal = "personal"
+)
+
 // Revocation reasons recorded on a grant.
 const (
 	ReasonSuperseded = "superseded"
@@ -47,10 +56,14 @@ const (
 // IDPrefix prefixes every grant id.
 const IDPrefix = "tgr_"
 
-// Grant is one team grant. RefreshFamilyID is empty until activation.
+// Grant is one team grant. RefreshFamilyID is empty until activation. Kind
+// is KindTeam or KindPersonal; "" is read as KindTeam, so a caller that
+// predates personal grants creates team grants unchanged. A personal grant
+// has an empty Tenant and a team grant never does.
 type Grant struct {
 	ID              string
 	PrincipalID     string
+	Kind            string
 	Tenant          string
 	ClientID        string
 	Resource        string
@@ -98,13 +111,28 @@ func NewID() (string, error) {
 	return IDPrefix + hex.EncodeToString(b), nil
 }
 
+// IsPersonal reports whether g is a personal grant.
+func (g Grant) IsPersonal() bool { return g.Kind == KindPersonal }
+
+// normalize returns g with its kind made explicit.
+func normalize(g Grant) Grant {
+	if g.Kind == "" {
+		g.Kind = KindTeam
+	}
+	return g
+}
+
 // validate checks the fields a new grant must carry.
 func validate(g Grant) error {
 	switch {
 	case g.PrincipalID == "":
 		return errors.New("team grant: principal is required")
-	case g.Tenant == "":
+	case g.Kind != KindTeam && g.Kind != KindPersonal:
+		return fmt.Errorf("team grant: unknown kind %q", g.Kind)
+	case g.Kind == KindTeam && g.Tenant == "":
 		return errors.New("team grant: tenant is required")
+	case g.Kind == KindPersonal && g.Tenant != "":
+		return errors.New("team grant: a personal grant names no tenant")
 	case g.Resource == "":
 		return errors.New("team grant: resource is required")
 	case g.ExpiresAt.IsZero():
@@ -135,6 +163,7 @@ func (m *MemoryStore) Create(_ context.Context, g Grant) (Grant, error) {
 	if m.Err != nil {
 		return Grant{}, m.Err
 	}
+	g = normalize(g)
 	if err := validate(g); err != nil {
 		return Grant{}, err
 	}
@@ -156,13 +185,21 @@ func (m *MemoryStore) Create(_ context.Context, g Grant) (Grant, error) {
 	return g, nil
 }
 
-// Activate is the in-memory counterpart of ActivateTx, for tests.
+// Activate is the in-memory counterpart of ActivateTx for a team grant.
 func (m *MemoryStore) Activate(grantID, principalID, clientID, resource, familyID string) error {
+	return m.ActivateKind(grantID, principalID, clientID, resource, KindTeam, familyID)
+}
+
+// ActivateKind is the in-memory counterpart of ActivateTx, for tests.
+func (m *MemoryStore) ActivateKind(grantID, principalID, clientID, resource, kind, familyID string) error {
+	if kind == "" {
+		kind = KindTeam
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	e, ok := m.grants[grantID]
 	if !ok || e.State != StatePending || !m.now().Before(e.ExpiresAt) ||
-		e.PrincipalID != principalID || e.ClientID != clientID || e.Resource != resource {
+		e.PrincipalID != principalID || e.ClientID != clientID || e.Resource != resource || e.Kind != kind {
 		return ErrGrantInvalid
 	}
 	e.State, e.RefreshFamilyID = StateActive, familyID

@@ -118,3 +118,26 @@ func (g ConsentGrants) HasGrant(ctx context.Context, principalID, grant string) 
 	}
 	return rec.Version == Version, nil
 }
+
+// HeldSince reports whether the principal holds GrantC2 through one active
+// consent to Version that was recorded at or before at. A personal Glovo
+// grant created at at is valid only while that holds: withdrawing the
+// consent ends the grant, and consenting again records a new consent that
+// is later than the grant, so it never revives one. Only the documented
+// absence (ErrNoConsent) is "no"; any other failure is an error, never a
+// grant.
+func (g ConsentGrants) HeldSince(ctx context.Context, principalID string, at time.Time) (bool, error) {
+	if g.Store == nil {
+		return false, errors.New("glovoconsent: no consent store")
+	}
+	rec, err := g.Store.Active(ctx, principalID)
+	switch {
+	case errors.Is(err, ErrNoConsent):
+		return false, nil
+	case err != nil:
+		return false, err
+	case rec.PrincipalID != principalID || !rec.Active():
+		return false, errors.New("glovoconsent: inconsistent consent row")
+	}
+	return rec.Version == Version && !rec.RecordedAt.After(at), nil
+}

@@ -46,6 +46,63 @@ type TeamEligibility interface {
 // It reads as an invalid grant.
 var ErrTeamGrantInvalid = errors.New("invalid or expired refresh token")
 
+// GlovoConsentSource is the glovo:c2 consent a personal grant stands on
+// (glovoconsent.ConsentGrants). HeldSince is true only while the principal
+// holds an active consent recorded at or before at; an error means it could
+// not be read, which is never a grant.
+type GlovoConsentSource interface {
+	HeldSince(ctx context.Context, principalID string, at time.Time) (bool, error)
+}
+
+// grantKindPersonal is the tgk claim of a token minted under a personal grant.
+const grantKindPersonal = teamgrant.KindPersonal
+
+// ErrPersonalGrantRefused is the definite "no" for a personal grant: the
+// principal is not an active human, or holds no consent that covers it.
+// Every other error from PersonalGrantAllowed means it could not be checked.
+var ErrPersonalGrantRefused = errors.New("personal glovo access is not available for this account")
+
+// PersonalGrantsEnabled reports whether a personal grant can be offered at
+// all: the Glovo resource is ready and the consent source is configured.
+func (s *OAuthServer) PersonalGrantsEnabled() bool {
+	return s != nil && s.GlovoConsent != nil && s.GlovoReady()
+}
+
+// PersonalGrantAllowed decides whether principalID may hold a personal grant
+// created at at: an active human principal (never an agent or a service)
+// with a glovo:c2 consent recorded no later than at. nil is yes;
+// ErrPersonalGrantRefused is a definite no; any other error is a failed
+// read, which the caller must refuse, never grant.
+func (s *OAuthServer) PersonalGrantAllowed(ctx context.Context, principalID string, at time.Time) error {
+	if !s.PersonalGrantsEnabled() {
+		return ErrGlovoNotReady
+	}
+	if principalID == "" || !ValidPrincipalID(principalID) {
+		return ErrPersonalGrantRefused
+	}
+	human, ok := s.TokenPrincipalChecker.(HumanPrincipalChecker)
+	if !ok {
+		// Without a kind check an agent or service could pass: refuse.
+		return fmt.Errorf("personal grant: no human principal checker: %w", ErrServerError)
+	}
+	switch err := human.CheckHumanPrincipal(ctx, principalID); {
+	case errors.Is(err, ErrIdentityRefused), errors.Is(err, ErrPrincipalDisabled):
+		return ErrPersonalGrantRefused
+	case err != nil:
+		slog.Error("oauth: principal kind read failed for a personal grant", "error", err)
+		return fmt.Errorf("check principal kind: %w", ErrServerError)
+	}
+	held, err := s.GlovoConsent.HeldSince(ctx, principalID, at)
+	if err != nil {
+		slog.Error("oauth: glovo consent read failed for a personal grant", "error", err)
+		return fmt.Errorf("read glovo consent: %w", ErrServerError)
+	}
+	if !held {
+		return ErrPersonalGrantRefused
+	}
+	return nil
+}
+
 // GlovoReady reports whether the Glovo resource may be admitted: the kill
 // switch is on and every readiness dependency is present. GLOVO_MCP_RESOURCE
 // alone never opens it. The refresh store and the grant store must be the
@@ -99,6 +156,25 @@ func (s *OAuthServer) CreateTeamGrant(ctx context.Context, principalID, clientID
 	return g, nil
 }
 
+// CreatePersonalGrant records a pending personal grant: no team, scoped to
+// the principal alone. It supersedes any earlier grant of the same
+// (principal, client, resource), team or personal, and is inert until the
+// code exchange activates it. The caller has checked PersonalGrantAllowed.
+func (s *OAuthServer) CreatePersonalGrant(ctx context.Context, principalID, clientID string) (teamgrant.Grant, error) {
+	if !s.PersonalGrantsEnabled() {
+		return teamgrant.Grant{}, ErrGlovoNotReady
+	}
+	g, err := s.TeamGrants.Create(ctx, teamgrant.Grant{
+		PrincipalID: principalID, Kind: teamgrant.KindPersonal, Resource: s.GlovoResource, ClientID: clientID,
+		ExpiresAt: time.Now().Add(s.TeamGrantLifetime()),
+	})
+	if err != nil {
+		slog.Error("oauth: personal grant create failed", "error", err)
+		return teamgrant.Grant{}, fmt.Errorf("create personal grant: %w", ErrServerError)
+	}
+	return g, nil
+}
+
 // EligibleTeams is TeamEligibility.Eligible with the not-ready and error
 // handling the consent step needs.
 func (s *OAuthServer) EligibleTeams(ctx context.Context, principalID string) ([]string, error) {
@@ -120,7 +196,23 @@ func (s *OAuthServer) exchangeGlovoCode(ctx context.Context, entry authCodeEntry
 	if !s.GlovoReady() {
 		return "", "", ErrGlovoNotReady
 	}
-	if entry.TeamGrantID == "" || entry.SelectedTenant == "" || entry.PrincipalID == "" {
+	kind := teamgrant.KindTeam
+	if entry.PersonalGrant {
+		kind = teamgrant.KindPersonal
+		if entry.TeamGrantID == "" || entry.SelectedTenant != "" || entry.PrincipalID == "" {
+			return "", "", errors.New("invalid or expired authorization code")
+		}
+		// The consent and the principal's kind are read again: a consent
+		// withdrawn since the consent page mints nothing.
+		switch err := s.PersonalGrantAllowed(ctx, entry.PrincipalID, time.Now()); {
+		case errors.Is(err, ErrPersonalGrantRefused):
+			return "", "", errors.New("invalid or expired authorization code")
+		case errors.Is(err, ErrGlovoNotReady):
+			return "", "", err
+		case err != nil:
+			return "", "", err
+		}
+	} else if entry.TeamGrantID == "" || entry.SelectedTenant == "" || entry.PrincipalID == "" {
 		return "", "", errors.New("invalid or expired authorization code")
 	}
 	if err := s.checkMintPrincipal(entry.PrincipalID); err != nil {
@@ -135,7 +227,7 @@ func (s *OAuthServer) exchangeGlovoCode(ctx context.Context, entry authCodeEntry
 		AuthMethod: bound, Resource: entry.Resource, TeamGrantID: entry.TeamGrantID}
 	err = store.InsertBound(ctx, token, clientID, sess, expiresAt,
 		func(ctx context.Context, tx pgx.Tx, familyID uuid.UUID) error {
-			return teamgrant.ActivateTx(ctx, tx, entry.TeamGrantID, entry.PrincipalID, clientID, entry.Resource, familyID)
+			return teamgrant.ActivateTx(ctx, tx, entry.TeamGrantID, entry.PrincipalID, clientID, entry.Resource, kind, familyID)
 		})
 	if errors.Is(err, teamgrant.ErrGrantInvalid) {
 		return "", "", errors.New("invalid or expired authorization code")
@@ -144,7 +236,7 @@ func (s *OAuthServer) exchangeGlovoCode(ctx context.Context, entry authCodeEntry
 		slog.Error("oauth: glovo code exchange store failed", "error", err)
 		return "", "", fmt.Errorf("bind team grant: %w", ErrServerError)
 	}
-	accessToken, err := s.issueJWTWithGrant(entry.Login, entry.PrincipalID, entry.Groups, s.GlovoResource, clientID, entry.TeamGrantID, entry.SelectedTenant)
+	accessToken, err := s.issueJWTWithGrant(entry.Login, entry.PrincipalID, entry.Groups, s.GlovoResource, clientID, entry.TeamGrantID, entry.SelectedTenant, entry.PersonalGrant)
 	if err != nil {
 		// Committed but never delivered: end the session.
 		if rerr := s.RefreshStore.RevokeFamily(token, clientID, "mint_failed"); rerr != nil {
@@ -180,6 +272,24 @@ func (s *OAuthServer) glovoRefreshAccept(ctx context.Context, tx pgx.Tx, sess re
 	if err != nil {
 		slog.Error("oauth: team grant check failed on refresh", "error", err)
 		return fmt.Errorf("check team grant: %w", ErrServerError)
+	}
+	if g.IsPersonal() {
+		// A personal grant lives on the consent it was created under and the
+		// principal staying an active human; there is no team to re-check.
+		// With the consent source switched off it is simply lost.
+		if s.GlovoConsent == nil {
+			*revoke = true
+			return ErrTeamGrantInvalid
+		}
+		switch err := s.PersonalGrantAllowed(ctx, sess.PrincipalID, g.CreatedAt); {
+		case errors.Is(err, ErrPersonalGrantRefused):
+			*revoke = true
+			return ErrTeamGrantInvalid
+		case err != nil:
+			return fmt.Errorf("check personal grant: %w", ErrServerError)
+		}
+		*grant = g
+		return nil
 	}
 	ok, err := s.TeamEligibility.Has(ctx, sess.PrincipalID, g.Tenant)
 	if err != nil {

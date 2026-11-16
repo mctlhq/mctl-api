@@ -129,3 +129,44 @@ func TestCreateValidates(t *testing.T) {
 		}
 	}
 }
+
+// A grant's kind is explicit: a team grant needs a team, a personal grant
+// must name none, and a kind is never guessed from the tenant.
+func TestGrantKinds(t *testing.T) {
+	ctx := context.Background()
+	exp := time.Now().Add(time.Hour)
+	m := NewMemoryStore()
+	for name, g := range map[string]Grant{
+		"personal naming a team": {PrincipalID: prn, Kind: KindPersonal, Tenant: "alpha", ClientID: cl, Resource: res, ExpiresAt: exp},
+		"team without a team":    {PrincipalID: prn, Kind: KindTeam, ClientID: cl, Resource: res, ExpiresAt: exp},
+		"default without a team": {PrincipalID: prn, ClientID: cl, Resource: res, ExpiresAt: exp},
+		"unknown kind":           {PrincipalID: prn, Kind: "tenant", Tenant: "alpha", ClientID: cl, Resource: res, ExpiresAt: exp},
+	} {
+		if _, err := m.Create(ctx, g); err == nil {
+			t.Errorf("%s: created", name)
+		}
+	}
+	team := newGrant(t, m, "alpha")
+	if team.Kind != KindTeam || team.IsPersonal() {
+		t.Fatalf("a grant created without a kind is not a team grant: %+v", team)
+	}
+	p, err := m.Create(ctx, Grant{PrincipalID: prn, Kind: KindPersonal, ClientID: cl, Resource: res, ExpiresAt: exp})
+	if err != nil || !p.IsPersonal() || p.Tenant != "" {
+		t.Fatalf("%+v %v", p, err)
+	}
+	// The personal grant superseded the team one.
+	if err := m.Activate(team.ID, prn, cl, res, "fam0"); !errors.Is(err, ErrGrantInvalid) {
+		t.Fatalf("superseded team grant activated: %v", err)
+	}
+	// A personal grant is never activated as a team grant.
+	if err := m.Activate(p.ID, prn, cl, res, "fam"); !errors.Is(err, ErrGrantInvalid) {
+		t.Fatalf("personal grant activated as a team grant: %v", err)
+	}
+	if err := m.ActivateKind(p.ID, prn, cl, res, KindPersonal, "fam"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := m.Check(ctx, p.ID, prn, cl, res)
+	if err != nil || !got.IsPersonal() || got.Tenant != "" || got.RefreshFamilyID != "fam" {
+		t.Fatalf("%+v %v", got, err)
+	}
+}

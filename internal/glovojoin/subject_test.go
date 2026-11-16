@@ -243,3 +243,15 @@ func TestSubjectVerifierPassesResolverAndInstallRefusalsUnchanged(t *testing.T) 
 		t.Fatalf("an unwired verifier -> %+v", ref)
 	}
 }
+
+// A join acts on a team's installation: a personal scope is refused as
+// scope_unsupported (not a 503), before any install is read.
+func TestSubjectVerifierRefusesPersonalScope(t *testing.T) {
+	v, r, i := newVerifier()
+	r.sc = scope.Scope{PrincipalID: subjPrincipal, Personal: true, GrantID: "pgr_1", RefreshFamilyID: "fam_1"}
+	i.err = errors.New("install must not be read")
+	_, ref := v.Verify(subjReq("/connection", glovoToken(t, time.Now().Add(time.Hour))))
+	if ref == nil || ref.Err == nil || ref.Err.Code != glovo.CodeScopeUnsupported {
+		t.Fatalf("refusal = %+v", ref)
+	}
+}

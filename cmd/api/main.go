@@ -1475,6 +1475,9 @@ func main() {
 		if st, ok := glovoConsentRoutes.Store.(*glovoconsent.PostgresStore); ok {
 			defer st.Close()
 		}
+		if wireGlovoPersonalGrants(oauthServer, glovoRoutes, glovoConsentRoutes) {
+			slog.Info("glovo personal grants admitted for consenting principals with no eligible team")
+		}
 	}
 
 	deletionProbeRequired := (cfg.PrincipalDBConfigured && !cfg.PrincipalsDisabled) || os.Getenv("CUSTOMER_DELETION_ENABLED") == "true"

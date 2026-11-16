@@ -194,11 +194,11 @@ type tx struct {
 
 // Exec understands ActivateTx only.
 func (t *tx) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	if !strings.Contains(sql, "SET state = 'active'") || len(args) != 5 {
+	if !strings.Contains(sql, "SET state = 'active'") || len(args) != 6 {
 		return pgconn.CommandTag{}, errors.New("refreshstoretest: unexpected statement")
 	}
 	fam := args[4].(uuid.UUID)
-	if err := t.b.Grants.Activate(args[0].(string), args[1].(string), args[2].(string), args[3].(string), fam.String()); err != nil {
+	if err := t.b.Grants.ActivateKind(args[0].(string), args[1].(string), args[2].(string), args[3].(string), args[5].(string), fam.String()); err != nil {
 		return pgconn.NewCommandTag("UPDATE 0"), nil //nolint:nilerr // a refused activation updates zero rows, as the real UPDATE does
 	}
 	return pgconn.NewCommandTag("UPDATE 1"), nil
@@ -225,7 +225,7 @@ func (r row) Scan(dest ...any) error {
 	if r.err != nil {
 		return r.err
 	}
-	vals := []any{r.g.ID, r.g.PrincipalID, r.g.Tenant, r.g.Resource, r.g.ClientID, r.g.RefreshFamilyID, r.g.State, r.g.CreatedAt, r.g.ExpiresAt}
+	vals := []any{r.g.ID, r.g.PrincipalID, r.g.Kind, r.g.Tenant, r.g.Resource, r.g.ClientID, r.g.RefreshFamilyID, r.g.State, r.g.CreatedAt, r.g.ExpiresAt}
 	for i, d := range dest {
 		switch p := d.(type) {
 		case *string:

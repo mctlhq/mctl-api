@@ -109,6 +109,10 @@ type ConsentEntry struct {
 	// never trusted as the eligible set.
 	TeamSelection   bool     `json:",omitempty"`
 	EligibleTenants []string `json:",omitempty"`
+	// PersonalGrant marks a Glovo consent for a principal with no eligible
+	// team that holds the glovo:c2 consent: the decision carries no team and
+	// yields a personal grant. Never set together with TeamSelection.
+	PersonalGrant bool `json:",omitempty"`
 	// BrowserHash is the SHA-256 (hex) of the consent token, held by the
 	// browser that signed in as a cookie.
 	BrowserHash string

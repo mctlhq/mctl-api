@@ -83,6 +83,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS oauth_team_grants_one_active
     ON oauth_team_grants (principal_id, client_id, resource) WHERE state IN ('pending','active');
 CREATE INDEX IF NOT EXISTS oauth_team_grants_family ON oauth_team_grants (refresh_family_id);
 ALTER TABLE oauth_refresh_tokens ADD COLUMN IF NOT EXISTS team_grant_id TEXT NOT NULL DEFAULT '';
+-- Personal grants: a principal with no eligible team and an active glovo:c2
+-- consent gets a grant of kind 'personal' that names no tenant. The kind is
+-- explicit, so an empty tenant is never read as a team, and a team grant
+-- still needs one. Existing rows are team grants. The constraint is added
+-- under a duplicate_object guard so replicas booting together cannot fail
+-- each other.
+ALTER TABLE oauth_team_grants ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'team';
+ALTER TABLE oauth_team_grants DROP CONSTRAINT IF EXISTS oauth_team_grants_tenant_check;
+DO $$
+BEGIN
+    ALTER TABLE oauth_team_grants ADD CONSTRAINT oauth_team_grants_kind_tenant
+        CHECK ((kind = 'team' AND tenant <> '') OR (kind = 'personal' AND tenant = ''));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END
+$$;
 `
 
 // PostgresStore is a Postgres-backed implementation of Store.

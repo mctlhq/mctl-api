@@ -18,11 +18,13 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -80,13 +82,21 @@ type authzCompletion struct {
 	// code is bound to; empty for every other flow.
 	TeamGrantID    string
 	SelectedTenant string
+	// PersonalGrant marks TeamGrantID as a personal grant, with no team.
+	PersonalGrant bool
 }
 
 // issueGrant issues the authorization code, writes the oauth.grant_issued
 // audit entry and returns the URL to send the client to.
 func (h *Handlers) issueGrant(r *http.Request, c authzCompletion) (string, error) {
 	o := h.opts.OAuthServer
-	code, err := o.IssueCodeForTeamGrant(r.Context(), c.Login, c.PrincipalID, c.ClientID, c.RedirectURI, c.CodeChallenge, c.Groups, c.AuthMethod, c.Resource, c.TeamGrantID, c.SelectedTenant)
+	var code string
+	var err error
+	if c.PersonalGrant {
+		code, err = o.IssueCodeForPersonalGrant(r.Context(), c.Login, c.PrincipalID, c.ClientID, c.RedirectURI, c.CodeChallenge, c.Groups, c.AuthMethod, c.Resource, c.TeamGrantID)
+	} else {
+		code, err = o.IssueCodeForTeamGrant(r.Context(), c.Login, c.PrincipalID, c.ClientID, c.RedirectURI, c.CodeChallenge, c.Groups, c.AuthMethod, c.Resource, c.TeamGrantID, c.SelectedTenant)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -104,7 +114,9 @@ func (h *Handlers) issueGrant(r *http.Request, c authzCompletion) (string, error
 		"upstream":      c.Upstream,
 		"resource":      c.Resource,
 	}
-	if c.TeamGrantID != "" {
+	if c.TeamGrantID != "" && c.PersonalGrant {
+		params["grant_kind"], params["team_grant_id"] = "personal", c.TeamGrantID
+	} else if c.TeamGrantID != "" {
 		params["tenant"], params["team_grant_id"] = c.SelectedTenant, c.TeamGrantID
 	}
 	h.logAudit(r, audit.Entry{
@@ -322,7 +334,11 @@ func (h *Handlers) takeConsentDecision(w http.ResponseWriter, r *http.Request) s
 		RedirectURI: e.RedirectURI, CodeChallenge: e.CodeChallenge, ClientState: state,
 		Upstream: e.Upstream, ClientName: e.ClientName, AuthMethod: e.AuthMethod, Resource: e.Resource,
 	}
-	if e.TeamSelection || o.IsGlovoFlow(e.Resource) {
+	if e.PersonalGrant {
+		if result, ok := h.selectPersonal(w, r, e, &c); !ok {
+			return result
+		}
+	} else if e.TeamSelection || o.IsGlovoFlow(e.Resource) {
 		if result, ok := h.selectTeam(w, r, e, &c); !ok {
 			return result
 		}
@@ -354,9 +370,25 @@ func (h *Handlers) requestTeamConsent(w http.ResponseWriter, r *http.Request, c 
 			shellData{Title: "Try again later", Lines: []string{"Your teams could not be checked right now. Start again in a moment."}})
 		return "team_unavailable"
 	}
+	personal := false
 	if len(teams) == 0 {
-		oauthError(w, c.RedirectURI, c.ClientState, "access_denied", "no team is available for this account")
-		return "team_denied"
+		if !o.PersonalGrantsEnabled() {
+			oauthError(w, c.RedirectURI, c.ClientState, "access_denied", "no team is available for this account")
+			return "team_denied"
+		}
+		// No team: a human holding the glovo:c2 consent is offered access
+		// for itself alone. A failed read is a refusal, never a grant.
+		switch err := o.PersonalGrantAllowed(r.Context(), c.PrincipalID, time.Now()); {
+		case errors.Is(err, auth.ErrPersonalGrantRefused):
+			oauthError(w, c.RedirectURI, c.ClientState, "access_denied", "no team is available for this account")
+			return "team_denied"
+		case err != nil:
+			slog.Warn("oauth: personal glovo access unavailable at consent", "error", err)
+			renderShellPage(w, http.StatusServiceUnavailable, "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'", teamRetryPage,
+				shellData{Title: "Try again later", Lines: []string{"Your access could not be checked right now. Start again in a moment."}})
+			return "team_unavailable"
+		}
+		personal = true
 	}
 	redirect, err := url.Parse(c.RedirectURI)
 	if err != nil {
@@ -388,7 +420,7 @@ func (h *Handlers) requestTeamConsent(w http.ResponseWriter, r *http.Request, c 
 		ClientID: c.ClientID, ClientName: c.ClientName, RedirectURI: c.RedirectURI,
 		CodeChallenge: c.CodeChallenge, ClientState: []byte(c.ClientState), Upstream: c.Upstream,
 		AuthMethod: authMethod, Resource: c.Resource, BrowserHash: consentHash(token),
-		TeamSelection: true, EligibleTenants: teams,
+		TeamSelection: !personal, EligibleTenants: teams, PersonalGrant: personal,
 	})
 	if err != nil {
 		slog.Error("failed to store consent", "error", err)
@@ -402,6 +434,17 @@ func (h *Handlers) requestTeamConsent(w http.ResponseWriter, r *http.Request, c 
 	account := c.Login
 	if account == "" {
 		account = c.PrincipalID
+	}
+	if personal {
+		renderShellPage(w, http.StatusOK, "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'"+consentFormTarget(redirect)+"; frame-ancestors 'none'", personalConsentPage,
+			shellData{Title: "Allow Glovo access", Lines: []string{
+				"An application is asking to use Glovo on your behalf.",
+				"Application: " + name,
+				"Client ID: " + c.ClientID,
+				"Returns to: " + redirect.Host,
+				"You are signed in as " + account + ". This access is for you alone, not for a team, and lasts while your Glovo link consent is active.",
+			}, Page: teamConsentPageData{Token: token}})
+		return "consent_required"
 	}
 	renderShellPage(w, http.StatusOK, "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'"+consentFormTarget(redirect)+"; frame-ancestors 'none'", teamConsentPage,
 		shellData{Title: "Choose a team", Lines: []string{
@@ -429,6 +472,55 @@ var teamConsentPage = shellPage("team-consent", `<form class="actions" method="p
 {{end}}<button type="submit" name="decision" value="approve">Allow</button>
 <button class="secondary" type="submit" name="decision" value="deny" formnovalidate>Deny</button>
 </form>`)
+
+// personalConsentPage asks to allow access for the principal alone: there is
+// no team to choose.
+var personalConsentPage = shellPage("personal-consent", `<form class="actions" method="post" action="/oauth/consent" onsubmit="if(this.submitted)return false;this.submitted=true;setTimeout(()=>{for(const b of this.querySelectorAll('button'))b.disabled=true},0)">
+<input type="hidden" name="token" value="{{.Token}}">
+<button type="submit" name="decision" value="approve">Allow</button>
+<button class="secondary" type="submit" name="decision" value="deny" formnovalidate>Deny</button>
+</form>`)
+
+// selectPersonal turns an approved personal Glovo consent into a pending
+// personal grant. The decision carries no team; a posted one is refused. It
+// is re-checked now: the principal still has no eligible team (one that
+// gained a team takes the team path by signing in again) and still holds
+// the consent. Any failed read is a refusal and writes no grant.
+func (h *Handlers) selectPersonal(w http.ResponseWriter, r *http.Request, e auth.ConsentEntry, c *authzCompletion) (string, bool) {
+	o := h.opts.OAuthServer
+	state := string(e.ClientState)
+	if e.TeamSelection || !o.IsGlovoFlow(e.Resource) || len(r.PostForm["tenant"]) != 0 {
+		oauthError(w, e.RedirectURI, state, "access_denied", "this access is not for a team")
+		return "team_denied", false
+	}
+	teams, err := o.EligibleTeams(r.Context(), e.PrincipalID)
+	if err != nil {
+		slog.Warn("oauth: team eligibility unavailable at personal consent decision", "error", err)
+		oauthError(w, e.RedirectURI, state, "temporarily_unavailable", "access could not be checked; try again")
+		return "team_unavailable", false
+	}
+	if len(teams) != 0 {
+		oauthError(w, e.RedirectURI, state, "access_denied", "a team is now available; sign in again to choose it")
+		return "team_denied", false
+	}
+	switch err := o.PersonalGrantAllowed(r.Context(), e.PrincipalID, time.Now()); {
+	case errors.Is(err, auth.ErrPersonalGrantRefused):
+		oauthError(w, e.RedirectURI, state, "access_denied", "no team is available for this account")
+		return "team_denied", false
+	case err != nil:
+		slog.Warn("oauth: personal glovo access unavailable at consent decision", "error", err)
+		oauthError(w, e.RedirectURI, state, "temporarily_unavailable", "access could not be checked; try again")
+		return "team_unavailable", false
+	}
+	g, err := o.CreatePersonalGrant(r.Context(), e.PrincipalID, e.ClientID)
+	if err != nil {
+		slog.Error("failed to create personal grant", "error", err)
+		oauthError(w, e.RedirectURI, state, "temporarily_unavailable", "the decision could not be recorded; try again")
+		return "team_unavailable", false
+	}
+	c.TeamGrantID, c.PersonalGrant = g.ID, true
+	return "", true
+}
 
 // selectTeam turns an approved Glovo consent into a pending team grant bound
 // to the completion. The posted team must be exactly one non-empty value that

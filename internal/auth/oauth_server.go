@@ -193,6 +193,11 @@ type OAuthServer struct {
 	// GlovoReady. Inject via main.go after construction.
 	TeamGrants      teamgrant.Store
 	TeamEligibility TeamEligibility
+	// GlovoConsent admits a personal grant: a principal with no eligible
+	// team that holds the glovo:c2 consent is scoped to itself. Nil (the
+	// default, and GLOVO_CONSENT_ENABLED off) keeps the team-only behaviour:
+	// no personal grant is created, exchanged, refreshed or resolved.
+	GlovoConsent GlovoConsentSource
 	// RejectHS256 refuses every HS256 access token (OAUTH_JWT_ACCEPT_HS256
 	// false). The zero value accepts them.
 	RejectHS256 bool
@@ -1505,14 +1510,27 @@ func (s *OAuthServer) IssueCodeWithAuthMethod(ctx context.Context, login, princi
 // pending team grant. A code for the Glovo resource without one is refused,
 // so no path but the consent step can yield a Glovo token.
 func (s *OAuthServer) IssueCodeForTeamGrant(ctx context.Context, login, principalID, clientID, redirectURI, codeChallenge string, groups []string, authMethod, resource, teamGrantID, selectedTenant string) (string, error) {
+	return s.issueCodeForGrant(ctx, login, principalID, clientID, redirectURI, codeChallenge, groups, authMethod, resource, teamGrantID, selectedTenant, false)
+}
+
+// IssueCodeForPersonalGrant is IssueCodeForTeamGrant for a code bound to a
+// pending personal grant, which names no team.
+func (s *OAuthServer) IssueCodeForPersonalGrant(ctx context.Context, login, principalID, clientID, redirectURI, codeChallenge string, groups []string, authMethod, resource, grantID string) (string, error) {
+	return s.issueCodeForGrant(ctx, login, principalID, clientID, redirectURI, codeChallenge, groups, authMethod, resource, grantID, "", true)
+}
+
+func (s *OAuthServer) issueCodeForGrant(ctx context.Context, login, principalID, clientID, redirectURI, codeChallenge string, groups []string, authMethod, resource, teamGrantID, selectedTenant string, personal bool) (string, error) {
 	if s.isGlovoFlow(resource) {
 		if !s.GlovoReady() {
 			return "", ErrGlovoNotReady
 		}
-		if teamGrantID == "" || selectedTenant == "" {
+		switch {
+		case personal && (teamGrantID == "" || selectedTenant != "" || s.GlovoConsent == nil):
+			return "", errors.New("a personal code for the glovo resource needs a personal grant and no team")
+		case !personal && (teamGrantID == "" || selectedTenant == ""):
 			return "", errors.New("a code for the glovo resource needs a team grant")
 		}
-	} else if teamGrantID != "" {
+	} else if teamGrantID != "" || personal {
 		return "", errors.New("a team grant is only for the glovo resource")
 	}
 	if err := s.checkMintPrincipal(principalID); err != nil {
@@ -1541,7 +1559,7 @@ func (s *OAuthServer) IssueCodeForTeamGrant(ctx context.Context, login, principa
 		Resource:      resource,
 		CreatedAt:     time.Now(),
 	}
-	entry.TeamGrantID, entry.SelectedTenant = teamGrantID, selectedTenant
+	entry.TeamGrantID, entry.SelectedTenant, entry.PersonalGrant = teamGrantID, selectedTenant, personal
 	if s.IsCIMDClient(clientID) {
 		// Recorded so the code can only be redeemed with the authentication
 		// the client declared when it was issued, even if its document later
@@ -1726,12 +1744,13 @@ func (s *OAuthServer) IssueJWT(login, principalID string, groups []string) (stri
 
 // issueJWTFor is IssueJWT for an explicit audience; "" is the default one.
 func (s *OAuthServer) issueJWTFor(login, principalID string, groups []string, aud, clientID string) (string, error) {
-	return s.issueJWTWithGrant(login, principalID, groups, aud, clientID, "", "")
+	return s.issueJWTWithGrant(login, principalID, groups, aud, clientID, "", "", false)
 }
 
-// issueJWTWithGrant is issueJWTFor that also signs the team grant claims
-// (tgr, stn). They are set only for the Glovo audience, never for any other.
-func (s *OAuthServer) issueJWTWithGrant(login, principalID string, groups []string, aud, clientID, teamGrantID, selectedTenant string) (string, error) {
+// issueJWTWithGrant is issueJWTFor that also signs the grant claims: tgr and
+// stn for a team grant, tgr and tgk "personal" for a personal grant. They are
+// set only for the Glovo audience, never for any other.
+func (s *OAuthServer) issueJWTWithGrant(login, principalID string, groups []string, aud, clientID, teamGrantID, selectedTenant string, personal bool) (string, error) {
 	if aud == "" {
 		aud = s.accessAudience()
 	}
@@ -1774,6 +1793,12 @@ func (s *OAuthServer) issueJWTWithGrant(login, principalID string, groups []stri
 	}
 	if s.isGlovoFlow(aud) {
 		payload.TeamGrant, payload.SelectedTenant = teamGrantID, selectedTenant
+		if personal {
+			if teamGrantID == "" || selectedTenant != "" {
+				return "", errors.New("issue token: a personal grant names a grant and no team")
+			}
+			payload.GrantKind = grantKindPersonal
+		}
 	}
 	return s.signAccessToken(payload)
 }
@@ -1990,7 +2015,7 @@ func (s *OAuthServer) RefreshAccessTokenForResource(ctx context.Context, refresh
 		if !s.PrincipalMode {
 			groups = s.groupsForSession(sess.Login, sess.Groups)
 		}
-		accessToken, err := s.issueJWTWithGrant(sess.Login, sess.PrincipalID, groups, aud, clientID, sess.TeamGrantID, grant.Tenant)
+		accessToken, err := s.issueJWTWithGrant(sess.Login, sess.PrincipalID, groups, aud, clientID, sess.TeamGrantID, grant.Tenant, grant.IsPersonal())
 		if err != nil {
 			return "", "", err
 		}
@@ -2158,6 +2183,7 @@ func (s *OAuthServer) ValidateJWT(token string) (*User, error) {
 	u.glovoAudience = payload.glovo
 	if payload.glovo {
 		u.teamGrantID, u.selectedTenant = payload.TeamGrant, payload.SelectedTenant
+		u.personalGrant = payload.GrantKind == grantKindPersonal
 	}
 	u.oauthClientID = boundedClientID(payload.ClientID)
 	return u, nil
@@ -2288,6 +2314,10 @@ type jwtPayload struct {
 	// verification, so forging them onto an API token does nothing.
 	TeamGrant      string `json:"tgr,omitempty"`
 	SelectedTenant string `json:"stn,omitempty"`
+	// GrantKind (tgk) is "personal" when tgr names a personal grant, which
+	// has no stn; absent for a team grant. Dropped with tgr and stn on every
+	// audience but Glovo.
+	GrantKind string `json:"tgk,omitempty"`
 	// support is set by verification, never by the token: its aud names the
 	// support resource, so it may reach only the routes mctl-support relays.
 	support bool
@@ -2464,7 +2494,7 @@ func (s *OAuthServer) verifyAccessToken(token string) (*jwtPayload, error) {
 		oauthJWTAudlessAccepted.Inc()
 	}
 	if !payload.glovo {
-		payload.TeamGrant, payload.SelectedTenant = "", ""
+		payload.TeamGrant, payload.SelectedTenant, payload.GrantKind = "", "", ""
 	}
 	oauthJWTVerifications.WithLabelValues(alg, "ok").Inc()
 	return &payload, nil
@@ -2494,6 +2524,9 @@ type authCodeEntry struct {
 	// grant the human created at consent.
 	TeamGrantID    string `json:",omitempty"`
 	SelectedTenant string `json:",omitempty"`
+	// PersonalGrant marks TeamGrantID as a personal grant: SelectedTenant is
+	// then empty, and the code mints a token scoped to the principal alone.
+	PersonalGrant bool `json:",omitempty"`
 }
 
 type pendingAuth struct {

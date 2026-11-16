@@ -144,6 +144,10 @@ func (v *SubjectVerifier) Verify(r *http.Request) (Subject, *Refusal) {
 	if ge != nil {
 		return Subject{}, &Refusal{Err: ge, Reason: "resolver:" + string(ge.Code)}
 	}
+	if sc.Personal {
+		// A join acts on a team's installation; a personal scope has none.
+		return Subject{}, &Refusal{Err: scope.RequireTeam(sc), Reason: "resolver:personal_scope"}
+	}
 	if sc.PrincipalID == "" || sc.Tenant == "" || sc.GrantID == "" || sc.RefreshFamilyID == "" {
 		// A resolver answer without a family cannot bind a scope ref: refuse
 		// rather than mint a ref that no grant revocation can kill.
