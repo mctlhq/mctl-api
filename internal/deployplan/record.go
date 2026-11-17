@@ -39,6 +39,32 @@ const (
 	RunFailed    = "failed"
 )
 
+// Digest checks of a promotion (mctl-api#1049): the platform compares the
+// image digest the production run reported with the digest the source
+// preview ran. Only a promotion has one; written once with the run result.
+const (
+	// DigestMatch: both digests were observed and are equal.
+	DigestMatch = "match"
+	// DigestMismatch: both were observed and differ.
+	DigestMismatch = "mismatch"
+	// DigestUnverified: the production run reported no digest, so the
+	// comparison could not be made. Never read as a match.
+	DigestUnverified = "unverified"
+)
+
+// CompareDigests is the check of a finished promotion's run: want is the
+// digest the source preview ran, got the digest the production run reported
+// ("" when it reported none).
+func CompareDigests(want, got string) string {
+	switch {
+	case !digestRE.MatchString(want) || !digestRE.MatchString(got):
+		return DigestUnverified
+	case want == got:
+		return DigestMatch
+	}
+	return DigestMismatch
+}
+
 var digestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 // ValidImageDigest reports whether s is an image digest the record accepts.
@@ -83,9 +109,15 @@ type Record struct {
 	// CommitSHA is the mctl-gitops commit the deploy itself pushed: the state
 	// a rollback restores (mctl-api#1048). Not GitopsSHA, which is the commit
 	// the plan was computed against, before the deploy.
-	CommitSHA string    `json:"commit_sha,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	CommitSHA string `json:"commit_sha,omitempty"`
+	// SourceDeploymentID is the preview record a promotion promotes; empty
+	// for every other record. DigestCheck is the platform's comparison of
+	// the digests both ran (Digest* constants); empty until the run result
+	// is recorded, and always empty for a non-promotion.
+	SourceDeploymentID string    `json:"source_deployment_id,omitempty"`
+	DigestCheck        string    `json:"digest_check,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 const recordSchema = `
@@ -115,17 +147,19 @@ CREATE TABLE IF NOT EXISTS deploy_records (
 ALTER TABLE deploy_records ADD COLUMN IF NOT EXISTS workflow_ref TEXT;
 ALTER TABLE deploy_records ADD COLUMN IF NOT EXISTS commit_sha TEXT CHECK (commit_sha ~ '^[0-9a-f]{40}$');
 ALTER TABLE deploy_records ADD COLUMN IF NOT EXISTS run_result TEXT CHECK (run_result IN ('succeeded','failed'));
+ALTER TABLE deploy_records ADD COLUMN IF NOT EXISTS source_deployment_id TEXT CHECK (source_deployment_id LIKE 'dep\_%');
+ALTER TABLE deploy_records ADD COLUMN IF NOT EXISTS digest_check TEXT CHECK (digest_check IN ('match','mismatch','unverified'));
 CREATE INDEX IF NOT EXISTS deploy_records_tenant ON deploy_records (tenant, service, created_at DESC);
 CREATE OR REPLACE FUNCTION deploy_records_guard() RETURNS trigger
   LANGUAGE plpgsql AS $$
 BEGIN
   IF (NEW.id, NEW.plan_id, NEW.plan_digest, NEW.tenant, NEW.service, NEW.environment, NEW.revision,
       NEW.gitops_sha, NEW.preview_id, NEW.host, NEW.approval_id, NEW.decided_by_principal_id,
-      NEW.applied_by, NEW.created_at, NEW.workflow_ref)
+      NEW.applied_by, NEW.created_at, NEW.workflow_ref, NEW.source_deployment_id)
      IS DISTINCT FROM
      (OLD.id, OLD.plan_id, OLD.plan_digest, OLD.tenant, OLD.service, OLD.environment, OLD.revision,
       OLD.gitops_sha, OLD.preview_id, OLD.host, OLD.approval_id, OLD.decided_by_principal_id,
-      OLD.applied_by, OLD.created_at, OLD.workflow_ref) THEN
+      OLD.applied_by, OLD.created_at, OLD.workflow_ref, OLD.source_deployment_id) THEN
     RAISE EXCEPTION 'deploy_records: planned and granted fields are immutable';
   END IF;
   IF NEW.status IS DISTINCT FROM OLD.status AND OLD.status <> 'submitting' THEN
@@ -152,6 +186,12 @@ BEGIN
   IF NEW.commit_sha IS DISTINCT FROM OLD.commit_sha AND OLD.commit_sha IS NOT NULL THEN
     RAISE EXCEPTION 'deploy_records: commit_sha is written once';
   END IF;
+  IF NEW.digest_check IS DISTINCT FROM OLD.digest_check AND OLD.digest_check IS NOT NULL THEN
+    RAISE EXCEPTION 'deploy_records: digest_check is written once';
+  END IF;
+  IF NEW.digest_check IS NOT NULL AND NEW.source_deployment_id IS NULL THEN
+    RAISE EXCEPTION 'deploy_records: only a promotion has a digest check';
+  END IF;
   IF NEW.health IS DISTINCT FROM OLD.health AND OLD.health <> 'unknown' THEN
     RAISE EXCEPTION 'deploy_records: health is written once';
   END IF;
@@ -173,7 +213,8 @@ CREATE TRIGGER deploy_records_no_delete BEFORE DELETE ON deploy_records
 const recordColumns = `id, plan_id, plan_digest, tenant, service, environment, revision, gitops_sha,
 	preview_id, host, approval_id, decided_by_principal_id, applied_by, status,
 	COALESCE(workflow, ''), COALESCE(image_digest, ''), COALESCE(argo_revision, ''), health,
-	COALESCE(health_url, ''), created_at, updated_at, COALESCE(workflow_ref, ''), COALESCE(run_result, ''), COALESCE(commit_sha, '')`
+	COALESCE(health_url, ''), created_at, updated_at, COALESCE(workflow_ref, ''), COALESCE(run_result, ''), COALESCE(commit_sha, ''),
+	COALESCE(source_deployment_id, ''), COALESCE(digest_check, '')`
 
 // NewRecord is the record of an apply about to be submitted: the plan's
 // fields, the spent grant and its decider, status submitting, health
@@ -199,13 +240,13 @@ func (s *Store) InsertRecord(ctx context.Context, r *Record) (*Record, error) {
 	row := s.pool.QueryRow(ctx, `
 INSERT INTO deploy_records (id, plan_id, plan_digest, tenant, service, environment, revision, gitops_sha,
 	preview_id, host, approval_id, decided_by_principal_id, applied_by, status, health, created_at, updated_at,
-	workflow_ref)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NULLIF($18,''))
+	workflow_ref, source_deployment_id)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NULLIF($18,''),NULLIF($19,''))
 ON CONFLICT DO NOTHING
 RETURNING `+recordColumns,
 		r.ID, r.PlanID, r.PlanDigest, r.Tenant, r.Service, r.Environment, r.Revision, r.GitopsSHA,
 		r.PreviewID, r.Host, r.ApprovalID, r.DecidedByPrincipalID, r.AppliedBy, r.Status, r.Health,
-		r.CreatedAt, r.UpdatedAt, r.WorkflowRef)
+		r.CreatedAt, r.UpdatedAt, r.WorkflowRef, r.SourceDeploymentID)
 	stored, err := scanRecord(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrRecordExists
@@ -264,6 +305,9 @@ type RunOutcome struct {
 	CommitSHA    string
 	Health       string // HealthHealthy or HealthUnhealthy; empty keeps unknown
 	HealthURL    string
+	// DigestCheck is a promotion's comparison (Digest* constants); empty for
+	// every other record.
+	DigestCheck string
 }
 
 func (o RunOutcome) validate() error {
@@ -281,6 +325,9 @@ func (o RunOutcome) validate() error {
 	}
 	if o.Health != "" && o.Health != HealthHealthy && o.Health != HealthUnhealthy {
 		return fmt.Errorf("deployplan: %q is not a recordable health", o.Health)
+	}
+	if o.DigestCheck != "" && o.DigestCheck != DigestMatch && o.DigestCheck != DigestMismatch && o.DigestCheck != DigestUnverified {
+		return fmt.Errorf("deployplan: %q is not a digest check", o.DigestCheck)
 	}
 	if o.HealthURL != "" && !healthURLRE.MatchString(o.HealthURL) {
 		return fmt.Errorf("deployplan: %q is not a health url", o.HealthURL)
@@ -302,10 +349,11 @@ UPDATE deploy_records SET run_result = $2,
   commit_sha = COALESCE(commit_sha, NULLIF($5, '')),
   health = CASE WHEN health = 'unknown' AND $6 <> '' THEN $6 ELSE health END,
   health_url = COALESCE(health_url, NULLIF($7, '')),
+  digest_check = COALESCE(digest_check, NULLIF($9, '')),
   updated_at = $8
 WHERE id = $1 AND status = 'submitted' AND run_result IS NULL
 RETURNING `+recordColumns, id, o.Result, o.ImageDigest, o.ArgoRevision, o.CommitSHA, o.Health, o.HealthURL,
-		s.now().Truncate(time.Microsecond)))
+		s.now().Truncate(time.Microsecond), o.DigestCheck))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("deployplan: record %s is not awaiting a run result", id)
 	}
@@ -370,7 +418,7 @@ func scanRecord(row pgx.Row) (*Record, error) {
 	if err := row.Scan(&r.ID, &r.PlanID, &r.PlanDigest, &r.Tenant, &r.Service, &r.Environment, &r.Revision,
 		&r.GitopsSHA, &r.PreviewID, &r.Host, &r.ApprovalID, &r.DecidedByPrincipalID, &r.AppliedBy, &r.Status,
 		&r.Workflow, &r.ImageDigest, &r.ArgoRevision, &r.Health, &r.HealthURL, &r.CreatedAt, &r.UpdatedAt,
-		&r.WorkflowRef, &r.RunResult, &r.CommitSHA); err != nil {
+		&r.WorkflowRef, &r.RunResult, &r.CommitSHA, &r.SourceDeploymentID, &r.DigestCheck); err != nil {
 		return nil, err
 	}
 	r.CreatedAt, r.UpdatedAt = r.CreatedAt.UTC(), r.UpdatedAt.UTC()

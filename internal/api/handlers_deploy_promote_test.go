@@ -129,6 +129,9 @@ func TestDeployApply_PromoteRunsTheRecordedDigestOnce(t *testing.T) {
 	}
 	res := decodeJSON(t, w)
 	rec, err := f.records.GetRecord(context.Background(), res["deployment_id"].(string))
+	if err == nil && rec.SourceDeploymentID != "dep_11111111-1111-1111-1111-111111111111" {
+		t.Fatalf("the promotion record does not name its preview: %q", rec.SourceDeploymentID)
+	}
 	if err != nil || rec.Environment != deployplan.EnvironmentProduction {
 		t.Fatalf("promotion record = %+v, %v", rec, err)
 	}

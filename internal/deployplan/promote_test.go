@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -148,5 +149,47 @@ func TestStore_ProductionIsOnlyForPromote(t *testing.T) {
 	p.Environment, p.Action = EnvironmentProduction, ActionPromote
 	if _, _, err := s.Insert(ctx, p); err != nil {
 		t.Fatalf("a production promote plan: %v", err)
+	}
+}
+
+// The comparison is stored once with the run result, only for a promotion,
+// and the store's trigger holds both rules.
+func TestStore_DigestCheckOnPromotionRecords(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	mk := func(seed string, promo bool) *Record {
+		p := testPlan(seed)
+		if promo {
+			p.Environment, p.Action = EnvironmentProduction, ActionPromote
+		}
+		stored, _, err := s.Insert(ctx, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := NewRecord(stored, "aar_"+seed, "principal:2", "principal:1", "wf-"+seed, time.Now())
+		if promo {
+			r.SourceDeploymentID = promDep
+		}
+		r, err = s.InsertRecord(ctx, r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SetRecordSubmission(ctx, r.ID, RecordSubmitted, "wf-"+seed); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	promo := mk("a", true)
+	got, err := s.SetRunResult(ctx, promo.ID, RunOutcome{Result: RunSucceeded, ImageDigest: promDigest, DigestCheck: DigestMatch})
+	if err != nil || got.DigestCheck != DigestMatch || got.SourceDeploymentID != promDep {
+		t.Fatalf("promotion: %+v %v", got, err)
+	}
+	// A record that is not a promotion cannot carry a check.
+	plain := mk("b", false)
+	if _, err := s.SetRunResult(ctx, plain.ID, RunOutcome{Result: RunSucceeded, DigestCheck: DigestMatch}); err == nil {
+		t.Fatal("a non-promotion stored a digest check")
+	}
+	if _, err := s.SetRunResult(ctx, plain.ID, RunOutcome{Result: RunSucceeded, DigestCheck: "bogus"}); err == nil {
+		t.Fatal("an unknown check was stored")
 	}
 }

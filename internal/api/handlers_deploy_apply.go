@@ -504,8 +504,15 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 	if appliedBy == "" {
 		appliedBy = user.ID
 	}
-	rec, err := h.opts.DeployRecords.InsertRecord(r.Context(), deployplan.NewRecord(p, spent.ID,
-		spent.DecidedByPrincipalID, appliedBy, operations.WorkflowNameFor(op, requestID), h.deployPlanNow()))
+	newRec := deployplan.NewRecord(p, spent.ID,
+		spent.DecidedByPrincipalID, appliedBy, operations.WorkflowNameFor(op, requestID), h.deployPlanNow())
+	if promote {
+		// The preview this promotes, so the reconciler can compare the
+		// digests both ran.
+		pi, _ := deployplan.ParsePromoteIntent(p.IntentCanonical) // parsed above
+		newRec.SourceDeploymentID = pi.SourceDeploymentID
+	}
+	rec, err := h.opts.DeployRecords.InsertRecord(r.Context(), newRec)
 	if err != nil {
 		executionEnded(nil, operations.NotCreated(err))
 	}

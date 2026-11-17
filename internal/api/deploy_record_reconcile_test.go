@@ -20,6 +20,18 @@ type reconcileStore struct {
 	listErr error
 	// results are the SetRunResult calls made, id=result.
 	results []string
+	getErr  error
+}
+
+func (s *reconcileStore) GetRecord(_ context.Context, id string) (*deployplan.Record, error) {
+	if s.getErr != nil {
+		return nil, s.getErr
+	}
+	if r := s.find(id); r != nil {
+		c := *r
+		return &c, nil
+	}
+	return nil, deployplan.ErrRecordNotFound
 }
 
 func (s *reconcileStore) RecordsToReconcile(_ context.Context, since, afterCreated time.Time, afterID string, limit int) ([]*deployplan.Record, error) {
@@ -80,6 +92,9 @@ func (s *reconcileStore) SetRunResult(_ context.Context, id string, o deployplan
 	}
 	if r.HealthURL == "" {
 		r.HealthURL = o.HealthURL
+	}
+	if r.DigestCheck == "" {
+		r.DigestCheck = o.DigestCheck
 	}
 	return r, nil
 }
@@ -265,5 +280,52 @@ func TestDeployRecordOutcomeFields(t *testing.T) {
 	}
 	if _, ok := testReconciler(&reconcileStore{}, &outcomeExec{}).outcomeOf("dep_x", "wf", &operations.WorkflowOutcome{Phase: "Running"}); ok {
 		t.Error("a running workflow is not an outcome")
+	}
+}
+
+// A promotion's finished run is compared with the preview it promotes: the
+// same digest matches, another one mismatches, none reported is unverified,
+// and a source that cannot be read records nothing.
+func TestDeployRecordReconcile_PromotionDigestCheck(t *testing.T) {
+	other := "sha256:" + strings.Repeat("d", 64)
+	run := func(reported string, getErr error) *deployplan.Record {
+		src := newRec("dep_src", deployplan.RecordSubmitted, "wf-src", 3*time.Hour)
+		src.RunResult, src.ImageDigest = deployplan.RunSucceeded, goodDigest
+		prod := newRec("dep_prod", deployplan.RecordSubmitted, "wf-prod", 5*time.Minute)
+		prod.Environment, prod.SourceDeploymentID = deployplan.EnvironmentProduction, "dep_src"
+		store := &reconcileStore{recs: []*deployplan.Record{src, prod}, getErr: getErr}
+		outputs := map[string]string{"health": "healthy"}
+		if reported != "" {
+			outputs["image_digest"] = reported
+		}
+		exec := &outcomeExec{byName: map[string]*operations.WorkflowOutcome{"wf-prod": {Phase: "Succeeded", Outputs: outputs}}}
+		testReconciler(store, exec).reconcileOnce(context.Background())
+		return store.find("dep_prod")
+	}
+	for name, c := range map[string]struct{ reported, want string }{
+		"same digest":    {goodDigest, deployplan.DigestMatch},
+		"another digest": {other, deployplan.DigestMismatch},
+		"none reported":  {"", deployplan.DigestUnverified},
+	} {
+		if got := run(c.reported, nil); got.DigestCheck != c.want || got.RunResult != deployplan.RunSucceeded {
+			t.Errorf("%s: check %q result %q, want %q", name, got.DigestCheck, got.RunResult, c.want)
+		}
+	}
+	got := run(goodDigest, errors.New("db down"))
+	if got.RunResult != "" || got.DigestCheck != "" {
+		t.Errorf("an unreadable source still recorded %q/%q", got.RunResult, got.DigestCheck)
+	}
+}
+
+func TestCompareDigests(t *testing.T) {
+	a, b := "sha256:"+strings.Repeat("a", 64), "sha256:"+strings.Repeat("b", 64)
+	for _, c := range []struct{ want, got, out string }{
+		{a, a, deployplan.DigestMatch}, {a, b, deployplan.DigestMismatch},
+		{a, "", deployplan.DigestUnverified}, {"", a, deployplan.DigestUnverified}, {"", "", deployplan.DigestUnverified},
+		{a, "sha256:zz", deployplan.DigestUnverified},
+	} {
+		if got := deployplan.CompareDigests(c.want, c.got); got != c.out {
+			t.Errorf("CompareDigests(%q,%q) = %q, want %q", c.want, c.got, got, c.out)
+		}
 	}
 }

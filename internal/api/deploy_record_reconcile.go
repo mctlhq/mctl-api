@@ -16,6 +16,8 @@ type DeployRecordReconcileStore interface {
 	RecordsToReconcile(ctx context.Context, since, afterCreated time.Time, afterID string, limit int) ([]*deployplan.Record, error)
 	SetRecordSubmission(ctx context.Context, id, status, workflow string) (*deployplan.Record, error)
 	SetRunResult(ctx context.Context, id string, o deployplan.RunOutcome) (*deployplan.Record, error)
+	// GetRecord reads the preview a promotion promotes, for the digest check.
+	GetRecord(ctx context.Context, id string) (*deployplan.Record, error)
 }
 
 // workflowOutcomeGetter is the slice of operations.Executor it needs.
@@ -141,6 +143,22 @@ func (r *deployRecordReconciler) reconcileRecord(ctx context.Context, rec *deplo
 	o, finished := r.outcomeOf(rec.ID, name, out)
 	if !finished {
 		return // still running, or a phase this does not know: not an outcome
+	}
+	if rec.SourceDeploymentID != "" && o.Result == deployplan.RunSucceeded {
+		// A promotion: the platform compares the digest production ran with
+		// the one the source preview ran (mctl-api#1049). A source that
+		// cannot be read leaves the whole outcome unrecorded for the next
+		// pass, so the check is never skipped into "no check".
+		src, err := r.store.GetRecord(ctx, rec.SourceDeploymentID)
+		if err != nil {
+			slog.Warn("deploy record reconcile: reading the promoted preview", "deployment", rec.ID, "source", rec.SourceDeploymentID, "error", err)
+			return
+		}
+		o.DigestCheck = deployplan.CompareDigests(src.ImageDigest, o.ImageDigest)
+		if o.DigestCheck != deployplan.DigestMatch {
+			slog.Error("deploy record reconcile: promoted digest not shown equal to the preview's",
+				"deployment", rec.ID, "source", rec.SourceDeploymentID, "check", o.DigestCheck)
+		}
 	}
 	r.write("run result", rec.ID, func() error {
 		_, err := r.store.SetRunResult(ctx, rec.ID, o)
