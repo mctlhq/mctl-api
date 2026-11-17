@@ -209,6 +209,11 @@ func (h *Handlers) DeployPlan(w http.ResponseWriter, r *http.Request) {
 	var before, after map[string]any
 	if onboard {
 		before, after, err = deployplan.CompileOnboardPreview(intent, h.opts.PlatformImageOrg, previewID, host)
+		if err == nil {
+			// The size cap preview-deploy enforces is checked now, so a plan
+			// that could never be applied is not stored and approved.
+			_, _, err = deployplan.CompiledValues(after)
+		}
 	} else {
 		before, after, err = deployplan.CompilePreview(base, intent, previewID, host)
 	}
@@ -219,6 +224,9 @@ func (h *Handlers) DeployPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	case errors.Is(err, deployplan.ErrPreviewValuesRefused):
 		a.refuse(w, http.StatusUnprocessableEntity, "deploy_preview_values_refused", truncate256(err.Error()))
+		return
+	case errors.Is(err, deployplan.ErrOnboardNotReproducible):
+		a.refuse(w, http.StatusUnprocessableEntity, "deploy_onboard_values_unusable", truncate256(err.Error()))
 		return
 	case err != nil:
 		slog.Error("deploy plan: compile", "error", err)

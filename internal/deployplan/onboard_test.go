@@ -3,10 +3,10 @@ package deployplan
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"io"
-	"math/rand"
 	"strings"
 	"testing"
 )
@@ -103,10 +103,11 @@ func TestOnboardBase_RefusesAnImageRepositoryThatIsNotOne(t *testing.T) {
 }
 
 func TestCompiledValues_RefusesOversizedValues(t *testing.T) {
-	// Incompressible content (a fixed-seed PRNG), so the cap is reached.
-	rnd := rand.New(rand.NewSource(1))
+	// Incompressible content, so the cap is reached.
 	buf := make([]byte, 120000)
-	rnd.Read(buf)
+	if _, err := rand.Read(buf); err != nil {
+		t.Fatal(err)
+	}
 	big := map[string]any{"env": map[string]any{"BLOB": base64.StdEncoding.EncodeToString(buf)}}
 	if _, _, err := CompiledValues(big); !errors.Is(err, ErrOnboardNotReproducible) {
 		t.Fatalf("oversized values: err = %v", err)

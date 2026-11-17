@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -120,6 +122,24 @@ func TestDeployApply_OnboardPassesTheApprovedValues(t *testing.T) {
 			t.Errorf("compiled values lack %q:\n%s", want, values)
 		}
 	}
+	// The audit row names the values by hash only: the compiled values hold
+	// real Vault paths the plan stores redacted.
+	sawRow := false
+	for _, e := range f.log.List(1000) {
+		if e.Operation != "preview-deploy" {
+			continue
+		}
+		sawRow = true
+		if strings.Contains(e.Parameters["compiled_values"], got["compiled_values"][:40]) || len(e.Parameters["compiled_values"]) > 80 {
+			t.Errorf("the audit row carries the compiled values: %q", e.Parameters["compiled_values"])
+		}
+		if e.Parameters["values_sha256"] != got["values_sha256"] {
+			t.Errorf("audit values_sha256 = %q", e.Parameters["values_sha256"])
+		}
+	}
+	if !sawRow {
+		t.Error("no preview-deploy audit row")
+	}
 	if got["gitops_ref"] != planBaseSHA || got["preview_id"] != plan.PreviewID {
 		t.Errorf("gitops_ref/preview_id = %q/%q", got["gitops_ref"], got["preview_id"])
 	}
@@ -143,5 +163,52 @@ func TestDeployApply_UpdateCarriesNoCompiledValues(t *testing.T) {
 	got := f.exec.submittedParams[0]
 	if got["compiled_values"] != "" || got["values_sha256"] != "" {
 		t.Fatalf("an update carried compiled values: %v", got)
+	}
+}
+
+// A plan that could never be applied (values over the size preview-deploy
+// takes) is refused at plan time, not stored and approved first.
+func TestDeployPlan_OnboardOverTheSizeCapIsRefused(t *testing.T) {
+	f := newPlanFixture(t)
+	f.gitops.exists = false
+	// The schema allows 64 env values of 4096 characters and the body is
+	// capped at 256 KiB; 56 incompressible ones compile past the cap.
+	env := map[string]any{}
+	for i := 0; i < 56; i++ {
+		blob := make([]byte, 3000)
+		if _, err := rand.Read(blob); err != nil {
+			t.Fatal(err)
+		}
+		env[fmt.Sprintf("K%d", i)] = base64.StdEncoding.EncodeToString(blob)
+	}
+	w := f.plan(t, planDev, planIntent(func(in map[string]any) { spec(in)["env"] = env }), "")
+	if w.Code != http.StatusUnprocessableEntity || errCode(t, w) != "deploy_onboard_values_unusable" {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	if f.store.inserts != 0 {
+		t.Fatal("a plan was stored")
+	}
+}
+
+// The decide page asks the same question as the apply: an onboard plan whose
+// values the compiler no longer reproduces is not offered for a grant.
+func TestDeployApprovalRequest_OnboardNotReproducibleIsRefused(t *testing.T) {
+	f := newGrantFixture(t, faithfulValues)
+	f.gitops.exists = false
+	f.gitops.data = ""
+	planID := f.newPlan(t, planIntent(nil))
+	// Stand in for a compiler or image-organization change since planning:
+	// the stored values and their digest stay consistent, but are no longer
+	// what the intent compiles to.
+	p := f.store.plans[planID]
+	p.ValuesAfter = strings.Replace(p.ValuesAfter, "port: 8080", "port: 9090", 1)
+	p.Digest = deployplan.Digest(deployplan.DigestInput{
+		Tenant: p.Tenant, Service: p.Service, Environment: p.Environment, IntentCanonical: p.IntentCanonical,
+		Revision: p.Revision, GitopsBaseSHA: p.GitopsBaseSHA, Action: p.Action, PreviewID: p.PreviewID,
+		ValuesAfter: p.ValuesAfter, Host: p.Host,
+	})
+	body := f.request(t, f.dev, planID, http.StatusUnprocessableEntity)
+	if body["code"] != "deploy_apply_not_reproducible" {
+		t.Fatalf("request = %v", body)
 	}
 }
