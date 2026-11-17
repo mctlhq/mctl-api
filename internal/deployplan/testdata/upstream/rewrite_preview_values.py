@@ -176,12 +176,26 @@ def main() -> int:
     parser.add_argument("--service", required=True)
     parser.add_argument("--in", dest="src", required=True)
     parser.add_argument("--out", required=True)
+    parser.add_argument(
+        "--require-image-repository",
+        help="refuse values whose image.repository is not exactly this "
+        "(preview compiled from a DeployIntent, mctl-gitops#2654)",
+    )
     args = parser.parse_args()
 
     with open(args.src, encoding="utf-8") as f:
         values = yaml.safe_load(f) or {}
     if not isinstance(values, dict):
         raise SystemExit(f"{args.src} is not a YAML mapping")
+
+    if args.require_image_repository is not None:
+        image = values.get("image")
+        got = image.get("repository") if isinstance(image, dict) else None
+        if got != args.require_image_repository:
+            raise SystemExit(
+                f"refusing preview deploy: image.repository is {got!r}, "
+                f"expected {args.require_image_repository!r}"
+            )
 
     rewritten = rewrite_values(values, args.team, args.service)
     _assert_no_prod_team_paths(rewritten, args.team)
