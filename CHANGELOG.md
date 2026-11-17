@@ -1,5 +1,22 @@
 # Changelog
 
+## [4.166.0](https://github.com/mctlhq/mctl-api/compare/4.165.1...4.166.0) (2026-11-17)
+
+
+### Features
+
+* **deploy:** compare a promoted digest with the preview's ([52a2a4d](https://github.com/mctlhq/mctl-api/commit/52a2a4d2e0629131202c7af8fa040f419bfa0ad2))
+* **deploy:** compare a promoted digest with the preview's ([5067b9d](https://github.com/mctlhq/mctl-api/commit/5067b9d886638c12ab91c2e4aa5c2d530aa29033))
+* **deploy:** promote a verified preview to production behind an owner grant ([71e179d](https://github.com/mctlhq/mctl-api/commit/71e179d29511f817ed5f24a6a2f40726de292852))
+
+
+### Bug Fixes
+
+* **api:** stop release page claiming the gate enforces the ledger ([27daa52](https://github.com/mctlhq/mctl-api/commit/27daa5276e6b28b4627868527936d7d1614b3e3b))
+* **api:** stop release page claiming the gate enforces the ledger ([7ae67a4](https://github.com/mctlhq/mctl-api/commit/7ae67a49165d1a95b7daf8687d4ffb696ddb9ea7))
+* **deploy:** lint evalOrder in reconcile test ([508574b](https://github.com/mctlhq/mctl-api/commit/508574bbd9039426b1e88fd5da5ef9bb6afc333c))
+* **deploy:** lint singleCaseSwitch in promote handler ([d82da1f](https://github.com/mctlhq/mctl-api/commit/d82da1f8dc047480eace76139f7a62e1d739475d))
+
 ## [4.165.1](https://github.com/mctlhq/mctl-api/compare/4.165.0...4.165.1) (2026-11-17)
 
 
