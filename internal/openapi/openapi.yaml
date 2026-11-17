@@ -7316,6 +7316,7 @@ paths:
       tags: [Glovo]
       parameters:
         - {name: principal_id, in: path, required: true, schema: {type: string, pattern: '^prn_[0-9A-HJKMNP-TV-Z]{26}$'}}
+        - {name: include, in: query, required: false, schema: {type: string, enum: [masked_identity]}, description: 'masked_identity adds a label (provider prefix, first character, ***) for an active consent; if it cannot be built the answer is 503, never an empty or raw value'}
       responses:
         '200':
           description: The principal's consent state
@@ -7329,6 +7330,7 @@ paths:
                   state: {type: string, enum: [active, none]}
                   consent_version: {type: string, description: present when state is active}
                   recorded_at: {type: string, format: date-time}
+                  masked_identity: {type: string, description: 'present only with include=masked_identity and state active'}
         '400': {description: glovo_consent_invalid_principal}
         '401': {description: not the consent reader}
         '429': {description: glovo_consent_rate_limited}

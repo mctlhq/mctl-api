@@ -95,6 +95,10 @@ type GlovoConsentRoutes struct {
 	ServiceProvider, ServiceSubject string
 	// ReadsPerPrincipalPerMinute; zero keeps the default.
 	ReadsPerPrincipalPerMinute int
+	// Identity supplies the facts for the masked identity the link preview
+	// shows (GET ...?include=masked_identity). Nil: that request is 503, a
+	// label that cannot be built is never omitted silently.
+	Identity glovoconsent.IdentitySource
 
 	once     sync.Once
 	perPrinc *httprate.RateLimiter
@@ -345,7 +349,16 @@ type GlovoConsentReadResponse struct {
 	State          string     `json:"state"`
 	ConsentVersion string     `json:"consent_version,omitempty"`
 	RecordedAt     *time.Time `json:"recorded_at,omitempty"`
+	// MaskedIdentity is present only when the caller asked for it
+	// (include=masked_identity) and the state is active: a provider prefix,
+	// the first character of the readable name and "***".
+	MaskedIdentity string `json:"masked_identity,omitempty"`
 }
+
+// gcIncludeMaskedIdentity is the opt-in query value: the per-call admission
+// read of mctl-glovo stays as cheap as it was, and only the link preview asks
+// for the label.
+const gcIncludeMaskedIdentity = "masked_identity"
 
 // ReadGlovoLinkConsent handles GET
 // /api/v1/assistants/glovo-consent/v1/principals/{principal_id}. Only the
@@ -383,8 +396,32 @@ func (h *Handlers) ReadGlovoLinkConsent(w http.ResponseWriter, r *http.Request) 
 		glovoConsentEvents.WithLabelValues("service_read", "store_inconsistent").Inc()
 		writeErrorCode(w, http.StatusServiceUnavailable, gcCodeUnavailable, "the consent record could not be read", nil)
 	default:
-		glovoConsentEvents.WithLabelValues("service_read", "active").Inc()
 		at := rec.RecordedAt.UTC()
-		writeJSON(w, http.StatusOK, GlovoConsentReadResponse{PrincipalID: pid, State: gcStateActive, ConsentVersion: rec.Version, RecordedAt: &at})
+		out := GlovoConsentReadResponse{PrincipalID: pid, State: gcStateActive, ConsentVersion: rec.Version, RecordedAt: &at}
+		if r.URL.Query().Get("include") == gcIncludeMaskedIdentity {
+			label, err := h.glovoMaskedIdentity(r, g, pid)
+			if err != nil {
+				glovoConsentEvents.WithLabelValues("service_read", "identity_unavailable").Inc()
+				writeErrorCode(w, http.StatusServiceUnavailable, gcCodeUnavailable, "the identity label could not be built", nil)
+				return
+			}
+			out.MaskedIdentity = label
+		}
+		glovoConsentEvents.WithLabelValues("service_read", "active").Inc()
+		writeJSON(w, http.StatusOK, out)
 	}
+}
+
+// glovoMaskedIdentity builds the label from live identity facts. Any failure
+// (no source, a failed read, nothing readable) is an error: the label is
+// never empty, never raw.
+func (h *Handlers) glovoMaskedIdentity(r *http.Request, g *GlovoConsentRoutes, pid string) (string, error) {
+	if glovo.IsNil(g.Identity) {
+		return "", glovoconsent.ErrNoIdentityLabel
+	}
+	facts, err := g.Identity.IdentityFacts(r.Context(), pid)
+	if err != nil {
+		return "", err
+	}
+	return glovoconsent.MaskIdentity(facts)
 }
