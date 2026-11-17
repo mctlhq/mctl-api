@@ -210,6 +210,11 @@ func TestReleaseApprovalPage_DeciderApprovesWithEvidence(t *testing.T) {
 	if got.Code != http.StatusOK || !strings.Contains(got.Body.String(), "Release approved") {
 		t.Fatalf("confirm = %d %s", got.Code, got.Body.String())
 	}
+	// The gate does not read the ledger yet: the page must say so and must
+	// not claim the image may now reach production.
+	if b := got.Body.String(); !strings.Contains(b, "does not enforce ledger decisions yet") || strings.Contains(b, "reach production") {
+		t.Fatalf("approved page overclaims: %s", b)
+	}
 	a := e.approval(id)
 	ev, err := workitems.ReleaseDecisionOf(a)
 	if a.State != workitems.ApprovalApproved || a.DecidedByPrincipalID != basketAdminPRN || err != nil || ev == nil {
@@ -243,7 +248,8 @@ func TestReleaseApprovalPage_DeciderRejects(t *testing.T) {
 	e := newReleasePageEnv(t)
 	id, _ := e.pendingRelease()
 	_, ck, form := e.signIn(id, deciderClaims())
-	if got := e.confirm(ck, form, "reject"); got.Code != http.StatusOK {
+	if got := e.confirm(ck, form, "reject"); got.Code != http.StatusOK ||
+		!strings.Contains(got.Body.String(), "does not enforce ledger decisions yet") || strings.Contains(got.Body.String(), "will not be let through") {
 		t.Fatalf("reject = %d %s", got.Code, got.Body.String())
 	}
 	a := e.approval(id)

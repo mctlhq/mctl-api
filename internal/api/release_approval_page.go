@@ -626,9 +626,12 @@ func (h *Handlers) handleReleaseApprovalConfirm(w http.ResponseWriter, r *http.R
 	h.auditActionApproval(r, user, "action_approval.decision", decided, operations.RiskHigh,
 		map[string]string{"surface": releasePageAuditOp, "amr": strings.Join(c.Evidence.AMR, ",")})
 	h.auditReleasePage(r, user, id, c.ApprovalRef, "succeeded", decision)
-	title, outcome := "Release approved", "The release gate may now let exactly this image reach production. Nothing was deployed yet."
+	// The production release gate does not enforce ledger decisions yet
+	// (mctl-api#1022 S3 reads them in shadow mode only), so the page must
+	// not claim an effect it does not have. Reword when the gate enforces.
+	title, outcome := "Release approved", "Your approval of exactly this image is recorded in the release ledger. The release gate does not enforce ledger decisions yet, so this changes nothing on its own. Nothing was deployed."
 	if decision == "reject" {
-		title, outcome = "Release rejected", "This image of this version will not be let through. Nothing was deployed."
+		title, outcome = "Release rejected", "Your rejection of exactly this image is recorded in the release ledger. The release gate does not enforce ledger decisions yet, so this does not block the release on its own. Nothing was deployed."
 	}
 	shown.approval = decided
 	d.renderPage(w, http.StatusOK, title, append(shown.lines(id.Display), outcome), releasePageData{})
