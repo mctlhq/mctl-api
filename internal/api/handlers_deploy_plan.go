@@ -179,13 +179,17 @@ func (h *Handlers) DeployPlan(w http.ResponseWriter, r *http.Request) {
 		a.refuse(w, http.StatusServiceUnavailable, "deploy_gitops_unavailable", "the gitops checkout cannot be read right now")
 		return
 	}
-	if !exists {
-		a.refuse(w, http.StatusUnprocessableEntity, "onboard_requires_preview_onboard",
-			"the service does not exist in gitops yet; first onboard is not planned here")
+	// A service with no values.yaml is onboarded: its values are compiled
+	// from the intent over a platform-set base, and preview-deploy receives
+	// them from the approved plan (mctlhq/mctl-gitops#2654).
+	onboard := !exists
+	if !onboard && !strings.EqualFold(sourceRepo, repo) {
+		a.refuse(w, http.StatusForbidden, "deploy_service_not_bound", "the service is not built from this repository")
 		return
 	}
-	if !strings.EqualFold(sourceRepo, repo) {
-		a.refuse(w, http.StatusForbidden, "deploy_service_not_bound", "the service is not built from this repository")
+	if onboard && h.opts.PlatformImageOrg == "" {
+		slog.Error("deploy plan: PlatformImageOrg is not configured")
+		a.refuse(w, http.StatusInternalServerError, "deploy_plan_failed", "the plan could not be computed")
 		return
 	}
 	if !deployRevRe.MatchString(baseSHA) {
@@ -202,7 +206,12 @@ func (h *Handlers) DeployPlan(w http.ResponseWriter, r *http.Request) {
 	}
 	previewID := deployplan.PreviewID(tenant, service, rev, baseSHA)
 	host := deployplan.Host(service, previewID, h.opts.PlatformDomain)
-	before, after, err := deployplan.CompilePreview(base, intent, previewID, host)
+	var before, after map[string]any
+	if onboard {
+		before, after, err = deployplan.CompileOnboardPreview(intent, h.opts.PlatformImageOrg, previewID, host)
+	} else {
+		before, after, err = deployplan.CompilePreview(base, intent, previewID, host)
+	}
 	switch {
 	case errors.Is(err, deployplan.ErrValuesUnparseable):
 		slog.Error("deploy plan: base values unparseable", "tenant", tenant, "service", service, "error", err)
@@ -225,6 +234,10 @@ func (h *Handlers) DeployPlan(w http.ResponseWriter, r *http.Request) {
 		a.refuse(w, http.StatusInternalServerError, "deploy_plan_failed", "the plan could not be computed")
 		return
 	}
+	action := deployplan.ActionUpdate
+	if onboard {
+		action = deployplan.ActionOnboard
+	}
 	// Compared before redaction, over the chart defaults at the same gitops
 	// commit: a change hidden behind a redacted value is still a change
 	// preview-deploy would not make, and a value the chart already defaults
@@ -242,11 +255,11 @@ func (h *Handlers) DeployPlan(w http.ResponseWriter, r *http.Request) {
 		a.refuse(w, http.StatusInternalServerError, "deploy_plan_failed", "the plan could not be computed")
 		return
 	}
-	approval := deployplan.RequiredApproval(intent.Spec.Environment, deployplan.ActionUpdate)
+	approval := deployplan.RequiredApproval(intent.Spec.Environment, action)
 	digest := deployplan.Digest(deployplan.DigestInput{
 		Tenant: tenant, Service: service, Environment: intent.Spec.Environment,
 		IntentCanonical: string(canonical), Revision: rev, GitopsBaseSHA: baseSHA,
-		Action: deployplan.ActionUpdate, PreviewID: previewID, ValuesAfter: afterYAML, Host: host,
+		Action: action, PreviewID: previewID, ValuesAfter: afterYAML, Host: host,
 	})
 	a.params["digest"] = digest
 
@@ -268,7 +281,7 @@ func (h *Handlers) DeployPlan(w http.ResponseWriter, r *http.Request) {
 		ID: deployplan.NewID(), Digest: digest, SchemaVersion: deployplan.SchemaVersion,
 		Tenant: tenant, Service: service, Environment: intent.Spec.Environment,
 		Intent: canonical, IntentCanonical: string(canonical), Revision: rev, GitopsBaseSHA: baseSHA,
-		Action: deployplan.ActionUpdate, PreviewID: previewID,
+		Action: action, PreviewID: previewID,
 		ValuesBeforeSHA256: deployplan.SHA256Hex(beforeYAML), ValuesAfter: afterYAML,
 		Diff: deployplan.UnifiedDiff(beforeYAML, afterYAML), Host: host,
 		RequiresApproval: approval.Required, RequiredRole: approval.Role, ApprovalReason: approval.Reason,

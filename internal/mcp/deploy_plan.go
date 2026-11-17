@@ -23,7 +23,7 @@ func (s *Server) toolDeployPlan() (mcplib.Tool, server.ToolHandlerFunc) {
 
 Planning changes nothing: it writes no gitops file and touches no cluster. The only write is one stored plan row. The server compiles the effective preview Helm values for the service at the pinned revision and gitops commit, and returns the plan id, a unified diff, the preview host, the digest and the approval the plan will need. Secret references are redacted.
 
-Only environment=preview is planned. environment=production is refused (prod_requires_promote), and a service that does not exist yet in gitops is refused (onboard_requires_preview_onboard). Approval is a later step and is not granted by planning.
+Only environment=preview is planned. environment=production is refused (prod_requires_promote), and a service that does not exist yet in gitops is planned as an onboard: its preview values are compiled from the intent over a platform base (image built from source, registry pull secret), and applying it needs an owner's approval. Approval is a later step and is not granted by planning.
 
 Planning the same intent twice gives the same digest. Pass idempotency_key to get the stored plan back (replayed=true) on a retry.`),
 		mcplib.WithObject("intent", mcplib.Required(), mcplib.Description("The DeployIntent object")),
@@ -169,7 +169,7 @@ Needs the approval id from mctl_request_deploy_approval, decided by an owner of 
 
 // deployPlanRequest calls the REST route and, unlike doRequest, keeps the
 // API's machine-readable code in the error, because the deploy-plan codes
-// (prod_requires_promote, onboard_requires_preview_onboard, ...) are the
+// (prod_requires_promote, deploy_revision_not_a_sha, ...) are the
 // contract a caller acts on.
 func (s *Server) deployPlanRequest(ctx context.Context, method, path string, body any) ([]byte, error) {
 	var rd io.Reader

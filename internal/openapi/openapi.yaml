@@ -489,7 +489,7 @@ components:
           type: string
         action:
           type: string
-          enum: [update]
+          enum: [update, onboard]
         preview_id:
           type: string
         values_before_sha256:
@@ -2556,7 +2556,6 @@ paths:
             deploy_revision_not_a_sha (a branch or tag; refs are never resolved),
             prod_requires_promote (production is reached only through promote),
             deploy_revision_unreadable (GitHub does not know the commit),
-            onboard_requires_preview_onboard (the service directory is absent at the pinned gitops commit),
             deploy_preview_values_refused (the preview rewrite refuses the base values)
           content:
             application/json:

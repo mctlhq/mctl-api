@@ -64,7 +64,7 @@ const (
 // deployServerSetParams are preview-deploy inputs only the apply route sets,
 // from the approved plan. A request body naming one is refused on the
 // generic execute path.
-var deployServerSetParams = []string{"preview_id", "gitops_ref"}
+var deployServerSetParams = []string{"preview_id", "gitops_ref", "compiled_values", "values_sha256"}
 
 // deployApplyIntent is what a deploy.apply grant binds, built from the
 // stored plan alone.
@@ -143,11 +143,11 @@ func planApplicableCheck(p *deployplan.Plan, now time.Time) (deployplan.Intent, 
 		return deployplan.Intent{}, &planRefusal{http.StatusInternalServerError, codeDeployApplyUnavailable, "the stored plan's intent cannot be read"}
 	}
 	switch {
-	case p.Environment != deployplan.EnvironmentPreview || p.Action != deployplan.ActionUpdate:
-		return deployplan.Intent{}, &planRefusal{http.StatusUnprocessableEntity, codeDeployApplyNotReproducible, "only a preview update plan can be applied"}
-	case p.IntentChangesValues == nil || *p.IntentChangesValues:
+	case p.Environment != deployplan.EnvironmentPreview || (p.Action != deployplan.ActionUpdate && p.Action != deployplan.ActionOnboard):
+		return deployplan.Intent{}, &planRefusal{http.StatusUnprocessableEntity, codeDeployApplyNotReproducible, "only a preview update or onboard plan can be applied"}
+	case p.Action == deployplan.ActionUpdate && (p.IntentChangesValues == nil || *p.IntentChangesValues):
 		return deployplan.Intent{}, &planRefusal{http.StatusUnprocessableEntity, codeDeployApplyNotReproducible,
-			"the intent changes the service's values (runtime, env, resources or secrets), and preview-deploy renders the gitops values; apply it after preview-from-intent lands, or change the values in gitops"}
+			"the intent changes the service's values (runtime, env, resources or secrets), and preview-deploy renders the gitops values; change the values in gitops first"}
 	case intent.Spec.Source.Context != "." && intent.Spec.Source.Context != "":
 		return deployplan.Intent{}, &planRefusal{http.StatusUnprocessableEntity, codeDeployApplyNotReproducible,
 			"the preview build supports only the repository root as build context"}
@@ -359,6 +359,19 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 		"preview_id":      p.PreviewID,
 		"gitops_ref":      p.GitopsBaseSHA,
 	})
+	if p.Action == deployplan.ActionOnboard {
+		// The values come from the approved plan, never from the caller:
+		// rebuilt from its intent and held to the redacted rendering the
+		// plan's digest binds.
+		b64, sha, err := deployplan.OnboardValuesForPlan(p, intent, h.opts.PlatformImageOrg)
+		if err != nil {
+			slog.Error("deploy apply: onboard values", "plan", p.ID, "error", err)
+			a.refuse(w, http.StatusUnprocessableEntity, codeDeployApplyNotReproducible,
+				"the plan's values cannot be reproduced; plan again")
+			return
+		}
+		input["compiled_values"], input["values_sha256"] = b64, sha
+	}
 	if errs := h.opts.Registry.ValidateInput(op, input); len(errs) > 0 {
 		slog.Error("deploy apply: plan-built input does not validate", "plan", p.ID, "errors", strings.Join(errs, "; "))
 		a.refuse(w, http.StatusInternalServerError, codeDeployApplyUnavailable, "the plan cannot be turned into a valid preview-deploy")

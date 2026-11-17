@@ -458,8 +458,8 @@ var builtinOperations = []Operation{
 		// RequiresConfirm stays false on purpose. The flag is per operation,
 		// and action=deploy is the unattended CI OIDC auto-deploy path
 		// (authorizeCIDeploy), which has no human to confirm. First onboard
-		// is high risk: it is refused at plan time (onboard_requires_preview_onboard)
-		// and is gated later by a server-held grant, not confirm="yes".
+		// is high risk: a preview onboard is planned from an intent and gated by a
+		// server-held owner grant (deploy_apply), not confirm="yes".
 		RequiresConfirm: false,
 		MinRole:         RoleDeveloper,
 		ModifiesPaths:   []string{"platform-gitops/services/{team_name}/{component_name}/"},
@@ -644,6 +644,8 @@ var builtinOperations = []Operation{
 			// gitops HEAD) apply rather than an empty override.
 			{Name: "preview_id", Type: "string", Default: "", OmitWhenEmpty: true, Pattern: "^[a-z0-9]{6}$", Description: "Server-set from an approved deploy plan; never accepted from a caller."},
 			{Name: "gitops_ref", Type: "string", Default: "", OmitWhenEmpty: true, Pattern: "^[0-9a-f]{40}$", Description: "Server-set gitops commit of an approved deploy plan; never accepted from a caller."},
+			{Name: "compiled_values", Type: "string", Default: "", OmitWhenEmpty: true, Pattern: "^[A-Za-z0-9+/=]+$", MaxLength: 96000, Description: "Server-set values compiled from an approved onboard plan (gzip+base64); never accepted from a caller."},
+			{Name: "values_sha256", Type: "string", Default: "", OmitWhenEmpty: true, Pattern: "^[0-9a-f]{64}$", Description: "Server-set sha256 of compiled_values once decompressed; never accepted from a caller."},
 		},
 	},
 	{

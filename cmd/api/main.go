@@ -1565,6 +1565,7 @@ func main() {
 		DomainStore:                    domainStore,
 		DomainVerifier:                 domainVerifier,
 		PlatformDomain:                 cfg.PlatformDomain,
+		PlatformImageOrg:               cfg.GitHubOrg,
 		ErpactDeployer:                 erpactDeployer,
 		TemporalClient:                 devLoopClient,
 		HumanInputLedger:               humanInputLedger,

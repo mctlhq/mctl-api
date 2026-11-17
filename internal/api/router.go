@@ -173,6 +173,11 @@ type Options struct {
 	// equal to or ending in "."+PlatformDomain are rejected by AddDomain —
 	// those stay GitOps-only via ingress.hosts. Defaults to "mctl.ai" when empty.
 	PlatformDomain string
+	// PlatformImageOrg is the GitHub organization whose GHCR namespace the
+	// platform builds tenant images into (ghcr.io/<org>/<service>). A preview
+	// onboard plan names it as the image repository; empty refuses onboard
+	// plans rather than guess one.
+	PlatformImageOrg string
 	// ErpactDeployer is the ERPact site-deployer client (mctl-api#486). A
 	// temporary, tenant-`erpact`-only stopgap: nil makes every
 	// /api/v1/tenants/erpact/sites* route 503, which is also how the feature

@@ -159,7 +159,7 @@ func newGrantFixture(t *testing.T, values string, edit ...func(*mctlapi.Options)
 		BackstageInternalURL: portal.URL, BackstageGithubAppConnectToken: "tok",
 		SourceRepoBindings:  repoBindings{},
 		DeployContentReader: f.content, DeployPlans: f.store, DeployRecords: f.records, DeployGitops: f.gitops,
-		PlatformDomain: "mctl.ai", Clock: func() time.Time { return f.now },
+		PlatformDomain: "mctl.ai", PlatformImageOrg: "mctlhq", Clock: func() time.Time { return f.now },
 		WorkItems: wi, TenantAuthzMode: mctlapi.TenantAuthzPrincipal, PrincipalMembership: f.members,
 		Principals: f.prins, AdminPrincipals: map[string]bool{grantRootPRN: true},
 	}
@@ -481,7 +481,7 @@ probes:
 // preview_id and gitops_ref come only from an approved plan.
 func TestPreviewDeploy_ServerSetParamsRefusedInBody(t *testing.T) {
 	f := newGrantFixture(t, faithfulValues)
-	for _, p := range []string{"preview_id", "gitops_ref"} {
+	for _, p := range []string{"preview_id", "gitops_ref", "compiled_values", "values_sha256"} {
 		w := postAs(t, f.router, "/api/v1/operations/preview-deploy/execute", map[string]string{
 			"team_name": "acme", "component_name": "web", "image_tag": "1.0.0", p: "ab12cd",
 		}, f.owner)
