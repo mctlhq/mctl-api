@@ -1,5 +1,21 @@
 # Changelog
 
+## [4.165.0](https://github.com/mctlhq/mctl-api/compare/4.164.0...4.165.0) (2026-11-17)
+
+
+### Features
+
+* **auth:** service_subjects pins ZITADEL machine users to kind service ([96d425b](https://github.com/mctlhq/mctl-api/commit/96d425be457855e49571416623f521e030492535))
+* **auth:** service_subjects pins ZITADEL machine users to kind service ([b3d6876](https://github.com/mctlhq/mctl-api/commit/b3d68765850c2153c14ef2f0c95cf16ba706686f))
+* **deploy:** plan and apply a preview onboard from a DeployIntent ([89e3dc8](https://github.com/mctlhq/mctl-api/commit/89e3dc86d3938473e0ba3d92bcbceaa2d6f069e9))
+* **deploy:** plan and apply a preview onboard from a DeployIntent ([d45bcc4](https://github.com/mctlhq/mctl-api/commit/d45bcc4a955aaa2afc784e513524584cfe4cb739))
+* **deploy:** rollback-revision operation restores a deployment's values ([e381039](https://github.com/mctlhq/mctl-api/commit/e381039fb76ef70fdf739b5808704a0a255f5a27))
+
+
+### Bug Fixes
+
+* **deploy:** onboard plan checked at plan and decide time, audit keeps values out ([5786817](https://github.com/mctlhq/mctl-api/commit/57868170428d9ae0b12c8cd3f8115871e85997a8))
+
 ## [4.164.0](https://github.com/mctlhq/mctl-api/compare/4.163.0...4.164.0) (2026-11-17)
 
 
