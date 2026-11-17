@@ -18,10 +18,17 @@ const (
 	// ActionOnboard is reserved for the preview-onboard item and is never
 	// produced here.
 	ActionOnboard Action = "onboard"
+	// ActionPromote pins the image a successful preview ran in the
+	// production values of the same service (mctl-api#1049). It is planned
+	// from a DeployRecord, never from an intent.
+	ActionPromote Action = "promote"
 )
 
-// Environment is the only environment a plan may target.
-const EnvironmentPreview = "preview"
+// Environments a plan may target. Only a promote names production.
+const (
+	EnvironmentPreview    = "preview"
+	EnvironmentProduction = "production"
+)
 
 // Approval names the approval a plan will need before anything is applied.
 type Approval struct {

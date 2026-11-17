@@ -333,7 +333,7 @@ func (s *deployShown) lines(display string) []string {
 		"Signed in as " + display + ".",
 		"Team: " + p.Tenant + ", service: " + p.Service + ", environment: " + p.Environment,
 		"Source revision: " + p.Revision,
-		"Preview: https://" + p.Host,
+		hostLine(p),
 		"Requested by: " + requester,
 		"Plan: " + p.ID,
 		"Plan digest: " + p.Digest,
@@ -626,4 +626,20 @@ func (h *Handlers) auditDeployPage(r *http.Request, user *auth.User, id auth.Ide
 		RiskLevel:  string(operations.RiskMedium),
 		Message:    msg,
 	})
+}
+
+// hostLine names what the plan serves: a preview's address, or, for a
+// promotion, that production is changed and by which image.
+func hostLine(p *deployplan.Plan) string {
+	if p.Action != deployplan.ActionPromote {
+		return "Preview: https://" + p.Host
+	}
+	line := "PRODUCTION CHANGE: promotes a verified preview to production"
+	if pi, err := deployplan.ParsePromoteIntent(p.IntentCanonical); err == nil {
+		line += " (image " + pi.ImageTag + " @ " + pi.ImageDigest + ", from " + pi.SourceDeploymentID + ")"
+	}
+	if p.Host != "" {
+		line += " at https://" + p.Host
+	}
+	return line
 }

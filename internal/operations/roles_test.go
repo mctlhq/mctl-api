@@ -14,6 +14,7 @@ var wantMinRole = map[string]Role{
 	"deploy-service":       RoleDeveloper,
 	"rollback-service":     RoleDeveloper,
 	"rollback-revision":    RoleDeveloper,
+	"promote-deployment":   RoleDeveloper,
 	"provision-database":   RoleDeveloper,
 	"preview-deploy":       RoleDeveloper,
 	"preview-delete":       RoleDeveloper, // ephemeral by design: no data outlives the preview's TTL anyway

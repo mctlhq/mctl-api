@@ -1568,6 +1568,7 @@ func main() {
 		// Must equal the workflow's GITOPS_ORG (mctl-platform-config):
 		// preview-deploy refuses an image outside ghcr.io/<GITOPS_ORG>/.
 		PlatformImageOrg:        cfg.GitHubOrg,
+		PromoteTenants:          []string{"admins"},
 		ErpactDeployer:          erpactDeployer,
 		TemporalClient:          devLoopClient,
 		HumanInputLedger:        humanInputLedger,

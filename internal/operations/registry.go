@@ -621,6 +621,28 @@ var builtinOperations = []Operation{
 		},
 	},
 	{
+		Name:             "promote-deployment",
+		DisplayName:      "Promote A Verified Preview To Production",
+		Description:      "Pin the image a successful preview ran, by digest, in the service's production values, then run the health gate. Reachable only through POST /api/v1/deploy/promote and /deploy/apply behind an owner's grant: the tag and digest are read from the preview's deployment record, never from a caller.",
+		WorkflowTemplate: "promote-deployment",
+		RiskLevel:        RiskMedium,
+		RequiresConfirm:  false,
+		// Only the deploy promote and apply routes submit it, behind an
+		// owner's grant; the generic execute path refuses it.
+		HandlerOnly:   true,
+		MinRole:       RoleDeveloper,
+		ModifiesPaths: []string{"platform-gitops/services/{team_name}/{component_name}/"},
+		Parameters: []ParameterDef{
+			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
+			{Name: "component_name", Type: "string", Required: true, Description: "Service name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
+			// Server-set from the approved promote plan; a body naming either
+			// is refused, and the operation itself is not executable without
+			// a grant. Optional in the schema so clients do not list them.
+			{Name: "image_tag", Type: "string", Default: "", OmitWhenEmpty: true, Pattern: ociTagPattern, Description: "Server-set from the preview's deployment record; never accepted from a caller."},
+			{Name: "image_digest", Type: "string", Default: "", OmitWhenEmpty: true, Pattern: "^sha256:[0-9a-f]{64}$", Description: "Server-set from the preview's deployment record; never accepted from a caller."},
+		},
+	},
+	{
 		Name:             "preview-deploy",
 		DisplayName:      "Deploy Preview Environment",
 		Description:      "Deploy an ephemeral preview copy of a service. Supports two modes: (1) existing image — pass image_tag directly; (2) build from branch — pass git_ref + dockerfile_repo and the platform builds the image first. Preview is accessible at {app}-{id}.{platform_domain} and auto-deleted after the TTL.",

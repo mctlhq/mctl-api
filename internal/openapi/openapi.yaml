@@ -2492,6 +2492,85 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/v1/deploy/promote:
+    post:
+      summary: Plan the promotion of a verified preview to production
+      description: |
+        Plans pinning the image a successful preview ran, by digest, in the
+        service's production values (mctl-api#1049). The body names only the
+        preview's `deployment_id`; the image tag and digest are read from that
+        deployment record, so no caller field can name an image no preview ran.
+        The record must be a submitted preview whose run succeeded, observed
+        healthy, with a recorded image digest.
+
+        Planning writes one `deploy_plans` row and nothing else. The plan is
+        approved and applied with `/api/v1/deploy/plans/{id}/approval` and
+        `/api/v1/deploy/apply`: an owner's `deploy.apply` grant bound to the
+        plan digest. Available only for the workspaces the server lists in
+        its promote allowlist (the platform's own, for now).
+
+        Needs the developer minimum role on the record's tenant. Every call
+        writes one audit entry (`deploy.promote`).
+      tags: [Deploy]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [deployment_id]
+              properties:
+                deployment_id:
+                  type: string
+                  description: Id (`dep_...`) of the preview deployment to promote
+                ttl_seconds:
+                  type: integer
+                  minimum: 60
+                  maximum: 86400
+      responses:
+        '201':
+          description: Plan created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeployPlan'
+        '400':
+          description: Unknown field (a digest, tag or revision is not accepted), missing `deployment_id` or `ttl_seconds` out of range (promote_invalid_input)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: The caller lacks the role, or promotion is not enabled for the workspace (promote_tenant_not_enabled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such deployment, or one of a workspace the caller is not in (promote_deployment_not_found)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: The deployment cannot be promoted (promote_deployment_not_usable), or the service has no production values (promote_values_unusable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: The service's values have no image mapping with a repository (promote_values_unusable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: The plan, record or gitops store is not available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /api/v1/deploy/plan:
     post:
       summary: Plan a preview deploy
