@@ -224,6 +224,21 @@ func TestReleaseApprovalPage_DeciderApprovesWithEvidence(t *testing.T) {
 	}
 }
 
+// ZITADEL puts the project id and the project's other client ids into aud
+// next to this client's id, and names this client in azp. That is a token
+// issued to this page and must be accepted (first real sign-in, 2026-11-17).
+func TestReleaseApprovalPage_AcceptsZitadelAudience(t *testing.T) {
+	e := newReleasePageEnv(t)
+	id, art := e.pendingRelease()
+	c := deciderClaims()
+	c["aud"] = []string{"release-client", "369000000000000001", "deploy-client@mctl"}
+	c["azp"] = "release-client"
+	rec, _, form := e.signIn(id, c)
+	if rec.Code != http.StatusOK || form.Get("csrf") == "" || !strings.Contains(rec.Body.String(), art.ImageDigest) {
+		t.Fatalf("callback = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestReleaseApprovalPage_DeciderRejects(t *testing.T) {
 	e := newReleasePageEnv(t)
 	id, _ := e.pendingRelease()
@@ -262,8 +277,12 @@ func TestReleaseApprovalPage_RefusesSignIns(t *testing.T) {
 		{name: "decider not an admin", claims: with(map[string]any{"sub": "z-owner"}), deci: []string{glovoOwnerPRN}, want: http.StatusNotFound},
 		{name: "no amr", claims: with(map[string]any{"amr": nil}), want: http.StatusForbidden, body: "amr: none"},
 		{name: "password only", claims: with(map[string]any{"amr": []string{"pwd", "user"}}), want: http.StatusForbidden, body: "amr: pwd, user"},
-		{name: "token shared with another client", claims: with(map[string]any{"aud": []string{"release-client", "mcp-client"}}), want: http.StatusBadRequest},
+		{name: "several audiences without azp", claims: with(map[string]any{"aud": []string{"release-client", "mcp-client"}}), want: http.StatusBadRequest},
 		{name: "authorized party is another client", claims: with(map[string]any{"azp": "mcp-client"}), want: http.StatusBadRequest},
+		{name: "zitadel shape minted for another client", claims: with(map[string]any{"aud": []string{"mcp-client", "release-client", "369000000000000001"}, "azp": "mcp-client"}), want: http.StatusBadRequest},
+		{name: "audience lacks this client", claims: with(map[string]any{"aud": []string{"mcp-client", "369000000000000001"}, "azp": "release-client"}), want: http.StatusBadRequest},
+		{name: "audience is another client", claims: with(map[string]any{"aud": "mcp-client"}), want: http.StatusBadRequest},
+		{name: "empty audience", claims: with(map[string]any{"aud": []string{}}), want: http.StatusBadRequest},
 		{name: "stale sign-in", claims: deciderClaims(), idp: func(f *fakeIdP) { f.authTime = time.Now().Add(-time.Hour) }, want: http.StatusBadRequest},
 		{name: "other nonce", claims: deciderClaims(), idp: func(f *fakeIdP) { f.nonceOverride = "someone-elses" }, want: http.StatusBadRequest},
 	}
@@ -509,5 +528,36 @@ func TestReleaseGrantListCarriesTheDecision(t *testing.T) {
 	d, _ := list()["decision"].(map[string]any)
 	if d["client_id"] != "release-client" || d["subject"] != "z-admin" || d["schema"] != workitems.ReleaseEvidenceSchema {
 		t.Fatalf("decision = %v", d)
+	}
+}
+
+// issuedToClient is checked on its own too: at the callback go-oidc already
+// refuses an aud without the client id, which would hide a regression here.
+func TestIssuedToClient(t *testing.T) {
+	cases := []struct {
+		aud, azp string
+		want     bool
+	}{
+		{`"release-client"`, "", true},
+		{`"release-client"`, "release-client", true},
+		{`["release-client"]`, "", true},
+		{`["release-client","369000000000000001","deploy-client@mctl"]`, "release-client", true},
+		{`["release-client","mcp-client"]`, "", false},
+		{`["release-client","mcp-client"]`, "mcp-client", false},
+		{`"release-client"`, "mcp-client", false},
+		{`["mcp-client","369000000000000001"]`, "release-client", false},
+		{`"mcp-client"`, "release-client", false},
+		{`[]`, "release-client", false},
+		{`null`, "release-client", false},
+		{`""`, "", false},
+		{`{"a":1}`, "release-client", false},
+	}
+	for _, c := range cases {
+		if got := issuedToClient(json.RawMessage(c.aud), c.azp, "release-client"); got != c.want {
+			t.Errorf("issuedToClient(%s, %q) = %v, want %v", c.aud, c.azp, got, c.want)
+		}
+	}
+	if issuedToClient(json.RawMessage(`""`), "", "") {
+		t.Error("an empty client id matched an empty aud")
 	}
 }
