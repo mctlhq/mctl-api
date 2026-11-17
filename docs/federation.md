@@ -791,3 +791,19 @@ GLOVO_CONSENT_SERVICE_SUBJECT=<consent-reader-machine-user-id>
 The audience is the project id a machine user receives in `aud` with a JWT
 profile exchange (the same value `subject_audiences` uses). The kill-switch
 caller (mctl-api to mctl-glovo) is outbound and needs no entry here.
+
+## Checking the configuration without booting
+
+`mctl-api --check-config` runs the startup validation of the values the
+zitadel-iac Job writes (`MCTL_OIDC_PROVIDERS`, the `OAUTH_UPSTREAM` /
+`OAUTH_ZITADEL_*` / `ZITADEL_LINK_PROVIDER` cross-checks, the
+`ZITADEL_HOOK_*` keys and `customers_org_id` against
+`ZITADEL_HOOK_CUSTOMERS_ORG_ID`) from the environment, then exits: `0` with
+the line `mctl-api check-config: ok` on stdout, or `1` with the refusal on
+stderr. It needs no database, cluster or network, and ignores
+`MCTL_FEDERATION_DISABLED` (a value that boots only because the kill switch is
+on is not one to merge). `validate()` calls the same function, so a rule added
+there is a rule in the check. An image that predates the flag ignores it and
+boots the server, so a caller must require the `ok` line, not just exit 0.
+Not covered: `auth.NewRegistry` composition (needs issuer discovery) and keys
+from other Secrets.
