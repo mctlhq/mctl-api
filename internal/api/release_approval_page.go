@@ -36,9 +36,12 @@ import (
 //   - the person must be a resolved human admin acting directly AND one of
 //     the configured deciders (RELEASE_APPROVAL_DECIDERS, principal ids, owner
 //     decision 2026-11-16: the owner only);
-//   - the ID token must be issued to this page's client alone (aud is
-//     exactly the client id, azp if present too), so no token minted for an
-//     MCP client or any other application is accepted;
+//   - the ID token must be issued to this page's client: aud contains the
+//     client id and azp names it (OIDC Core 3.1.3.7). azp is required as
+//     soon as aud has more than one entry, which is ZITADEL's normal shape:
+//     it adds the project id and the project's other client ids to aud
+//     (mctl-api#1022, first real sign-in 2026-11-17). So no token minted for
+//     an MCP client or any other application is accepted, whatever its aud;
 //   - its amr must name one of the required methods (default "mfa"). A
 //     refusal lists the amr the token did carry, so the first real sign-in
 //     shows what ZITADEL reports;
@@ -382,15 +385,34 @@ type releaseClaims struct {
 	Aud               json.RawMessage `json:"aud"`
 }
 
-// audienceIsOnly reports whether aud is exactly clientID, as a string or a
-// one-element array.
-func audienceIsOnly(raw json.RawMessage, clientID string) bool {
+// issuedToClient reports whether an ID token with this aud and azp was
+// issued to clientID, per OIDC Core 3.1.3.7: aud (a string or an array) must
+// contain clientID; with more than one audience azp must be present; and a
+// present azp must be clientID. A malformed or empty aud is refused.
+func issuedToClient(raw json.RawMessage, azp, clientID string) bool {
+	if clientID == "" {
+		return false
+	}
+	var auds []string
 	var one string
 	if json.Unmarshal(raw, &one) == nil {
-		return one == clientID
+		auds = []string{one}
+	} else if json.Unmarshal(raw, &auds) != nil {
+		return false
 	}
-	var many []string
-	return json.Unmarshal(raw, &many) == nil && len(many) == 1 && many[0] == clientID
+	found := false
+	for _, a := range auds {
+		if a == clientID {
+			found = true
+		}
+	}
+	if !found {
+		return false
+	}
+	if len(auds) > 1 && azp == "" {
+		return false
+	}
+	return azp == "" || azp == clientID
 }
 
 // handleReleaseApprovalCallback: GET /release/approvals/callback.
@@ -451,8 +473,8 @@ func (h *Handlers) handleReleaseApprovalCallback(w http.ResponseWriter, r *http.
 		d.failed(w, http.StatusBadRequest, "ZITADEL did not report a fresh sign-in for this approval.")
 		return
 	}
-	if !audienceIsOnly(claims.Aud, d.opts.ClientID) || (claims.AZP != "" && claims.AZP != d.opts.ClientID) {
-		d.failed(w, http.StatusBadRequest, "The ZITADEL ID token was not issued to the release approval page alone.")
+	if !issuedToClient(claims.Aud, claims.AZP, d.opts.ClientID) {
+		d.failed(w, http.StatusBadRequest, "The ZITADEL ID token was not issued to the release approval page.")
 		return
 	}
 	display := claims.PreferredUsername
