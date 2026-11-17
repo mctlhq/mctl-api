@@ -1204,6 +1204,14 @@ func renderSlots(t *testing.T, setArgs ...string) slotDeployment {
 // line, a "securityContext: {}" or a "containers" reordering all show up
 // here. Regenerate deliberately with UPDATE_GOLDEN=1 when the chart changes
 // on purpose, and read the diff.
+// goldenBody strips the helm-version-dependent envelope: surrounding
+// whitespace and a leading "---" document marker.
+func goldenBody(b []byte) []byte {
+	b = bytes.TrimSpace(b)
+	b = bytes.TrimPrefix(b, []byte("---"))
+	return bytes.TrimSpace(b)
+}
+
 func TestDefaultDeploymentMatchesGolden(t *testing.T) {
 	_, got := renderDeployment(t)
 	const golden = "testdata/default-deployment.golden.yaml"
@@ -1217,7 +1225,10 @@ func TestDefaultDeploymentMatchesGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read golden: %v", err)
 	}
-	if !bytes.Equal(got, want) {
+	// Helm 3 and 4 differ in the envelope of the output (leading document
+	// marker, trailing newlines), not in the manifest. Compare the manifest
+	// itself byte for byte: a stray blank line or key inside it still fails.
+	if !bytes.Equal(goldenBody(got), goldenBody(want)) {
 		t.Errorf("default render drifted from %s (UPDATE_GOLDEN=1 to regenerate after review)\n--- got ---\n%s", golden, got)
 	}
 }
@@ -1292,6 +1303,7 @@ func TestDocumentedPodSecurityExampleHasRunAsUser(t *testing.T) {
 		t.Fatalf("Dockerfile user changed; update runAsUser in values.yaml and docs/helm-chart-slots.md")
 	}
 	for _, f := range []string{"values.yaml", "../docs/helm-chart-slots.md"} {
+		// #nosec G304 -- f ranges over the two fixed repo paths in this loop, not external input.
 		b, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatal(err)
