@@ -45,8 +45,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -208,6 +210,9 @@ type Config struct {
 	CreationPending func(ctx context.Context, provider, subject string) (bool, error)
 	// GitHubAPIURL overrides https://api.github.com (tests only).
 	GitHubAPIURL string
+	// Logger receives the hook's own diagnostics (today: the key names of
+	// a Google rawInformation it could not read). Nil means slog.Default().
+	Logger *slog.Logger
 }
 
 // CreateAnyone is the CustomerCreateGitHubIDs entry that opens creation to
@@ -622,13 +627,88 @@ func withoutUserActions(in map[string]json.RawMessage) map[string]json.RawMessag
 	return resp
 }
 
+// googleRawUserKey is the one top-level key of a Google rawInformation.
+//
+// ZITADEL v4.19.2 stores the IdP user as json.Marshal(idpUser)
+// (internal/command/idp_intent.go, SucceedIDPIntent) and returns those bytes
+// verbatim as rawInformation (internal/api/grpc/user/v2/intent.go,
+// idpIntentToIDPIntentPb). For Google, idpUser is a *google.User
+// (internal/idp/providers/google/google.go), a struct that embeds the
+// idp.User interface. encoding/json names an embedded interface field after
+// its type instead of promoting it, so the userinfo (oidc.User, which
+// marshals as the flat OIDC userinfo claims) sits under "User":
+//
+//	{"User": {"sub": "...", "email": "...", "email_verified": true, ...}}
+//
+// ZITADEL's own docs show the same shape
+// (apps/docs/content/guides/integrate/login-ui/external-login.mdx). The
+// generic OIDC provider would be flat, but the customers IdP is the Google
+// provider, so the flat form is not accepted: it is not what this IdP sends.
+const googleRawUserKey = "User"
+
+// googleUserInfo returns the Google userinfo inside rawInformation. The
+// only accepted shape is exactly one key, googleRawUserKey, holding an
+// object; anything else is unreadable, never an empty userinfo.
+func googleUserInfo(raw map[string]any) (map[string]any, bool) {
+	if len(raw) != 1 {
+		return nil, false
+	}
+	u, ok := raw[googleRawUserKey].(map[string]any)
+	return u, ok
+}
+
+// rawShapeMaxKeys and rawShapeMaxKeyLen bound what a shape diagnostic logs.
+const (
+	rawShapeMaxKeys   = 32
+	rawShapeMaxKeyLen = 64
+)
+
+// rawKeyNames returns the sorted key names of m, bounded. Only names: the
+// values (subject, email, name, tokens) never leave this function.
+func rawKeyNames(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		if len(k) > rawShapeMaxKeyLen {
+			k = k[:rawShapeMaxKeyLen] + "..."
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if len(keys) > rawShapeMaxKeys {
+		keys = append(keys[:rawShapeMaxKeys], "...")
+	}
+	return keys
+}
+
+// logGoogleRawShape records the shape of a Google rawInformation the hook
+// refused on: the sorted top-level key names and, for each top-level value
+// that is an object, its key names. It never logs a value, so a refusal
+// caused by an unexpected shape is debuggable without the person's data.
+func (h *Hook) logGoogleRawShape(reason string, raw map[string]any) {
+	nested := map[string][]string{}
+	for _, k := range rawKeyNames(raw) {
+		if m, ok := raw[k].(map[string]any); ok {
+			nested[k] = rawKeyNames(m)
+		}
+	}
+	logger := h.cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Warn("zitadel hook: google rawInformation refused",
+		"reason", reason,
+		"raw_present", raw != nil,
+		"top_level_keys", rawKeyNames(raw),
+		"nested_keys", nested)
+}
+
 // intentGoogle handles the intent of the customers Google IdP.
 //
 // ZITADEL's Google provider is OIDC: it exchanges the code, validates the
-// ID token and reads Google's userinfo server-side, and rawInformation is
-// that userinfo. Unlike GitHub's (where ZITADEL reports every address as
-// verified), Google's email_verified is Google's own statement, so the hook
-// makes no outbound call here.
+// ID token and reads Google's userinfo server-side, and rawInformation
+// carries that userinfo under googleRawUserKey. Unlike GitHub's (where
+// ZITADEL reports every address as verified), Google's email_verified is
+// Google's own statement, so the hook makes no outbound call here.
 //
 // The identity is the subject (sub), never the email. A new account gets
 // username google.<sub>@<domain>, one Google IdP link and google_sub
@@ -637,18 +717,25 @@ func withoutUserActions(in map[string]json.RawMessage) map[string]json.RawMessag
 func (h *Hook) intentGoogle(ctx context.Context, p intentPayload, info idpInformation) Result {
 	sub := info.UserID
 	if !googleSubRE.MatchString(sub) {
+		h.logGoogleRawShape("intent_bad_google_identity", info.RawInformation)
 		return refuse(http.StatusForbidden, "intent_bad_google_identity", msgGoogleNotAllowed)
+	}
+	userinfo, ok := googleUserInfo(info.RawInformation)
+	if !ok {
+		h.logGoogleRawShape("intent_google_raw_unreadable", info.RawInformation)
+		return refuse(http.StatusForbidden, "intent_google_raw_unreadable", msgGoogleNotAllowed)
 	}
 	// The userinfo must name the same subject ZITADEL projected; an absent
 	// field is a refusal, not a pass.
-	if rawSub, _ := info.RawInformation["sub"].(string); rawSub != sub {
+	if rawSub, _ := userinfo["sub"].(string); rawSub != sub {
+		h.logGoogleRawShape("intent_google_sub_mismatch", info.RawInformation)
 		return refuse(http.StatusForbidden, "intent_google_sub_mismatch", msgGoogleNotAllowed)
 	}
-	email, _ := info.RawInformation["email"].(string)
-	emailVerified, _ := info.RawInformation["email_verified"].(bool)
+	email, _ := userinfo["email"].(string)
+	emailVerified, _ := userinfo["email_verified"].(bool)
 	hasVerifiedEmail := emailVerified && validEmail(email)
 
-	name, _ := info.RawInformation["name"].(string)
+	name, _ := userinfo["name"].(string)
 	name = strings.TrimSpace(name)
 	if name == "" && hasVerifiedEmail {
 		name = email[:strings.IndexByte(email, '@')]
