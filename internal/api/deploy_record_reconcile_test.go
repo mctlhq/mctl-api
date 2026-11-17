@@ -288,7 +288,7 @@ func TestDeployRecordOutcomeFields(t *testing.T) {
 // and a source that cannot be read records nothing.
 func TestDeployRecordReconcile_PromotionDigestCheck(t *testing.T) {
 	other := "sha256:" + strings.Repeat("d", 64)
-	run := func(reported string, getErr error) (*deployplan.Record, *reconcileStore) {
+	run := func(reported string, getErr error) *deployplan.Record {
 		src := newRec("dep_src", deployplan.RecordSubmitted, "wf-src", 3*time.Hour)
 		src.RunResult, src.ImageDigest = deployplan.RunSucceeded, goodDigest
 		prod := newRec("dep_prod", deployplan.RecordSubmitted, "wf-prod", 5*time.Minute)
@@ -300,18 +300,18 @@ func TestDeployRecordReconcile_PromotionDigestCheck(t *testing.T) {
 		}
 		exec := &outcomeExec{byName: map[string]*operations.WorkflowOutcome{"wf-prod": {Phase: "Succeeded", Outputs: outputs}}}
 		testReconciler(store, exec).reconcileOnce(context.Background())
-		return store.find("dep_prod"), store
+		return store.find("dep_prod")
 	}
 	for name, c := range map[string]struct{ reported, want string }{
 		"same digest":    {goodDigest, deployplan.DigestMatch},
 		"another digest": {other, deployplan.DigestMismatch},
 		"none reported":  {"", deployplan.DigestUnverified},
 	} {
-		if got, _ := run(c.reported, nil); got.DigestCheck != c.want || got.RunResult != deployplan.RunSucceeded {
+		if got := run(c.reported, nil); got.DigestCheck != c.want || got.RunResult != deployplan.RunSucceeded {
 			t.Errorf("%s: check %q result %q, want %q", name, got.DigestCheck, got.RunResult, c.want)
 		}
 	}
-	got, _ := run(goodDigest, errors.New("db down"))
+	got := run(goodDigest, errors.New("db down"))
 	if got.RunResult != "" || got.DigestCheck != "" {
 		t.Errorf("an unreadable source still recorded %q/%q", got.RunResult, got.DigestCheck)
 	}
