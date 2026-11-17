@@ -201,8 +201,7 @@ func (h *Handlers) DeployPromote(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: now, ExpiresAt: now.Add(ttl),
 	}
 	stored, replayed, err := h.opts.DeployPlans.Insert(r.Context(), plan)
-	switch {
-	case err != nil:
+	if err != nil {
 		slog.Error("deploy promote: storing", "error", err)
 		a.refuse(w, http.StatusServiceUnavailable, "deploy_plan_store_unavailable", "the plan store is not available")
 		return
