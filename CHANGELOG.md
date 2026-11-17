@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.165.1](https://github.com/mctlhq/mctl-api/compare/4.165.0...4.165.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* **api:** accept ZITADEL's multi-audience ID token on the release page ([ebca574](https://github.com/mctlhq/mctl-api/commit/ebca574540a806b56d50bc0822876442b6a24984))
+
 ## [4.165.0](https://github.com/mctlhq/mctl-api/compare/4.164.0...4.165.0) (2026-11-17)
 
 
