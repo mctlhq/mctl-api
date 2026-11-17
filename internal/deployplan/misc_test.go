@@ -38,7 +38,7 @@ func TestRequiredApproval(t *testing.T) {
 	if got != want {
 		t.Fatalf("approval = %+v, want %+v", got, want)
 	}
-	if a := RequiredApproval(EnvironmentPreview, ActionOnboard); !a.Required || a.Reason != "onboard_high_risk" {
+	if a := RequiredApproval(EnvironmentPreview, ActionOnboard); !a.Required || a.Role != "owner" || a.Reason != "preview_onboard_requires_approval" {
 		t.Fatalf("onboard approval = %+v", a)
 	}
 	if a := RequiredApproval("production", ActionUpdate); !a.Required {

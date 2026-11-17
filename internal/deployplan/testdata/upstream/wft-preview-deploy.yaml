@@ -107,6 +107,17 @@ spec:
         # commit, so the values the plan digest binds are the values that
         # deploy. Empty reads the default branch, as before.
         value: ""
+      - name: compiled_values
+        # Server-set (mctl-api, mctlhq/mctl-gitops#2654): the values compiled
+        # from a DeployIntent for a service that has no values.yaml in gitops
+        # yet, gzip then base64. Never accepted from a caller. Requires
+        # gitops_ref (the chart is read at that commit) and values_sha256.
+        # Empty keeps the values.yaml path.
+        value: ""
+      - name: values_sha256
+        # sha256 of the decompressed compiled_values; the deploy step
+        # recomputes it and refuses a mismatch.
+        value: ""
 
   templates:
     - name: preview-pipeline
@@ -178,6 +189,10 @@ spec:
                   value: "{{workflow.parameters.preview_id}}"
                 - name: gitops_ref
                   value: "{{workflow.parameters.gitops_ref}}"
+                - name: compiled_values
+                  value: "{{workflow.parameters.compiled_values}}"
+                - name: values_sha256
+                  value: "{{workflow.parameters.values_sha256}}"
                 - name: image_digest
                   value: "{{tasks.build-image.outputs.parameters.digest}}"
 
@@ -459,6 +474,10 @@ spec:
             value: "{{workflow.parameters.preview_id}}"
           - name: gitops_ref
             value: "{{workflow.parameters.gitops_ref}}"
+          - name: compiled_values
+            value: "{{workflow.parameters.compiled_values}}"
+          - name: values_sha256
+            value: "{{workflow.parameters.values_sha256}}"
           - name: image_digest
             value: ""
       outputs:
@@ -487,6 +506,10 @@ spec:
             value: "{{inputs.parameters.preview_id}}"
           - name: PARAM_GITOPS_REF
             value: "{{inputs.parameters.gitops_ref}}"
+          - name: PARAM_COMPILED_VALUES
+            value: "{{inputs.parameters.compiled_values}}"
+          - name: PARAM_VALUES_SHA256
+            value: "{{inputs.parameters.values_sha256}}"
           - name: PARAM_IMAGE_DIGEST
             value: "{{inputs.parameters.image_digest}}"
           - name: ARGO_WORKFLOW_NAME
@@ -616,6 +639,43 @@ spec:
           echo "${PREVIEW_ID}" > /tmp/preview_id
           echo "https://${HOST}" > /tmp/preview_url
 
+          # Values compiled from a DeployIntent (mctlhq/mctl-gitops#2654), for
+          # a service with no values.yaml in gitops. Both parameters are
+          # server-set; the grammar is asserted here before anything is
+          # decoded. The chart is read at gitops_ref, so that is required.
+          COMPILED="$PARAM_COMPILED_VALUES"
+          VALUES_SHA="$PARAM_VALUES_SHA256"
+          if [ -n "$COMPILED$VALUES_SHA" ]; then
+            if [ -z "$COMPILED" ] || [ -z "$VALUES_SHA" ]; then
+              echo "❌ compiled_values and values_sha256 are set together or not at all" >&2
+              exit 1
+            fi
+            if [ -z "$PARAM_GITOPS_REF" ]; then
+              echo "❌ compiled_values requires gitops_ref: the chart is read at that commit" >&2
+              exit 1
+            fi
+            case "$VALUES_SHA" in
+              *[!0-9a-f]* | "" )
+                echo "❌ values_sha256 must be 64 lowercase hex characters" >&2
+                exit 1
+                ;;
+            esac
+            if [ "${#VALUES_SHA}" -ne 64 ]; then
+              echo "❌ values_sha256 must be 64 lowercase hex characters" >&2
+              exit 1
+            fi
+            case "$COMPILED" in
+              *[!A-Za-z0-9+/=]* )
+                echo "❌ compiled_values must be base64" >&2
+                exit 1
+                ;;
+            esac
+            if [ "${#COMPILED}" -gt 96000 ]; then
+              echo "❌ compiled_values is over 96000 characters" >&2
+              exit 1
+            fi
+          fi
+
           # Read only, and the repository is public, so no credential: this step
           # also runs a Helm release of tenant-chosen values in a tenant namespace.
           git clone --depth=1 "https://github.com/${GITOPS_ORG}/${GITOPS_REPO}.git" /tmp/mctl-gitops
@@ -635,10 +695,35 @@ spec:
           CHART_PATH="/tmp/mctl-gitops/platform-gitops/helm-charts/base-service"
           SERVICE_VALUES="/tmp/mctl-gitops/platform-gitops/services/${TEAM}/${COMPONENT}/values.yaml"
           PREVIEW_VALUES="/tmp/preview-values.yaml"
+          REWRITE_ARGS=""
+
+          if [ -n "$COMPILED" ]; then
+            # One source of values, never two: a service that already has a
+            # values.yaml at this commit deploys from it.
+            if [ -e "$SERVICE_VALUES" ]; then
+              echo "❌ ${TEAM}/${COMPONENT} already has a values.yaml at ${GITOPS_REF}; compiled_values is for services not in gitops yet" >&2
+              exit 1
+            fi
+            # Bounded: the decompressed values are at most 1 MiB.
+            printf '%s' "$COMPILED" | base64 -d | gzip -dc | head -c 1048577 > /tmp/compiled-values.yaml
+            if [ "$(wc -c < /tmp/compiled-values.yaml)" -gt 1048576 ]; then
+              echo "❌ compiled values are over 1 MiB" >&2
+              exit 1
+            fi
+            GOT_SHA=$(sha256sum /tmp/compiled-values.yaml | cut -d' ' -f1)
+            if [ "$GOT_SHA" != "$VALUES_SHA" ]; then
+              echo "❌ compiled values hash ${GOT_SHA} does not match values_sha256 ${VALUES_SHA}" >&2
+              exit 1
+            fi
+            SERVICE_VALUES="/tmp/compiled-values.yaml"
+            # The image is built from source by this workflow, so the values
+            # may only name that repository.
+            REWRITE_ARGS="--require-image-repository ghcr.io/${GITOPS_ORG}/${COMPONENT}"
+          fi
 
           python3 /tmp/mctl-gitops/platform-gitops/argo-workflows/scripts/rewrite_preview_values.py \
             --team "${TEAM}" --service "${COMPONENT}" \
-            --in "${SERVICE_VALUES}" --out "${PREVIEW_VALUES}"
+            --in "${SERVICE_VALUES}" --out "${PREVIEW_VALUES}" ${REWRITE_ARGS}
 
           # preview.yaml (namespace, RBAC, SecretStore) is applied by ArgoCD
           # from the tenant chart. Do not --create-namespace: that would skip
@@ -661,6 +746,22 @@ spec:
             echo "Wait for ArgoCD Application tenant-${TEAM} to sync preview.yaml" >&2
             echo "(Namespace, helm-deploy Role, SecretStore), then retry." >&2
             exit 1
+          fi
+
+          # A preview compiled from an intent has no standing service behind
+          # it, so one that does not come up is removed here rather than left
+          # for the reaper at its expiry. Covers the TLS Secret cert-manager
+          # leaves behind, as preview-delete does.
+          if [ -n "$COMPILED" ]; then
+            cleanup_failed_preview() {
+              rc=$?
+              if [ "$rc" -ne 0 ]; then
+                echo "preview ${RELEASE} failed (exit ${rc}); removing it" >&2
+                helm uninstall "${RELEASE}" -n "${NS}" --wait || true
+                kubectl delete secret "${RELEASE}-tls" -n "${NS}" --ignore-not-found || true
+              fi
+            }
+            trap cleanup_failed_preview EXIT
           fi
 
           helm upgrade --install "${RELEASE}" "${CHART_PATH}" \

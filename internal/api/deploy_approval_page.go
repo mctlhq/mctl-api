@@ -397,7 +397,7 @@ func (h *Handlers) readDeployApproval(r *http.Request, d *deployDecider, user *a
 	if workitems.IntentHash(deployApplyIntent(p)) != a.IntentHash {
 		return nil, &deployPageRefusal{status: http.StatusConflict, msg: "The plan does not match what this approval is bound to; ask for a new approval.", audit: "intent mismatch"}
 	}
-	_, unapplicable := planApplicableCheck(p, h.deployPlanNow())
+	_, unapplicable := planApplicableCheck(p, h.deployPlanNow(), h.opts.PlatformImageOrg)
 	return &deployShown{approval: a, plan: p, context: h.decisionContext(a), unapplicable: unapplicable}, nil
 }
 

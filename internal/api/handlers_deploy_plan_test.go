@@ -173,7 +173,7 @@ type planFixture struct {
 	now     time.Time
 }
 
-func newPlanFixture(t *testing.T) *planFixture {
+func newPlanFixture(t *testing.T, edit ...func(*mctlapi.Options)) *planFixture {
 	t.Helper()
 	t.Setenv("AUTH_REQUIRED", "false")
 	f := &planFixture{
@@ -186,13 +186,17 @@ func newPlanFixture(t *testing.T) *planFixture {
 	}}}}
 	portal := httptest.NewServer(http.HandlerFunc(bindingAnswer(false)))
 	t.Cleanup(portal.Close)
-	f.router = mctlapi.NewRouter(mctlapi.Options{
+	opts := mctlapi.Options{
 		Registry: operations.NewRegistry(), GitReader: git, ArgoCD: &fakeArgoCD{}, AuditLog: f.log, Executor: f.exec,
 		BackstageInternalURL: portal.URL, BackstageGithubAppConnectToken: "tok",
 		SourceRepoBindings:  repoBindings{},
 		DeployContentReader: f.content, DeployPlans: f.store, DeployRecords: f.records, DeployGitops: f.gitops,
-		PlatformDomain: "mctl.ai", Clock: func() time.Time { return f.now },
-	})
+		PlatformDomain: "mctl.ai", PlatformImageOrg: "mctlhq", Clock: func() time.Time { return f.now },
+	}
+	for _, e := range edit {
+		e(&opts)
+	}
+	f.router = mctlapi.NewRouter(opts)
 	return f
 }
 
@@ -344,7 +348,6 @@ func TestDeployPlan_Refusals(t *testing.T) {
 		{"nonexistent sha", planDev, func(f *planFixture, _ map[string]any) { f.content.commitErr = deployanalyze.ErrRevisionUnreadable }, intentBody, 422, "deploy_revision_unreadable"},
 		{"github 5xx", planDev, func(f *planFixture, _ map[string]any) { f.content.commitErr = deployanalyze.ErrGitHubUnavailable }, intentBody, 502, "deploy_github_unavailable"},
 		{"github malformed", planDev, func(f *planFixture, _ map[string]any) { f.content.commitErr = deployanalyze.ErrGitHubMalformed }, intentBody, 502, "deploy_github_malformed"},
-		{"service absent", planDev, func(f *planFixture, _ map[string]any) { f.gitops.exists = false }, intentBody, 422, "onboard_requires_preview_onboard"},
 		{"gitops unreadable is not onboard", planDev, func(f *planFixture, _ map[string]any) {
 			f.gitops.err = errors.New("stale checkout")
 			f.gitops.exists = false

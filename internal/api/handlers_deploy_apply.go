@@ -64,7 +64,7 @@ const (
 // deployServerSetParams are preview-deploy inputs only the apply route sets,
 // from the approved plan. A request body naming one is refused on the
 // generic execute path.
-var deployServerSetParams = []string{"preview_id", "gitops_ref"}
+var deployServerSetParams = []string{"preview_id", "gitops_ref", "compiled_values", "values_sha256"}
 
 // deployApplyIntent is what a deploy.apply grant binds, built from the
 // stored plan alone.
@@ -123,7 +123,7 @@ type planRefusal struct {
 // fields, or not reproducible by preview-deploy. It returns the parsed
 // intent. The apply route and the decide page ask the same question, so the
 // page never offers to approve what the apply would refuse.
-func planApplicableCheck(p *deployplan.Plan, now time.Time) (deployplan.Intent, *planRefusal) {
+func planApplicableCheck(p *deployplan.Plan, now time.Time, imageOrg string) (deployplan.Intent, *planRefusal) {
 	if p.Expired(now) {
 		return deployplan.Intent{}, &planRefusal{http.StatusConflict, codeDeployPlanExpired, "the plan has expired; plan again"}
 	}
@@ -143,21 +143,30 @@ func planApplicableCheck(p *deployplan.Plan, now time.Time) (deployplan.Intent, 
 		return deployplan.Intent{}, &planRefusal{http.StatusInternalServerError, codeDeployApplyUnavailable, "the stored plan's intent cannot be read"}
 	}
 	switch {
-	case p.Environment != deployplan.EnvironmentPreview || p.Action != deployplan.ActionUpdate:
-		return deployplan.Intent{}, &planRefusal{http.StatusUnprocessableEntity, codeDeployApplyNotReproducible, "only a preview update plan can be applied"}
-	case p.IntentChangesValues == nil || *p.IntentChangesValues:
+	case p.Environment != deployplan.EnvironmentPreview || (p.Action != deployplan.ActionUpdate && p.Action != deployplan.ActionOnboard):
+		return deployplan.Intent{}, &planRefusal{http.StatusUnprocessableEntity, codeDeployApplyNotReproducible, "only a preview update or onboard plan can be applied"}
+	case p.Action == deployplan.ActionUpdate && (p.IntentChangesValues == nil || *p.IntentChangesValues):
 		return deployplan.Intent{}, &planRefusal{http.StatusUnprocessableEntity, codeDeployApplyNotReproducible,
-			"the intent changes the service's values (runtime, env, resources or secrets), and preview-deploy renders the gitops values; apply it after preview-from-intent lands, or change the values in gitops"}
+			"the intent changes the service's values (runtime, env, resources or secrets), and preview-deploy renders the gitops values; change the values in gitops first"}
 	case intent.Spec.Source.Context != "." && intent.Spec.Source.Context != "":
 		return deployplan.Intent{}, &planRefusal{http.StatusUnprocessableEntity, codeDeployApplyNotReproducible,
 			"the preview build supports only the repository root as build context"}
+	}
+	if p.Action == deployplan.ActionOnboard {
+		// The approval page asks this too, so it never offers a grant the
+		// apply would refuse because the compiler or the image organization
+		// changed since the plan was made.
+		if _, _, err := deployplan.OnboardValuesForPlan(p, intent, imageOrg); err != nil {
+			return deployplan.Intent{}, &planRefusal{http.StatusUnprocessableEntity, codeDeployApplyNotReproducible,
+				"the plan's values cannot be reproduced; plan again"}
+		}
 	}
 	return intent, nil
 }
 
 // planApplicable is planApplicableCheck answered and audited.
 func (h *Handlers) planApplicable(w http.ResponseWriter, a *deployAudit, p *deployplan.Plan) (deployplan.Intent, bool) {
-	intent, ref := planApplicableCheck(p, h.deployPlanNow())
+	intent, ref := planApplicableCheck(p, h.deployPlanNow(), h.opts.PlatformImageOrg)
 	if ref != nil {
 		a.refuse(w, ref.status, ref.code, ref.msg)
 		return deployplan.Intent{}, false
@@ -359,6 +368,19 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 		"preview_id":      p.PreviewID,
 		"gitops_ref":      p.GitopsBaseSHA,
 	})
+	if p.Action == deployplan.ActionOnboard {
+		// The values come from the approved plan, never from the caller:
+		// rebuilt from its intent and held to the redacted rendering the
+		// plan's digest binds.
+		b64, sha, err := deployplan.OnboardValuesForPlan(p, intent, h.opts.PlatformImageOrg)
+		if err != nil {
+			slog.Error("deploy apply: onboard values", "plan", p.ID, "error", err)
+			a.refuse(w, http.StatusUnprocessableEntity, codeDeployApplyNotReproducible,
+				"the plan's values cannot be reproduced; plan again")
+			return
+		}
+		input["compiled_values"], input["values_sha256"] = b64, sha
+	}
 	if errs := h.opts.Registry.ValidateInput(op, input); len(errs) > 0 {
 		slog.Error("deploy apply: plan-built input does not validate", "plan", p.ID, "errors", strings.Join(errs, "; "))
 		a.refuse(w, http.StatusInternalServerError, codeDeployApplyUnavailable, "the plan cannot be turned into a valid preview-deploy")
@@ -414,6 +436,11 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 		map[string]string{"revalidation": reval.Revalidation, "plan_id": p.ID})
 
 	auditParams := redactSecrets(op, input)
+	// The compiled values hold real Vault paths the plan stores redacted;
+	// values_sha256 already identifies them.
+	if v, ok := auditParams["compiled_values"]; ok {
+		auditParams["compiled_values"] = fmt.Sprintf("[%d characters, see values_sha256]", len(v))
+	}
 	auditParams["plan_id"], auditParams["plan_digest"] = p.ID, p.Digest
 	auditParams["grant_ref"], auditParams["subject_principal_id"] = spent.ID, spent.DecidedByPrincipalID
 	// preview-deploy does not require an execution today
