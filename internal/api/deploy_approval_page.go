@@ -188,7 +188,7 @@ func setDeployCookie(w http.ResponseWriter, value string, maxAge int) {
 
 // deployPage draws the plan's diff. html/template escapes every value; there
 // is no script on the page.
-var deployPage = shellPage("deploy-approval", `{{with .Diff}}<pre style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:.8125rem;margin:.5rem 0 1rem">{{.}}</pre>{{end}}
+var deployPage = shellPage("deploy-approval", `{{with .Diff}}<pre style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:.8125rem;margin:.5rem 0 1rem;max-height:18rem;overflow:auto">{{.}}</pre>{{end}}
 {{if .SignIn}}<form class="actions" method="post" action="{{.SignIn.Action}}">
 <input type="hidden" name="approval_ref" value="{{.SignIn.ApprovalRef}}">
 <button type="submit">Sign in to review this deploy</button></form>{{end}}
@@ -215,7 +215,7 @@ func (d *deployDecider) renderPage(w http.ResponseWriter, status int, title stri
 		}
 	}
 	renderShellPage(w, status, "default-src 'none'; style-src 'unsafe-inline'; form-action "+formAction+"; frame-ancestors 'none'; base-uri 'none'",
-		deployPage, shellData{Title: title, Lines: lines, Links: p.Links, Page: p})
+		deployPage, shellData{Title: title, Lines: lines, Links: p.Links, Wide: true, Page: p})
 }
 
 func (d *deployDecider) failed(w http.ResponseWriter, status int, msg string) {
@@ -548,7 +548,7 @@ func (h *Handlers) handleDeployApprovalCallback(w http.ResponseWriter, r *http.R
 	}
 	page.Decide = &struct{ Action, Challenge, CSRF string }{Action: deployConfirmPath, Challenge: challenge, CSRF: csrf}
 	d.renderPage(w, http.StatusOK, "Approve or reject this deploy", append(shown.lines(display),
-		"Approving lets the requester apply exactly this plan, once, to the preview above. It deploys nothing by itself."), page)
+		"Approving lets the requester apply exactly this plan, once, to "+approvalTarget(shown.plan)+". It deploys nothing by itself."), page)
 }
 
 // handleDeployApprovalConfirm: POST /deploy/approvals/confirm.
@@ -643,7 +643,7 @@ func (h *Handlers) handleDeployApprovalConfirm(w http.ResponseWriter, r *http.Re
 		title, outcome = "Deploy rejected", "The assistant that asked cannot apply this plan. Nothing was deployed."
 	}
 	shown.approval = decided
-	d.renderPage(w, http.StatusOK, title, append(shown.lines(id.Display), outcome), deployPageData{Diff: shown.plan.Diff, Links: shown.links()})
+	d.renderPage(w, http.StatusOK, title, append(shown.lines(id.Display), outcome, "You can close this tab."), deployPageData{Diff: shown.plan.Diff, Links: shown.links()})
 }
 
 // auditDeployPage records what the page itself decided. Ids only.
@@ -660,6 +660,15 @@ func (h *Handlers) auditDeployPage(r *http.Request, user *auth.User, id auth.Ide
 		RiskLevel:  string(operations.RiskMedium),
 		Message:    msg,
 	})
+}
+
+// approvalTarget names what an approved plan is applied to: a promotion or a
+// rollback changes production, any other plan is a preview.
+func approvalTarget(p *deployplan.Plan) string {
+	if p.Environment == deployplan.EnvironmentProduction {
+		return "production, as shown above"
+	}
+	return "the preview above"
 }
 
 // hostLine names what the plan serves: a preview's address, or, for a
