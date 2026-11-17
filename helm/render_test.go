@@ -1166,3 +1166,116 @@ func TestIngressExtraPathsRoutesReleaseApprovals(t *testing.T) {
 		t.Errorf("api.mctl.ai paths = %v, want the defaults plus /release", api)
 	}
 }
+
+// --- extension slots (extraContainers / extraVolumes / extraVolumeMounts /
+// podSecurityContext) -------------------------------------------------------
+
+type slotPodSpec struct {
+	SecurityContext map[string]any `yaml:"securityContext"`
+	Containers      []container    `yaml:"containers"`
+	Volumes         []volume       `yaml:"volumes"`
+}
+
+type slotDeployment struct {
+	Spec struct {
+		Template struct {
+			Spec slotPodSpec `yaml:"spec"`
+		} `yaml:"template"`
+	} `yaml:"spec"`
+}
+
+func renderSlots(t *testing.T, setArgs ...string) slotDeployment {
+	t.Helper()
+	_, raw := renderDeployment(t, setArgs...)
+	var d slotDeployment
+	if err := yaml.Unmarshal(raw, &d); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return d
+}
+
+// TestDefaultDeploymentMatchesGolden pins the default render byte for byte.
+// The slots are empty by default and must render nothing; a stray blank
+// line, a "securityContext: {}" or a "containers" reordering all show up
+// here. Regenerate deliberately with UPDATE_GOLDEN=1 when the chart changes
+// on purpose, and read the diff.
+func TestDefaultDeploymentMatchesGolden(t *testing.T) {
+	_, got := renderDeployment(t)
+	const golden = "testdata/default-deployment.golden.yaml"
+	if os.Getenv("UPDATE_GOLDEN") != "" {
+		if err := os.WriteFile(golden, got, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("default render drifted from %s (UPDATE_GOLDEN=1 to regenerate after review)\n--- got ---\n%s", golden, got)
+	}
+}
+
+func TestDefaultRenderHasNoSlots(t *testing.T) {
+	d := renderSlots(t)
+	if d.Spec.Template.Spec.SecurityContext != nil {
+		t.Errorf("default render must not set a pod securityContext, got %v", d.Spec.Template.Spec.SecurityContext)
+	}
+	if n := len(d.Spec.Template.Spec.Containers); n != 1 {
+		t.Errorf("default render must have exactly one container, got %d", n)
+	}
+}
+
+func TestSlotsRender(t *testing.T) {
+	d := renderSlots(t,
+		"--set-json", `extraContainers=[{"name":"ctl-reader","image":"example/reader:1","securityContext":{"allowPrivilegeEscalation":false,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}},"volumeMounts":[{"name":"shared","mountPath":"/shared"}]}]`,
+		"--set-json", `extraVolumes=[{"name":"shared","emptyDir":{"medium":"Memory"}}]`,
+		"--set-json", `extraVolumeMounts=[{"name":"shared","mountPath":"/var/run/ctl","readOnly":true}]`,
+		"--set-json", `podSecurityContext={"fsGroup":1000,"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}`,
+	)
+	spec := d.Spec.Template.Spec
+
+	if len(spec.Containers) != 2 || spec.Containers[0].Name != "mctl-api" || spec.Containers[1].Name != "ctl-reader" {
+		t.Fatalf("want [mctl-api ctl-reader], got %+v", spec.Containers)
+	}
+	vm, ok := findVolumeMount(spec.Containers[0], "shared")
+	if !ok || vm.MountPath != "/var/run/ctl" || !vm.ReadOnly {
+		t.Errorf("extraVolumeMounts must land on the mctl-api container only: %+v ok=%v", vm, ok)
+	}
+	// The sidecar must not inherit the main container's mounts or env.
+	if len(spec.Containers[1].VolumeMounts) != 1 || len(spec.Containers[1].Env) != 0 || len(spec.Containers[1].EnvFrom) != 0 {
+		t.Errorf("sidecar must carry only what its own spec lists: %+v", spec.Containers[1])
+	}
+	var haveShared, haveCache bool
+	for _, v := range spec.Volumes {
+		haveShared = haveShared || v.Name == "shared"
+		haveCache = haveCache || v.Name == "gitops-cache"
+	}
+	if !haveShared || !haveCache {
+		t.Errorf("extraVolumes must append to, not replace, the chart volumes: %+v", spec.Volumes)
+	}
+	sc := spec.SecurityContext
+	if sc["fsGroup"] != 1000 || sc["runAsNonRoot"] != true {
+		t.Errorf("podSecurityContext not rendered: %v", sc)
+	}
+	if p, _ := sc["seccompProfile"].(map[string]any); p["type"] != "RuntimeDefault" {
+		t.Errorf("seccompProfile lost: %v", sc)
+	}
+}
+
+// Each slot alone, so a template that wires one slot to another's value
+// (or drops one) fails on the slot it breaks.
+func TestSlotsRenderIndependently(t *testing.T) {
+	d := renderSlots(t, "--set-json", `extraVolumes=[{"name":"only","emptyDir":{}}]`)
+	if len(d.Spec.Template.Spec.Containers) != 1 || d.Spec.Template.Spec.SecurityContext != nil {
+		t.Errorf("extraVolumes alone must not add containers or a securityContext")
+	}
+	if _, ok := findVolumeMount(d.Spec.Template.Spec.Containers[0], "only"); ok {
+		t.Errorf("extraVolumes alone must not mount anything")
+	}
+	d = renderSlots(t, "--set-json", `podSecurityContext={"fsGroup":2000}`)
+	if d.Spec.Template.Spec.SecurityContext["fsGroup"] != 2000 || len(d.Spec.Template.Spec.Containers) != 1 {
+		t.Errorf("podSecurityContext alone: %+v", d.Spec.Template.Spec)
+	}
+}

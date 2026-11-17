@@ -16,6 +16,10 @@ spec:
         app.kubernetes.io/name: {{ .Chart.Name }}
     spec:
       serviceAccountName: {{ .Chart.Name }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.topologySpreadConstraints }}
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
@@ -377,6 +381,12 @@ spec:
               mountPath: /etc/mctl-api/usage-pricing
               readOnly: true
             {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        {{- with .Values.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       volumes:
         - name: gitops-cache
           emptyDir:
@@ -396,8 +406,11 @@ spec:
             # branch. It deliberately does NOT get the 0444 fix: ssh(1) refuses
             # a private key that is group- or world-readable, so this one needs
             # securityContext.fsGroup on the pod instead — a change with a
-            # wider blast radius than this chart has needed so far. Tracked in
-            # mctlhq/mctl-api#307; fix it before anyone sets this value.
+            # wider blast radius than this chart has needed so far. The chart
+            # now has the slot (values podSecurityContext, empty by default),
+            # but nothing sets it here: fsGroup is still a per-deployment
+            # decision. Tracked in mctlhq/mctl-api#307; set
+            # podSecurityContext.fsGroup before anyone sets this value.
             defaultMode: 0400
         {{- end }}
         {{- if .Values.githubAppTokenSecret }}
@@ -411,7 +424,7 @@ spec:
             secretName: {{ .Values.githubAppTokenSecret }}
             # 0444, not 0400. Kubelet writes secret volume files as root:root
             # unless the pod sets securityContext.fsGroup, and this chart sets
-            # no securityContext at all while the image runs as uid 1000
+            # no securityContext by default (podSecurityContext is empty) while the image runs as uid 1000
             # (Dockerfile: adduser -u 1000, USER app:app). At 0400 the file
             # lands -r-------- root root and every read returns EACCES — and
             # because the credential source is bound once at startup and does
@@ -454,4 +467,7 @@ spec:
             items:
               - key: {{ .Values.usagePricingConfigMapKey | default "catalog.json" }}
                 path: catalog.json
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}
