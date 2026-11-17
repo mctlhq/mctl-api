@@ -56,6 +56,49 @@ type OIDCProviderConfigEntry struct {
 	// SubjectAudiences grants extra accepted audiences to single subjects
 	// (OIDCProviderSpec.SubjectAudiences).
 	SubjectAudiences map[string][]string `json:"subject_audiences,omitempty"`
+	// ServiceSubjects maps exact machine subjects to the one audience each
+	// must present, and resolves them to kind service on this otherwise
+	// human entry (OIDCProviderSpec.ServiceSubjects).
+	ServiceSubjects ServiceSubjects `json:"service_subjects,omitempty"`
+}
+
+// ServiceSubjects is the service_subjects value. It decodes like a
+// map[string]string but refuses a repeated key, which encoding/json would
+// resolve silently to the last one.
+type ServiceSubjects map[string]string
+
+// UnmarshalJSON decodes a JSON object of string values, refusing duplicate
+// keys, null and any other shape.
+func (s *ServiceSubjects) UnmarshalJSON(data []byte) error {
+	dec := json.NewDecoder(strings.NewReader(string(data)))
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return fmt.Errorf("service_subjects must be an object of subject to audience")
+	}
+	out := ServiceSubjects{}
+	for dec.More() {
+		kt, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		key, _ := kt.(string)
+		var aud string
+		if err := dec.Decode(&aud); err != nil {
+			return fmt.Errorf("service_subjects audience for a subject must be a string: %w", err)
+		}
+		if _, dup := out[key]; dup {
+			return fmt.Errorf("service_subjects lists subject %q twice", key)
+		}
+		out[key] = aud
+	}
+	if _, err := dec.Token(); err != nil {
+		return err
+	}
+	*s = out
+	return nil
 }
 
 func (e OIDCProviderConfigEntry) spec() OIDCProviderSpec {
@@ -71,6 +114,7 @@ func (e OIDCProviderConfigEntry) spec() OIDCProviderSpec {
 		GrantGroups:         e.GrantGroups != nil && *e.GrantGroups,
 		CustomersOrgID:      e.CustomersOrgID,
 		SubjectAudiences:    e.SubjectAudiences,
+		ServiceSubjects:     e.ServiceSubjects,
 	}
 }
 
@@ -143,6 +187,9 @@ func ParseOIDCProviders(raw string) ([]OIDCProviderConfigEntry, error) {
 		if err := validSubjectAudiences(e); err != nil {
 			return nil, err
 		}
+		if err := validServiceSubjects(e); err != nil {
+			return nil, err
+		}
 		if surfaceid.IsSurface(e.Name) {
 			return nil, fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q collides with a registered surface name", e.Name)
 		}
@@ -193,6 +240,47 @@ func validSubjectAudiences(e *OIDCProviderConfigEntry) error {
 				// would pass here and never match at runtime.
 				return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q grants subject %q an empty or padded audience", e.Name, subject)
 			}
+		}
+	}
+	return nil
+}
+
+// validServiceSubjects refuses a service_subjects map that is empty, names a
+// subject or audience that is empty, padded or a wildcard, sits on the dex
+// slot, a non-human entry (already something else), a customers entry, or an
+// entry with a mutable subject claim, or lists a subject that
+// subject_audiences also lists. A "null" value already failed decoding.
+func validServiceSubjects(e *OIDCProviderConfigEntry) error {
+	if e.ServiceSubjects == nil {
+		return nil
+	}
+	if e.Name == ProviderDex {
+		return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q may not set service_subjects", e.Name)
+	}
+	if len(e.ServiceSubjects) == 0 {
+		return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q has an empty service_subjects (omit it instead)", e.Name)
+	}
+	if e.Kind != "" && e.Kind != KindHuman {
+		return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q has kind %q: service_subjects applies only to a human entry", e.Name, e.Kind)
+	}
+	if e.CustomersOrgID != "" {
+		return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q may not combine service_subjects with customers_org_id", e.Name)
+	}
+	if c := strings.TrimSpace(e.SubjectClaim); c != "" && c != "sub" {
+		return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q may set service_subjects only with the default subject claim sub", e.Name)
+	}
+	for subject, aud := range e.ServiceSubjects {
+		if strings.TrimSpace(subject) == "" || subject != strings.TrimSpace(subject) {
+			return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q has a service_subjects key that is empty or padded", e.Name)
+		}
+		if strings.ContainsAny(subject, "*?[") {
+			return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q has a service_subjects key with a wildcard character: exact subjects only", e.Name)
+		}
+		if strings.TrimSpace(aud) == "" || aud != strings.TrimSpace(aud) {
+			return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q pins service subject %q to an empty or padded audience", e.Name, subject)
+		}
+		if _, both := e.SubjectAudiences[subject]; both {
+			return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q lists subject %q in both subject_audiences and service_subjects", e.Name, subject)
 		}
 	}
 	return nil

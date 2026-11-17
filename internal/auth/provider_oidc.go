@@ -121,6 +121,14 @@ type OIDCProviderSpec struct {
 	// anyone else. The signature, issuer and expiry are checked as for every
 	// token; only the audience decision differs.
 	SubjectAudiences map[string][]string
+	// ServiceSubjects names verified machine subjects that resolve to
+	// KindService although the entry itself is human, each pinned to one
+	// audience (the glovo consent gate needs a service identity on the one
+	// ZITADEL issuer). Exact subjects only, never a pattern and never read
+	// from token claims; the token must carry the pinned audience whatever
+	// the entry's enforcement says, and such an identity carries no groups.
+	// Empty means every identity has the entry's Kind, as before.
+	ServiceSubjects map[string]string
 }
 
 func (s OIDCProviderSpec) withDefaults() OIDCProviderSpec {
@@ -220,7 +228,18 @@ func (p *oidcProvider) Verify(ctx context.Context, raw string) (*Verified, error
 	}
 
 	subject, _ := stringClaim(tok.Claims, p.spec.SubjectClaim)
+	kind := p.spec.Kind
+	serviceAud, isServiceSubject := p.spec.ServiceSubjects[subject]
 	switch {
+	case isServiceSubject:
+		// A listed machine subject is accepted only on its own pinned
+		// audience, in audit mode too: the elevated kind is never granted on
+		// an audience mismatch.
+		if serviceAud == "" || !slices.Contains(tok.Audience, serviceAud) {
+			federationAudienceRejected.WithLabelValues(p.spec.Name).Inc()
+			return nil, fmt.Errorf("token audience %v does not include the audience pinned for this service subject", tok.Audience)
+		}
+		kind = KindService
 	case p.spec.SkipAudienceCheck:
 		federationAudienceCheckSkipped.WithLabelValues(p.spec.Name).Inc()
 	case audienceMatches(tok.Audience, p.spec.Audiences):
@@ -295,13 +314,18 @@ func (p *oidcProvider) Verify(ctx context.Context, raw string) (*Verified, error
 		}
 	}
 
+	if isServiceSubject {
+		// A machine identity proves who it is, never a tenant or admin group.
+		groups = nil
+	}
+
 	var customer *CustomerProof
 	if p.spec.CustomersOrgID != "" {
 		customer, err = ReadCustomerProofWith(tok.Claims, p.spec.CustomersOrgID, p.spec.CustomersGoogle)
 		if err != nil {
 			return nil, fmt.Errorf("%s token refused: %w", p.spec.Name, err)
 		}
-		if customer != nil && p.spec.Kind != KindHuman {
+		if customer != nil && kind != KindHuman {
 			return nil, fmt.Errorf("%s token refused: a customer is a person, but the entry's kind is %q", p.spec.Name, p.spec.Kind)
 		}
 		if customer != nil {
@@ -312,7 +336,7 @@ func (p *oidcProvider) Verify(ctx context.Context, raw string) (*Verified, error
 	}
 
 	return &Verified{
-		Identity: Identity{Provider: p.spec.Name, Issuer: tok.Issuer, Subject: subject, Display: display, Kind: p.spec.Kind, Customer: customer},
+		Identity: Identity{Provider: p.spec.Name, Issuer: tok.Issuer, Subject: subject, Display: display, Kind: kind, Customer: customer},
 		Claims:   Claims{Groups: groups},
 	}, nil
 }
