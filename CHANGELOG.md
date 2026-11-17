@@ -1,5 +1,29 @@
 # Changelog
 
+## [4.164.0](https://github.com/mctlhq/mctl-api/compare/4.163.0...4.164.0) (2026-11-17)
+
+
+### Features
+
+* **api:** admin route for the mctl-glovo C2 kill switch (dark) ([31dcf27](https://github.com/mctlhq/mctl-api/commit/31dcf274b88d4532449ad23811d389c5e03e2fa2))
+* **api:** admin route for the mctl-glovo C2 kill switch (dark) ([e77ef04](https://github.com/mctlhq/mctl-api/commit/e77ef045904d3be6a698e5bd95316fbb373787df))
+* **deploy-record:** record commit_sha, argo_revision and health from the workflow ([4886d07](https://github.com/mctlhq/mctl-api/commit/4886d07f40f50538d88481e0b853572b3d234c55))
+* **deploy-record:** record commit_sha, argo_revision and health from the workflow ([35aa6c7](https://github.com/mctlhq/mctl-api/commit/35aa6c78844ca8b363c3b51f6e052ed1fa032faf)), closes [#1048](https://github.com/mctlhq/mctl-api/issues/1048)
+* **helm:** releaseApprovalUISecret slot for the release approval page ([dee0939](https://github.com/mctlhq/mctl-api/commit/dee09394a05e3dd1effd6e8f587df855884ec05c))
+* **helm:** releaseApprovalUISecret slot for the release approval page ([679187c](https://github.com/mctlhq/mctl-api/commit/679187cda916df48d7559e2fa9aa1827283c9c7f)), closes [#1022](https://github.com/mctlhq/mctl-api/issues/1022)
+* **release:** ledger kind and routes for owner release grants (S1) ([7bc5bdb](https://github.com/mctlhq/mctl-api/commit/7bc5bdb6b8908883789dca759b405ccbcd41369a))
+* **release:** ledger kind and routes for owner release grants (S1) ([51ebf8f](https://github.com/mctlhq/mctl-api/commit/51ebf8f338428729a98acf9cddf71d54498df44d))
+* **release:** release approval page decides release grants (S2) ([45ae2d8](https://github.com/mctlhq/mctl-api/commit/45ae2d896d6fe631690d9e6509d9fae0f702e4d6))
+* **release:** release approval page decides release grants (S2) ([f723d73](https://github.com/mctlhq/mctl-api/commit/f723d73d92796351eeb09b0510bc3f66178d6884)), closes [#1022](https://github.com/mctlhq/mctl-api/issues/1022)
+
+
+### Bug Fixes
+
+* **api:** clear golangci-lint findings on the kill-switch PR ([4081adc](https://github.com/mctlhq/mctl-api/commit/4081adc4ecd0eccbacb0f00acf59cbe982f68798))
+* **api:** kill-switch router test, audit, ZITADEL token file ([2550374](https://github.com/mctlhq/mctl-api/commit/2550374c93e07add137240b62a5dc8284314ed78))
+* **release:** match the reader's git ref exactly, not by suffix ([836c940](https://github.com/mctlhq/mctl-api/commit/836c9402ac262fd52705525353fb60538f30a3f3)), closes [#1022](https://github.com/mctlhq/mctl-api/issues/1022)
+* **release:** separate GHCR credential; review P3s on [#1090](https://github.com/mctlhq/mctl-api/issues/1090) ([ad23f0c](https://github.com/mctlhq/mctl-api/commit/ad23f0c317d2608c0add0dda81d31403b5fb827f))
+
 ## [4.163.0](https://github.com/mctlhq/mctl-api/compare/4.162.0...4.163.0) (2026-11-16)
 
 
