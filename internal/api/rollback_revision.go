@@ -94,8 +94,13 @@ func (h *Handlers) prepareRollbackRevision(w http.ResponseWriter, r *http.Reques
 	switch why := rollbackRecordUnusable(rec, input["team_name"], input["component_name"]); why {
 	case "":
 	case "other_service":
+		// The audit row is filed under the caller's team and readable by its
+		// members, so it must not name the record's owner either: that is
+		// what the 404 hides. The owner goes to the operator log only.
+		slog.Warn("rollback-revision: deployment belongs to another service",
+			"deployment", rec.ID, "owner", rec.Tenant+"/"+rec.Service, "user", user.ID)
 		return deny(http.StatusNotFound, codeRollbackDeploymentNotFound, "no such deployment for this service",
-			"denied:"+codeRollbackDeploymentNotFound+": record belongs to "+rec.Tenant+"/"+rec.Service)
+			"denied:"+codeRollbackDeploymentNotFound)
 	default:
 		return deny(http.StatusConflict, codeRollbackDeploymentNotUsable, "this deployment cannot be rolled back to: "+why, "denied:"+codeRollbackDeploymentNotUsable+": "+why)
 	}

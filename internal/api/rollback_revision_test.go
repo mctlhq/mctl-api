@@ -130,3 +130,35 @@ func TestRollbackRevision_StoreErrorRefuses(t *testing.T) {
 		t.Fatalf("status %d, submitted %d: %s", code, len(f.exec.submitted), out)
 	}
 }
+
+// The 404 for a record of another service hides its owner; the audit row is
+// filed under the caller's team and readable by its members, so it must not
+// name the owner either.
+func TestRollbackRevision_AuditDoesNotNameTheRecordOwner(t *testing.T) {
+	for _, owner := range []struct{ tenant, service string }{{"other", "web"}, {"erpact", "secret-svc"}} {
+		f := newRollbackFixture(t)
+		f.put(func(r *deployplan.Record) { r.Tenant, r.Service = owner.tenant, owner.service })
+		code, out := f.post(rbBody(), auth.NewGitHubUser("dan-dev", []string{"erpact"}))
+		if code != http.StatusNotFound {
+			t.Fatalf("status %d: %s", code, out)
+		}
+		pair := owner.tenant + "/" + owner.service
+		for _, e := range f.audit.List(50) {
+			if strings.Contains(e.Message, pair) {
+				t.Fatalf("audit row names the record owner: %q", e.Message)
+			}
+		}
+		if strings.Contains(out, pair) {
+			t.Fatalf("response names the record owner: %s", out)
+		}
+	}
+}
+
+func TestRollbackRevision_ServerSetParamsAreNotAdvertisedAsRequired(t *testing.T) {
+	op, _ := operations.NewRegistry().Get("rollback-revision")
+	for _, p := range op.Parameters {
+		if (p.Name == "target_commit" || p.Name == "expected_digest") && p.Required {
+			t.Fatalf("%s is advertised as a required caller input", p.Name)
+		}
+	}
+}

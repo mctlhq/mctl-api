@@ -613,9 +613,11 @@ var builtinOperations = []Operation{
 			{Name: "component_name", Type: "string", Required: true, Description: "Service name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
 			{Name: "deployment_id", Type: "string", Required: true, Description: "Deployment (dep_...) to restore; read from mctl_get_deployment", Pattern: "^dep_[0-9a-f-]{36}$"},
 			// Taken from the deployment's record by the execute handler; a body
-			// naming either is refused. Required: Argo has no default for them.
-			{Name: "target_commit", Type: "string", Required: true, Pattern: "^[0-9a-f]{40}$", Description: "Server-set from the deployment record; never accepted from a caller."},
-			{Name: "expected_digest", Type: "string", Required: true, Pattern: "^sha256:[0-9a-f]{64}$", Description: "Server-set from the deployment record; never accepted from a caller."},
+			// naming either is refused. Optional in the schema, like preview-deploy's
+			// server-set params, so clients do not list them as caller inputs; the
+			// handler always sets them.
+			{Name: "target_commit", Type: "string", Default: "", OmitWhenEmpty: true, Pattern: "^[0-9a-f]{40}$", Description: "Server-set from the deployment record; never accepted from a caller."},
+			{Name: "expected_digest", Type: "string", Default: "", OmitWhenEmpty: true, Pattern: "^sha256:[0-9a-f]{64}$", Description: "Server-set from the deployment record; never accepted from a caller."},
 		},
 	},
 	{
