@@ -146,6 +146,13 @@ func planApplicableCheck(p *deployplan.Plan, now time.Time, imageOrg string) (de
 		}
 		return deployplan.Intent{}, nil
 	}
+	if p.Environment == deployplan.EnvironmentProduction && p.Action == deployplan.ActionRollback {
+		if _, err := deployplan.ParseRollbackIntent(p.IntentCanonical); err != nil {
+			slog.Error("deploy apply: stored rollback intent does not parse", "plan", p.ID, "error", err)
+			return deployplan.Intent{}, &planRefusal{http.StatusInternalServerError, codeDeployApplyUnavailable, "the stored plan's intent cannot be read"}
+		}
+		return deployplan.Intent{}, nil
+	}
 	intent, _, err := deployplan.ParseIntent([]byte(p.IntentCanonical))
 	if err != nil {
 		slog.Error("deploy apply: stored intent does not parse", "plan", p.ID, "error", err)
@@ -362,14 +369,19 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 
 	// The submission, built from the plan alone and validated before the
 	// grant is spent.
+	rollback := p.Action == deployplan.ActionRollback
 	promote := p.Action == deployplan.ActionPromote
+	production := promote || rollback
 	opName := previewDeployOp
-	if promote {
+	switch {
+	case promote:
 		opName = promoteDeploymentOp
-		if !h.promoteTenantEnabled(p.Tenant) {
-			a.refuse(w, http.StatusForbidden, codePromoteTenantDisabled, "promotion to production is not enabled for this workspace yet")
-			return
-		}
+	case rollback:
+		opName = rollbackRevisionOp
+	}
+	if production && !h.promoteTenantEnabled(p.Tenant) {
+		a.refuse(w, http.StatusForbidden, codePromoteTenantDisabled, "production changes are not enabled for this workspace yet")
+		return
 	}
 	op, ok := h.opts.Registry.Get(opName)
 	if !ok {
@@ -377,7 +389,20 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input map[string]string
-	if promote {
+	switch {
+	case rollback:
+		// Commit and digest come from the approved plan alone.
+		ri, err := deployplan.ParseRollbackIntent(p.IntentCanonical)
+		if err != nil {
+			a.refuse(w, http.StatusInternalServerError, codeDeployApplyUnavailable, "the stored plan's intent cannot be read")
+			return
+		}
+		input = h.opts.Registry.ApplyDefaults(op, map[string]string{
+			"team_name": p.Tenant, "component_name": p.Service,
+			rollbackDeploymentIDParam: ri.TargetDeploymentID,
+			rollbackTargetCommitParam: ri.TargetCommit, rollbackExpectedDigestParam: ri.ExpectedDigest,
+		})
+	case promote:
 		// Tag and digest come from the approved plan alone.
 		pi, err := deployplan.ParsePromoteIntent(p.IntentCanonical)
 		if err != nil {
@@ -388,7 +413,7 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 			"team_name": p.Tenant, "component_name": p.Service,
 			"image_tag": pi.ImageTag, "image_digest": pi.ImageDigest,
 		})
-	} else {
+	default:
 		input = h.opts.Registry.ApplyDefaults(op, map[string]string{
 			"team_name":       p.Tenant,
 			"component_name":  p.Service,
@@ -418,7 +443,13 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 		a.refuse(w, http.StatusInternalServerError, codeDeployApplyUnavailable, "the plan cannot be turned into a valid preview-deploy")
 		return
 	}
-	if promote {
+	if rollback {
+		// The workflow takes the commit and digest and declares no
+		// deployment_id, so Argo would reject it; the record names the
+		// target as source_deployment_id.
+		delete(input, rollbackDeploymentIDParam)
+	}
+	if production {
 		// Nothing is built or cloned from a caller-influenced repository.
 	} else if err := h.checkBuildInputs(r.Context(), op, input, user, p.Tenant, false); err != nil {
 		status, msg := http.StatusForbidden, err.Error()
@@ -512,6 +543,12 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 		pi, _ := deployplan.ParsePromoteIntent(p.IntentCanonical) // parsed above
 		newRec.SourceDeploymentID = pi.SourceDeploymentID
 	}
+	if rollback {
+		// The deployment this restores, so the reconciler compares the
+		// digest it recorded with the one the rollback ran.
+		ri, _ := deployplan.ParseRollbackIntent(p.IntentCanonical) // parsed above
+		newRec.SourceDeploymentID = ri.TargetDeploymentID
+	}
 	rec, err := h.opts.DeployRecords.InsertRecord(r.Context(), newRec)
 	if err != nil {
 		executionEnded(nil, operations.NotCreated(err))
@@ -553,7 +590,7 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 		"approval_id":   spent.ID,
 		"workflow":      result,
 	}
-	if promote {
+	if production {
 		resp["environment"] = p.Environment
 	} else {
 		resp["preview_id"], resp["preview_url"] = p.PreviewID, "https://"+p.Host
@@ -646,7 +683,7 @@ func (h *Handlers) recordSubmission(reqCtx context.Context, id string, result *o
 // changed repository) is refused, never applied over the newer state.
 func (h *Handlers) checkPlan(p *deployplan.Plan) (deployplan.Intent, *planRefusal) {
 	intent, ref := planApplicableCheck(p, h.deployPlanNow(), h.opts.PlatformImageOrg)
-	if ref != nil || p.Action != deployplan.ActionPromote {
+	if ref != nil || (p.Action != deployplan.ActionPromote && p.Action != deployplan.ActionRollback) {
 		return intent, ref
 	}
 	if !h.promoteTenantEnabled(p.Tenant) {

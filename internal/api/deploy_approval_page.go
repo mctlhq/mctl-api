@@ -631,6 +631,13 @@ func (h *Handlers) auditDeployPage(r *http.Request, user *auth.User, id auth.Ide
 // hostLine names what the plan serves: a preview's address, or, for a
 // promotion, that production is changed and by which image.
 func hostLine(p *deployplan.Plan) string {
+	if p.Action == deployplan.ActionRollback {
+		line := "PRODUCTION CHANGE: rolls production back to an earlier deployment"
+		if ri, err := deployplan.ParseRollbackIntent(p.IntentCanonical); err == nil {
+			line += " (" + ri.TargetDeploymentID + ", gitops commit " + ri.TargetCommit + ", image " + ri.ExpectedDigest + ")"
+		}
+		return line
+	}
 	if p.Action != deployplan.ActionPromote {
 		return "Preview: https://" + p.Host
 	}

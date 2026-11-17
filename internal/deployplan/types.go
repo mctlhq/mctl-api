@@ -22,6 +22,10 @@ const (
 	// production values of the same service (mctl-api#1049). It is planned
 	// from a DeployRecord, never from an intent.
 	ActionPromote Action = "promote"
+	// ActionRollback restores a service's production values to the state a
+	// production DeployRecord describes (mctl-api#1049). It is planned from
+	// that record, never from an intent.
+	ActionRollback Action = "rollback"
 )
 
 // Environments a plan may target. Only a promote names production.

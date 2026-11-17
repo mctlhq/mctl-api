@@ -166,6 +166,8 @@ var governedAgentTools = toolSet(
 	"mctl_deploy_plan",
 	// Stores an immutable production-promotion plan row (mctl-api#1049).
 	"mctl_promote_deployment",
+	// Stores an immutable production-rollback plan row (mctl-api#1049).
+	"mctl_rollback_deployment",
 	// Opens a pending grant request; grants nothing (mctl-api#1026).
 	"mctl_request_deploy_approval",
 	// Spends an owner's grant and submits preview-deploy (mctl-api#1026).

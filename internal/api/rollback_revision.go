@@ -70,6 +70,14 @@ func (h *Handlers) prepareRollbackRevision(w http.ResponseWriter, r *http.Reques
 		writeErrorCode(w, status, code, msg, nil)
 		return false
 	}
+	if h.promoteTenantEnabled(input["team_name"]) {
+		// The route rewrites the service's values.yaml from a gitops commit,
+		// the file production runs from; for a workspace whose production
+		// is governed by grants, a rollback is planned with
+		// POST /api/v1/deploy/rollback whatever deployment it restores.
+		return deny(http.StatusForbidden, codeRollbackRequiresGrant,
+			"production in this workspace changes only with an owner's approval: plan a rollback with POST /api/v1/deploy/rollback", "denied:"+codeRollbackRequiresGrant)
+	}
 	id := input[rollbackDeploymentIDParam]
 	if !strings.HasPrefix(id, deployplan.RecordIDPrefix) {
 		return deny(http.StatusNotFound, codeRollbackDeploymentNotFound, "no such deployment for this service", "denied:"+codeRollbackDeploymentNotFound)
@@ -90,6 +98,12 @@ func (h *Handlers) prepareRollbackRevision(w http.ResponseWriter, r *http.Reques
 			Message: "deployment record unreadable"})
 		writeErrorCode(w, http.StatusServiceUnavailable, codeRollbackStoreUnavailable, "the deployment record store is not available", nil)
 		return false
+	}
+	if rec.Tenant == input["team_name"] && rec.Service == input["component_name"] && rec.Environment == deployplan.EnvironmentProduction {
+		// Restoring a production state needs an owner's grant: this route has
+		// none, so it is only reachable through /deploy/rollback and apply.
+		return deny(http.StatusForbidden, codeRollbackRequiresGrant,
+			"rolling back to a production deployment needs an owner's approval: plan it with POST /api/v1/deploy/rollback", "denied:"+codeRollbackRequiresGrant)
 	}
 	switch why := rollbackRecordUnusable(rec, input["team_name"], input["component_name"]); why {
 	case "":

@@ -235,6 +235,11 @@
       "reason": "Writes an immutable production-promotion plan row (mctlhq/mctl-api#1049); enabling it on the shared portal is a separate owner decision."
     },
     {
+      "name": "mctl_rollback_deployment",
+      "enabled": false,
+      "reason": "Writes an immutable production-rollback plan row (mctlhq/mctl-api#1049); enabling it on the shared portal is a separate owner decision."
+    },
+    {
       "name": "mctl_deploy_apply",
       "enabled": false,
       "reason": "Spends a tenant owner's deploy.apply grant and submits preview-deploy (mctlhq/mctl-api#1026); enabling it on the shared portal is a separate owner decision."

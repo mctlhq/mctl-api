@@ -781,6 +781,7 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/deploy/bindings", h.DeployBindings)
 			r.Post("/deploy/plan", h.DeployPlan)
 			r.Post("/deploy/promote", h.DeployPromote)
+			r.Post("/deploy/rollback", h.DeployRollback)
 			r.Get("/deploy/plans/{id}", h.GetDeployPlan)
 			r.Post("/deploy/plans/{id}/approval", h.RequestDeployApproval)
 			r.Post("/deploy/apply", h.DeployApply)
