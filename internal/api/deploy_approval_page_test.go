@@ -232,7 +232,7 @@ func TestDeployApprovalPage_OwnerApprovesWhatWasShown(t *testing.T) {
 		t.Fatalf("callback = %d %s", rec.Code, body)
 	}
 	cd := e.h.decisionContext(e.approval(id)).ContextDigest
-	for _, want := range []string{"Team: " + e.tenant + ", service: web, environment: preview", "Source revision: " + deployRev,
+	for _, want := range []string{"Team: " + e.tenant + ", service: web, environment: preview", "Source revision: ", deployRev,
 		"https://web-abc123.mctl.ai", p.ID, p.Digest, deployGitopsSHA, id, cd, "(agent claude-code)",
 		deployDiffMarker, "Approve this deploy"} {
 		if !strings.Contains(html.UnescapeString(body), want) {
@@ -511,5 +511,32 @@ func TestDeployApprovalPage_RequiresAFreshSignIn(t *testing.T) {
 	}
 	if e.approval(id).State != workitems.ApprovalPending {
 		t.Fatal("a refused sign-in decided something")
+	}
+}
+
+func TestDeployApprovalPage_ValuesAreLinks(t *testing.T) {
+	e := newDeployPageEnv(t)
+	id, _ := e.pendingGrant("links")
+	rec, _, _ := e.signIn(id, "z-owner")
+	body := rec.Body.String()
+	for _, want := range []string{
+		`<a href="https://github.com/acme/web/commit/` + deployRev + `" target="_blank" rel="noopener noreferrer">` + deployRev + `</a>`,
+		`<a href="https://github.com/mctlhq/mctl-gitops/commit/` + deployGitopsSHA + `"`,
+		`<a href="https://web-abc123.mctl.ai"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("no link %q in %s", want, body)
+		}
+	}
+}
+
+func TestShellData_RowsOnlyLinkWhatMatches(t *testing.T) {
+	d := shellData{
+		Lines: []string{"Rev: abc <b>", "other"},
+		Links: []shellLink{{Text: "abc", URL: "https://x/abc"}, {Text: "missing", URL: "https://x/m"}, {Text: "", URL: "https://x/e"}},
+	}
+	rows := d.Rows()
+	if rows[0].URL != "https://x/abc" || rows[0].Before != "Rev: " || rows[0].After != " <b>" || rows[1].URL != "" {
+		t.Fatalf("rows = %+v", rows)
 	}
 }
