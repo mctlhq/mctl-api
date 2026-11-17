@@ -27,6 +27,7 @@ package main
 // re-implementation, which would drift from it.
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -149,17 +150,30 @@ func runCheckConfig(stdout, stderr io.Writer) int {
 //   - on a human or agent entry the subject must be one of its
 //     service_subjects (the only way such an entry yields kind service).
 //
-// Not enabled, or no provider or subject named, is left to
-// configureGlovoConsent, which keeps the routes off and logs why.
+// Enabled with no provider or subject, or with a value that is neither true
+// nor false, is refused too: configureGlovoConsent alone would log it and keep
+// the routes off while the flag says on (a boot-time refusal where routes used
+// to stay silently off; GLOVO_CONSENT_ENABLED is not set in any deployment
+// today). Not enabled (unset or false) is left to configureGlovoConsent. The
+// database URL is not checked: it comes from a Secret this check cannot see.
 func validateGlovoConsentReader(entries []auth.OIDCProviderConfigEntry, lookup func(string) (string, bool)) error {
-	if v, _ := lookup("GLOVO_CONSENT_ENABLED"); strings.TrimSpace(v) != "true" {
+	v, _ := lookup("GLOVO_CONSENT_ENABLED")
+	switch strings.TrimSpace(v) {
+	case "", "false":
 		return nil
+	case "true":
+	default:
+		// configureGlovoConsent logs this and leaves the routes off; an
+		// operator who typed it meant "on", so unknown is not ok.
+		return fmt.Errorf("GLOVO_CONSENT_ENABLED %q must be true or false", v)
 	}
 	provider, _ := lookup("GLOVO_CONSENT_SERVICE_PROVIDER")
 	subject, _ := lookup("GLOVO_CONSENT_SERVICE_SUBJECT")
 	provider, subject = strings.TrimSpace(provider), strings.TrimSpace(subject)
 	if provider == "" || subject == "" {
-		return nil
+		// Enabled but no reader named: configureGlovoConsent would only log
+		// and keep the routes off while the flag says on. Refuse instead.
+		return errors.New("GLOVO_CONSENT_ENABLED=true requires GLOVO_CONSENT_SERVICE_PROVIDER and GLOVO_CONSENT_SERVICE_SUBJECT: the consent routes would silently stay off")
 	}
 	for _, e := range entries {
 		if e.Name != provider {

@@ -112,6 +112,43 @@ func TestRunCheckConfig(t *testing.T) {
 			wantCode:  0,
 		},
 		{
+			name:      "consent enabled with no provider and no subject is refused, not silently off",
+			providers: goodZitadelEntry,
+			mutate:    consentReader("", ""),
+			wantCode:  1,
+			wantErr:   "requires GLOVO_CONSENT_SERVICE_PROVIDER and GLOVO_CONSENT_SERVICE_SUBJECT",
+		},
+		{
+			name:      "consent enabled with a provider but an empty subject",
+			providers: goodZitadelEntry,
+			mutate:    consentReader("zitadel", "  "),
+			wantCode:  1,
+			wantErr:   "requires GLOVO_CONSENT_SERVICE_PROVIDER and GLOVO_CONSENT_SERVICE_SUBJECT",
+		},
+		{
+			name:      "consent enabled with a subject but an empty provider",
+			providers: goodZitadelEntry,
+			mutate:    consentReader("", "100000000000000077"),
+			wantCode:  1,
+			wantErr:   "requires GLOVO_CONSENT_SERVICE_PROVIDER and GLOVO_CONSENT_SERVICE_SUBJECT",
+		},
+		{
+			name:      "consent flag that is neither true nor false (the boot refuses it too)",
+			providers: goodZitadelEntry,
+			mutate: func(t *testing.T) {
+				consentReader("zitadel", "100000000000000077")(t)
+				t.Setenv("GLOVO_CONSENT_ENABLED", "yes")
+			},
+			wantCode: 1,
+			wantErr:  "must be true or false",
+		},
+		{
+			name:      "consent unset leaves the empty reader alone",
+			providers: goodZitadelEntry,
+			mutate:    func(t *testing.T) { t.Setenv("GLOVO_CONSENT_ENABLED", "") },
+			wantCode:  0,
+		},
+		{
 			name:      "consent disabled leaves the reader unchecked",
 			providers: goodZitadelEntry,
 			mutate: func(t *testing.T) {

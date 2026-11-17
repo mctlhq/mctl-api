@@ -797,6 +797,80 @@ reader that can never resolve to kind `service`: a provider that is not an
 `MCTL_OIDC_PROVIDERS` entry, or, on a `human` or `agent` entry, a subject that
 is not in its `service_subjects`.
 
+Boot-time refusals where the consent routes used to stay silently off (new in
+this change; `GLOVO_CONSENT_ENABLED` is not set in any deployment today, checked
+on mctl-gitops `origin/main`, so no existing rollout changes). With
+`GLOVO_CONSENT_ENABLED=true` (env names exact):
+
+- `GLOVO_CONSENT_SERVICE_PROVIDER` or `GLOVO_CONSENT_SERVICE_SUBJECT` empty or
+  unset: refused (`--check-config` exits 1; boot exits 1). Before, boot logged
+  `glovo link consent disabled` and kept the routes off while the flag said on.
+- `GLOVO_CONSENT_ENABLED` set to anything other than `true` or `false` (for
+  example `yes`, `TRUE`): refused the same way. Unset or `false` is off and
+  unchecked.
+- Like every federation check, boot skips these while
+  `MCTL_FEDERATION_DISABLED` is on; `--check-config` never skips.
+
+Not checked, because the values live in Secrets `--check-config` cannot see:
+`GLOVO_CONSENT_DB_URL` / `AUDIT_DB_URL` (a missing one still leaves the routes
+off with a boot log line) and whether the store opens.
+
+#### What a machine-user token carries (evidence and gaps)
+
+Sources: ZITADEL docs via Context7 (`/zitadel/zitadel`: service-account
+"private key JWT" guide and the reserved-scopes reference), the zitadel-iac
+Terraform and the mctl-glovo `token-refresher` on `origin/main`.
+
+- Grant: the refresher posts `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`,
+  an RS256 `assertion` (`iss` = `sub` = machine user id, `aud` = the issuer URL,
+  5 minute lifetime) and `scope` = the value of `ZITADEL_SCOPE`
+  (`mctl-glovo/internal/tokenrefresh`; `cmd/token-refresher` reads
+  `ZITADEL_SCOPE`, `ZITADEL_USER_ID`, `ZITADEL_KEY_ID`, `KEY_FILE`, `TOKEN_FILE`).
+- Access token format: the consent reader is declared with
+  `access_token_type = ACCESS_TOKEN_TYPE_JWT` (`iac/c2-machine-users.tf`), so the
+  token is a JWT mctl-api can verify against the issuer's keys.
+- `sub`: the machine user id. `iss`: the ZITADEL issuer. These are the standard
+  claims of the issued token.
+- `aud`: ZITADEL documents that the reserved scope
+  `urn:zitadel:iam:org:project:id:{projectId}:aud` "adds the requested project id
+  to the audience of the access token". It adds; it does not say the audience is
+  that id alone. So `aud` contains the project id when that scope is requested,
+  and may contain other values. mctl-api only requires that `aud` CONTAINS the
+  subject's pinned audience, and refuses a listed subject whose `aud` lacks it,
+  so extra values are harmless; a token minted without the scope is refused.
+- `urn:zitadel:iam:org:project:id:{projectId}:aud` is also what the docs require
+  for the token to pass ZITADEL's own introspection; mctl-api does not
+  introspect, it verifies the JWT.
+- `resourceowner`: ZITADEL documents `urn:zitadel:iam:user:resourceowner`
+  ("id, name and primary_domain of the user's organization will be included").
+  The claim `urn:zitadel:iam:user:resourceowner:id` is therefore present only when
+  that scope is requested. The consent refresher's scope does not request it,
+  which is why the customers rule above exempts a listed service subject.
+- The pinned audience: zitadel-iac publishes, in the ConfigMap
+  `mctl-api-c2-machine-ids` (ids only, no secret), `consent_audience` =
+  the `mctl-api` project id and `consent_scope` =
+  `openid urn:zitadel:iam:org:project:id:<that project id>:aud`
+  (`iac/c2-machine-users.tf`, pinned by `tests/c2_machine_users.tftest.hcl`). The
+  Deployment of the refresher takes `ZITADEL_SCOPE` from the `scope` key of the
+  `<app>-consent-reader` Secret, which the operator copies from that ConfigMap by
+  hand into Vault (the c2-machine-users.tf comment: "The operator copies the
+  consumer's values into Vault by hand").
+
+So the assumption "aud contains the project id" holds if, and only if, the value
+operators put into Vault for `scope` equals the ConfigMap's `consent_scope` and
+`service_subjects` pins `consent_audience`. The unit tests here fake the verified
+token with `aud = [project id]`, which is the minimal shape and a subset of what
+ZITADEL may issue.
+
+Unverified until a live token is minted (nobody has decoded one): the exact `aud`
+list ZITADEL puts into a JWT-profile token of this machine user (extra entries,
+the order); that `sub` and `iss` are exactly the user id and
+`https://auth.mctl.ai` in the issued JWT; that the Vault `scope` value is the
+ConfigMap one (the secret is not read); and that no `resourceowner` claim is
+present. Check once: mint with the refresher, decode the payload locally and
+compare `sub`, `iss` and `aud` with `consent_user_id`, the issuer and
+`consent_audience` from the ConfigMap, never printing the token.
+
 #### `service_subjects` with `customers_org_id` (the live ZITADEL entry)
 
 The ZITADEL entry carries `customers_org_id`, so every other token of it must
