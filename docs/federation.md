@@ -170,6 +170,7 @@ A JSON array, parsed by `auth.ParseOIDCProviders` and validated in
 | `grant_groups` | no | `false` | Whether this entry's groups reach `User.Groups`, i.e. grant tenant access. Off: the claim is dropped and counted in `federation_groups_withheld_total{provider}`. On: kept, with `admins` still stripped. Refused at boot on the trusted Dex slot. See "Groups" below. |
 | `customers_org_id` | no | — | The ZITADEL organization of self-service customer accounts (digits; `human` entries only; at most one entry). When set, every token from this entry must carry `urn:zitadel:iam:user:resourceowner:id` or it is refused, and a customers token resolves by its proven GitHub id. See "Self-service customers" below. |
 | `subject_audiences` | no | — | Extra accepted audiences for single verified subjects, as `{"<subject>": ["<audience>", ...]}` (not on `dex`, and only with the default `subject_claim` `sub`: a mutable claim such as email could be taken by another user). A ZITADEL machine user signing in with its own key (JWT profile) gets only the project id in `aud`, never the client id this entry enforces. Listing the project id in `audiences` would accept it from every client that requests the project audience scope, so any relying party could replay its users' tokens here; keyed by subject, it holds for that machine user alone. Signature, issuer and expiry are checked as for every token. Used by the orchestrator DevLoop principal (docs/orchestrator-devloop.md). |
+| `service_subjects` | no | — | Exact machine subjects that resolve to `kind: service` on this otherwise `human` entry, as `{"<subject>": "<audience>"}`, each pinned to the one audience it must present (also in `audit` mode). For a ZITADEL machine user (JWT profile) that must be a service identity, e.g. the Glovo consent reader, without converting the human ZITADEL entry or adding a second entry on the same issuer (refused). Rules: exact match only (no wildcard, no padding, no empty subject or audience); never derived from token claims, so a human subject of the issuer cannot become a service; such an identity carries no groups even with `grant_groups`; refused at boot on `dex`, on a `kind` other than `human`, with `customers_org_id`, with a `subject_claim` other than `sub`, when empty, when a subject repeats, and when a subject is also a `subject_audiences` key. Unset: no behaviour change. |
 
 A malformed value, an entry missing `audiences`, an invalid
 `audience_enforcement` or `kind`, a reserved or surface-colliding name, or two
@@ -766,3 +767,27 @@ mctl-api#374's requirements/design records):
 - Re-resolving groups on refresh (slice C).
 - Any change to authorization, `ADMIN_USERS`, or tenant resolution by GitHub
   login — that is mctl-api#377.
+
+### Service identity for a ZITADEL machine user (`service_subjects`)
+
+The Glovo consent gate (`GLOVO_CONSENT_SERVICE_PROVIDER` /
+`GLOVO_CONSENT_SERVICE_SUBJECT`) requires an identity of kind `service`. The
+ZITADEL entry stays `human`; the machine user is listed on it. Exact shape
+(placeholders, no real ids):
+
+```json
+{"name":"zitadel","issuer":"https://<zitadel-issuer>","audiences":["<client-id>"],
+ "service_subjects":{"<consent-reader-machine-user-id>":"<zitadel-project-id>"}}
+```
+
+Add the `service_subjects` key to the existing ZITADEL entry of
+`MCTL_OIDC_PROVIDERS` (keep every other key as is), then set
+
+```
+GLOVO_CONSENT_SERVICE_PROVIDER=zitadel          # the entry's name
+GLOVO_CONSENT_SERVICE_SUBJECT=<consent-reader-machine-user-id>
+```
+
+The audience is the project id a machine user receives in `aud` with a JWT
+profile exchange (the same value `subject_audiences` uses). The kill-switch
+caller (mctl-api to mctl-glovo) is outbound and needs no entry here.
