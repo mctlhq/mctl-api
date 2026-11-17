@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.167.0](https://github.com/mctlhq/mctl-api/compare/4.166.0...4.167.0) (2026-11-17)
+
+
+### Features
+
+* **deploy:** rollback_deployment behind an owner's grant ([ea0632f](https://github.com/mctlhq/mctl-api/commit/ea0632fe430b5a4b1c6225be68349ac75a87224a))
+* **deploy:** rollback_deployment behind an owner's grant ([8780f98](https://github.com/mctlhq/mctl-api/commit/8780f98fc30a76897e206c7cd7bd2968746802ea))
+
+
+### Bug Fixes
+
+* **deploy:** rollback apply drops deployment_id; governed workspaces need a grant ([46694e8](https://github.com/mctlhq/mctl-api/commit/46694e87dd56c53bc0efd84572b9fdc90b039824))
+* **operations:** read the workflow's own root-node outputs ([050a960](https://github.com/mctlhq/mctl-api/commit/050a96076f4fd145d6c6386bfcf97c4c5ced4566))
+* **operations:** read the workflow's own root-node outputs ([9b600a2](https://github.com/mctlhq/mctl-api/commit/9b600a259064518bed37d566d405fc5718917743))
+
 ## [4.166.0](https://github.com/mctlhq/mctl-api/compare/4.165.1...4.166.0) (2026-11-17)
 
 
