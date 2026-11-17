@@ -1171,9 +1171,14 @@ func TestIngressExtraPathsRoutesReleaseApprovals(t *testing.T) {
 // podSecurityContext) -------------------------------------------------------
 
 type slotPodSpec struct {
+	SecurityContext map[string]any  `yaml:"securityContext"`
+	Containers      []slotContainer `yaml:"containers"`
+	Volumes         []volume        `yaml:"volumes"`
+}
+
+type slotContainer struct {
+	container       `yaml:",inline"`
 	SecurityContext map[string]any `yaml:"securityContext"`
-	Containers      []container    `yaml:"containers"`
-	Volumes         []volume       `yaml:"volumes"`
 }
 
 type slotDeployment struct {
@@ -1232,14 +1237,15 @@ func TestSlotsRender(t *testing.T) {
 		"--set-json", `extraContainers=[{"name":"ctl-reader","image":"example/reader:1","securityContext":{"allowPrivilegeEscalation":false,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}},"volumeMounts":[{"name":"shared","mountPath":"/shared"}]}]`,
 		"--set-json", `extraVolumes=[{"name":"shared","emptyDir":{"medium":"Memory"}}]`,
 		"--set-json", `extraVolumeMounts=[{"name":"shared","mountPath":"/var/run/ctl","readOnly":true}]`,
-		"--set-json", `podSecurityContext={"fsGroup":1000,"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}`,
+		"--set-json", `podSecurityContext={"fsGroup":1000,"runAsUser":1000,"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}`,
+		"--set-json", `containerSecurityContext={"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}`,
 	)
 	spec := d.Spec.Template.Spec
 
 	if len(spec.Containers) != 2 || spec.Containers[0].Name != "mctl-api" || spec.Containers[1].Name != "ctl-reader" {
 		t.Fatalf("want [mctl-api ctl-reader], got %+v", spec.Containers)
 	}
-	vm, ok := findVolumeMount(spec.Containers[0], "shared")
+	vm, ok := findVolumeMount(spec.Containers[0].container, "shared")
 	if !ok || vm.MountPath != "/var/run/ctl" || !vm.ReadOnly {
 		t.Errorf("extraVolumeMounts must land on the mctl-api container only: %+v ok=%v", vm, ok)
 	}
@@ -1259,8 +1265,40 @@ func TestSlotsRender(t *testing.T) {
 	if sc["fsGroup"] != 1000 || sc["runAsNonRoot"] != true {
 		t.Errorf("podSecurityContext not rendered: %v", sc)
 	}
+	if sc["runAsUser"] != 1000 {
+		t.Errorf("runAsUser lost: %v", sc)
+	}
 	if p, _ := sc["seccompProfile"].(map[string]any); p["type"] != "RuntimeDefault" {
 		t.Errorf("seccompProfile lost: %v", sc)
+	}
+	csc := spec.Containers[0].SecurityContext
+	if csc["allowPrivilegeEscalation"] != false {
+		t.Errorf("containerSecurityContext must land on the mctl-api container: %v", csc)
+	}
+	if spec.Containers[1].SecurityContext["allowPrivilegeEscalation"] != false || len(spec.Containers[1].SecurityContext) != 4 {
+		t.Errorf("sidecar securityContext must be its own spec only: %v", spec.Containers[1].SecurityContext)
+	}
+}
+
+// The documented restricted example must not rot: it needs a numeric runAsUser
+// equal to the uid the Dockerfile gives user app, otherwise "USER app:app"
+// cannot be verified as non-root and the container fails to start.
+func TestDocumentedPodSecurityExampleHasRunAsUser(t *testing.T) {
+	df, err := os.ReadFile("../Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(df), "adduser -D -u 1000 -G app app") || !strings.Contains(string(df), "USER app:app") {
+		t.Fatalf("Dockerfile user changed; update runAsUser in values.yaml and docs/helm-chart-slots.md")
+	}
+	for _, f := range []string{"values.yaml", "../docs/helm-chart-slots.md"} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), "runAsUser: 1000") {
+			t.Errorf("%s: documented podSecurityContext example lacks runAsUser: 1000", f)
+		}
 	}
 }
 
@@ -1271,7 +1309,7 @@ func TestSlotsRenderIndependently(t *testing.T) {
 	if len(d.Spec.Template.Spec.Containers) != 1 || d.Spec.Template.Spec.SecurityContext != nil {
 		t.Errorf("extraVolumes alone must not add containers or a securityContext")
 	}
-	if _, ok := findVolumeMount(d.Spec.Template.Spec.Containers[0], "only"); ok {
+	if _, ok := findVolumeMount(d.Spec.Template.Spec.Containers[0].container, "only"); ok {
 		t.Errorf("extraVolumes alone must not mount anything")
 	}
 	d = renderSlots(t, "--set-json", `podSecurityContext={"fsGroup":2000}`)

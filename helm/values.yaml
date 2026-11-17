@@ -341,10 +341,18 @@ extraVolumes: []
 # extraVolumeMounts: list of mounts added to the mctl-api container only.
 extraVolumeMounts: []
 # podSecurityContext: pod-level securityContext, e.g.
-#   {fsGroup: 1000, runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}.
-# The chart sets none today (the image runs as uid 1000 via its USER line).
-# fsGroup changes the group ownership of every volume on the pod, which is
-# what a sidecar-shared Secret/emptyDir needs; it also lets a Secret volume
-# honour a 0400/0440 defaultMode for uid 1000 (see the NOTE on gitops-ssh in
-# deployment.yaml). Leave empty unless a slot above needs it.
+#   {fsGroup: 1000, runAsUser: 1000, runAsNonRoot: true,
+#    seccompProfile: {type: RuntimeDefault}}.
+# runAsUser is required with runAsNonRoot: the image declares "USER app:app"
+# (a name, uid 1000), and kubelet cannot verify a non-numeric user is non-root,
+# so the container fails with CreateContainerConfigError without a numeric uid.
+# The chart sets none by default. fsGroup changes the group ownership of every
+# volume on the pod, which is what a sidecar-shared Secret/emptyDir needs; it
+# also lets a Secret volume honour a 0400/0440 defaultMode for uid 1000 (see
+# the NOTE on gitops-ssh in deployment.yaml). Leave empty unless a slot needs it.
 podSecurityContext: {}
+# containerSecurityContext: securityContext of the mctl-api container only
+# (sidecars carry their own). Empty by default. For PSA "restricted" set e.g.
+#   {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+# together with the pod-level seccompProfile/runAsNonRoot/runAsUser above.
+containerSecurityContext: {}
