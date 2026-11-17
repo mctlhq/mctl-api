@@ -173,9 +173,9 @@ func planApplicableCheck(p *deployplan.Plan, now time.Time, imageOrg string) (de
 	return intent, nil
 }
 
-// planApplicable is planApplicableCheck answered and audited.
+// planApplicable is checkPlan answered and audited.
 func (h *Handlers) planApplicable(w http.ResponseWriter, a *deployAudit, p *deployplan.Plan) (deployplan.Intent, bool) {
-	intent, ref := planApplicableCheck(p, h.deployPlanNow(), h.opts.PlatformImageOrg)
+	intent, ref := h.checkPlan(p)
 	if ref != nil {
 		a.refuse(w, ref.status, ref.code, ref.msg)
 		return deployplan.Intent{}, false
@@ -630,4 +630,41 @@ func (h *Handlers) recordSubmission(reqCtx context.Context, id string, result *o
 		slog.Error("deploy apply: recording the submission outcome; the record stays in submitting",
 			"deployment", id, "status", status, "error", err)
 	}
+}
+
+// checkPlan is planApplicableCheck plus what needs the handlers' state. For a
+// promotion that is the tenant allowlist and production itself: the owner
+// approved a before/after diff computed against one production state, so a
+// plan whose production values have moved since (another promotion, a
+// changed repository) is refused, never applied over the newer state.
+func (h *Handlers) checkPlan(p *deployplan.Plan) (deployplan.Intent, *planRefusal) {
+	intent, ref := planApplicableCheck(p, h.deployPlanNow(), h.opts.PlatformImageOrg)
+	if ref != nil || p.Action != deployplan.ActionPromote {
+		return intent, ref
+	}
+	if !h.promoteTenantEnabled(p.Tenant) {
+		return intent, &planRefusal{http.StatusForbidden, codePromoteTenantDisabled, "promotion to production is not enabled for this workspace yet"}
+	}
+	if h.opts.DeployGitops == nil {
+		return intent, &planRefusal{http.StatusServiceUnavailable, "deploy_gitops_unavailable", "the gitops checkout cannot be read right now"}
+	}
+	base, _, exists, _, err := h.opts.DeployGitops.ServiceValuesAt(p.Tenant, p.Service)
+	if err != nil {
+		slog.Error("deploy apply: reading production values", "plan", p.ID, "error", err)
+		return intent, &planRefusal{http.StatusServiceUnavailable, "deploy_gitops_unavailable", "the gitops checkout cannot be read right now"}
+	}
+	stale := &planRefusal{http.StatusConflict, codeDeployApplyNotReproducible,
+		"production's values changed since this plan was made (another promotion or a gitops change); plan again"}
+	if !exists {
+		return intent, stale
+	}
+	cur, err := deployplan.ParseValuesForCheck(base)
+	if err != nil {
+		return intent, stale
+	}
+	curYAML, err := deployplan.RenderYAML(deployplan.Redact(cur))
+	if err != nil || deployplan.SHA256Hex(curYAML) != p.ValuesBeforeSHA256 {
+		return intent, stale
+	}
+	return intent, nil
 }

@@ -162,3 +162,7 @@ func ProductionHost(values map[string]any) string {
 	}
 	return ""
 }
+
+// ParseValuesForCheck parses a service's values file the way a plan did, so
+// a caller can compare its current rendering with a plan's stored one.
+func ParseValuesForCheck(base []byte) (map[string]any, error) { return parseValues(base) }

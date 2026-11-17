@@ -8,6 +8,7 @@ import (
 
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
 	"github.com/mctlhq/mctl-api/internal/deployplan"
+	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
 const promoteDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -158,5 +159,23 @@ func TestOperationsExecute_RefusesPromoteDeployment(t *testing.T) {
 	// 405 is the HandlerOnly refusal itself, not some later check.
 	if w.Code != http.StatusMethodNotAllowed || len(f.exec.submitted) != 0 {
 		t.Fatalf("generic execute ran the promotion: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// Production moving between plan and apply (here: another image pinned)
+// makes the approved diff stale; the grant is not spent.
+func TestDeployApply_PromoteRefusedWhenProductionMoved(t *testing.T) {
+	f := newGrantFixture(t, faithfulValues, promoteEnabled)
+	plan := f.promote(t, f.seedPreview(t), http.StatusCreated)
+	planID := plan["id"].(string)
+	f.plans = append(f.plans, planID)
+	id := f.grant(t, planID)
+	f.gitops.data = strings.Replace(faithfulValues, "tag: 1.0.0", "tag: 2.0.0", 1)
+	w := f.apply(t, f.dev, map[string]any{"plan_id": planID, "approval_id": id})
+	if w.Code != http.StatusConflict || errCode(t, w) != "deploy_apply_not_reproducible" || len(f.exec.submitted) != 0 {
+		t.Fatalf("stale apply = %d %s submitted %v", w.Code, w.Body.String(), f.exec.submitted)
+	}
+	if f.state(t, id) == workitems.ApprovalConsumed {
+		t.Fatal("a refused stale apply spent the grant")
 	}
 }
