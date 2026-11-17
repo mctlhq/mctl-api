@@ -3075,6 +3075,7 @@ paths:
         | `retire-service` | Permanently remove a service | high |
         | `delete-tenant` | Delete team workspace | high |
         | `rollback-service` | Roll back to a previous image tag | medium |
+        | `rollback-revision` | Roll back to the state of an earlier deployment (values and digest) | medium |
         | `preview-deploy` | Deploy ephemeral preview environment | low |
         | `preview-delete` | Remove preview environment | low |
 

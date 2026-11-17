@@ -135,6 +135,21 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The commit and digest a revision rollback restores are the deployment
+	// record's, set by prepareRollbackRevision alone: a body naming either
+	// would restore an arbitrary commit with no record behind it.
+	if opName == rollbackRevisionOp {
+		for _, k := range rollbackServerSetParams {
+			if _, named := input[k]; named {
+				h.logAudit(r, audit.Entry{UserID: user.ID, Operation: opName, Status: "denied",
+					RiskLevel: string(op.RiskLevel), Message: k + " in the request body refused"})
+				writeErrorCode(w, http.StatusBadRequest, codeRollbackServerSetInBody,
+					k+" is taken from the deployment record, not from the request body", nil)
+				return
+			}
+		}
+	}
+
 	// Drop anything the operation does not declare, before RBAC reads the
 	// input and before it reaches Argo — but AFTER the authentication check,
 	// so an unauthenticated caller cannot spend the server's CPU sorting keys
@@ -306,6 +321,10 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	// refused for it whoever calls, admins included; CI OIDC, authorized by
 	// authorizeCIDeploy above, is the one caller that passes.
 	if !ciAuthorized && agentDeployGated(opName) && !h.refuseAgentDeployDirect(w, r, user, op, tenantParam) {
+		return
+	}
+
+	if opName == rollbackRevisionOp && !h.prepareRollbackRevision(w, r, user, op, input) {
 		return
 	}
 
@@ -495,6 +514,12 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	auditParams := redactSecrets(op, input)
+
+	// deployment_id selects the record; the workflow takes the commit and
+	// digest and declares no such argument, so Argo would reject it.
+	if opName == rollbackRevisionOp {
+		delete(input, rollbackDeploymentIDParam)
+	}
 
 	// create-tenant makes a new tenant; it never joins one. For an existing
 	// name the workflow would skip writing the tenant and carry on

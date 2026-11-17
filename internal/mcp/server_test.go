@@ -956,6 +956,7 @@ var operationToTool = map[string]string{
 	"retire-service":             "mctl_retire_service",
 	"delete-tenant":              "mctl_delete_tenant",
 	"rollback-service":           "mctl_rollback_service",
+	"rollback-revision":          "mctl_rollback_revision",
 	"preview-deploy":             "mctl_create_preview",
 	"preview-delete":             "mctl_delete_preview",
 	"add-custom-domain":          "mctl_add_custom_domain",

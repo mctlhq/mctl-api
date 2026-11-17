@@ -205,6 +205,7 @@ var governedAgentTools = toolSet(
 	"mctl_retry_lifecycle_handoff",
 	"mctl_rollback_agent",
 	"mctl_rollback_agent_binding",
+	"mctl_rollback_revision",
 	"mctl_rollback_service",
 	"mctl_scale_service",
 	"mctl_set_agent_version_lifecycle",

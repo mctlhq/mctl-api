@@ -600,6 +600,27 @@ var builtinOperations = []Operation{
 		},
 	},
 	{
+		Name:             "rollback-revision",
+		DisplayName:      "Roll Back To A Deployment",
+		Description:      "Roll a service back to the state of an earlier deployment: restores the whole values.yaml (image digest included) as it was at that deployment's gitops commit, then runs the health gate. Takes a deployment_id; the deployment must belong to the same workspace and service, have succeeded and been healthy, and carry its commit and digest. Fails closed otherwise. Use mctl_get_deployment to find the id.",
+		WorkflowTemplate: "rollback-revision",
+		RiskLevel:        RiskMedium,
+		RequiresConfirm:  false,
+		MinRole:          RoleDeveloper,
+		ModifiesPaths:    []string{"platform-gitops/services/{team_name}/{component_name}/"},
+		Parameters: []ParameterDef{
+			{Name: "team_name", Type: "string", Required: true, Description: "Team name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
+			{Name: "component_name", Type: "string", Required: true, Description: "Service name", Pattern: "^[a-z0-9][a-z0-9-]{0,30}$"},
+			{Name: "deployment_id", Type: "string", Required: true, Description: "Deployment (dep_...) to restore; read from mctl_get_deployment", Pattern: "^dep_[0-9a-f-]{36}$"},
+			// Taken from the deployment's record by the execute handler; a body
+			// naming either is refused. Optional in the schema, like preview-deploy's
+			// server-set params, so clients do not list them as caller inputs; the
+			// handler always sets them.
+			{Name: "target_commit", Type: "string", Default: "", OmitWhenEmpty: true, Pattern: "^[0-9a-f]{40}$", Description: "Server-set from the deployment record; never accepted from a caller."},
+			{Name: "expected_digest", Type: "string", Default: "", OmitWhenEmpty: true, Pattern: "^sha256:[0-9a-f]{64}$", Description: "Server-set from the deployment record; never accepted from a caller."},
+		},
+	},
+	{
 		Name:             "preview-deploy",
 		DisplayName:      "Deploy Preview Environment",
 		Description:      "Deploy an ephemeral preview copy of a service. Supports two modes: (1) existing image — pass image_tag directly; (2) build from branch — pass git_ref + dockerfile_repo and the platform builds the image first. Preview is accessible at {app}-{id}.{platform_domain} and auto-deleted after the TTL.",

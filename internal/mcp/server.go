@@ -298,6 +298,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolCancelCustomerDeletion())
 	srv.AddTool(s.toolSyncRepos())
 	srv.AddTool(s.toolRollbackService())
+	srv.AddTool(s.toolRollbackRevision())
 	srv.AddTool(s.toolCreatePreview())
 	srv.AddTool(s.toolDeletePreview())
 	srv.AddTool(s.toolAddCustomDomain())
@@ -2001,6 +2002,56 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 		body, err := s.apiPost(ctx, "/api/v1/operations/rollback-service/execute", params)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to rollback service: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+
+	return tool, handler
+}
+
+func (s *Server) toolRollbackRevision() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_rollback_revision",
+		mcplib.WithTitleAnnotation("Rollback To Deployment"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithIdempotentHintAnnotation(false),
+		mcplib.WithDescription(`Roll a service back to the state of an earlier deployment.
+
+Restores the whole values.yaml, image digest included, as it was at that
+deployment's gitops commit, then runs the health gate. Unlike mctl_rollback_service
+it does not just change image.tag.
+
+The deployment (mctl_get_deployment) must belong to the same team and service,
+have succeeded, been observed healthy, and carry its commit and digest;
+otherwise nothing is changed. Returns workflow_name. Poll
+mctl_get_workflow_status(workflow_name) to track progress.`),
+		mcplib.WithString("team_name",
+			mcplib.Required(),
+			mcplib.Description("Team name that owns the service"),
+		),
+		mcplib.WithString("component_name",
+			mcplib.Required(),
+			mcplib.Description("Service name to roll back"),
+		),
+		mcplib.WithString("deployment_id",
+			mcplib.Required(),
+			mcplib.Description("Deployment id (dep_...) to restore, from mctl_get_deployment"),
+		),
+		mcplib.WithString("confirm",
+			mcplib.Description("Type \"yes\" to confirm — only after showing the user what will happen and receiving explicit agreement."),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		if r := requireConfirm(args, fmt.Sprintf("roll back service %q in team %q to deployment %q", args["component_name"], args["team_name"], args["deployment_id"])); r != nil {
+			return r, nil
+		}
+		params := extractStringParams(args)
+		delete(params, "confirm")
+		body, err := s.apiPost(ctx, "/api/v1/operations/rollback-revision/execute", params)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to roll back to the deployment: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}

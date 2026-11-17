@@ -123,6 +123,7 @@ var recordedHints = map[string]hints{
 	"mctl_retire_service":                    {readOnly: false, destructive: true, idempotent: false},
 	"mctl_rollback_agent":                    {readOnly: false, destructive: true, idempotent: false},
 	"mctl_rollback_agent_binding":            {readOnly: false, destructive: true, idempotent: false},
+	"mctl_rollback_revision":                 {readOnly: false, destructive: true, idempotent: false},
 	"mctl_rollback_service":                  {readOnly: false, destructive: true, idempotent: false},
 	"mctl_scale_service":                     {readOnly: false, destructive: false, idempotent: true},
 	"mctl_set_agent_version_lifecycle":       {readOnly: false, destructive: true, idempotent: false},

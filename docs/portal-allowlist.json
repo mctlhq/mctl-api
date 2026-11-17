@@ -425,6 +425,11 @@
       "reason": "Admin-only write: appends a ReleaseBinding revision that restores a prior definition/profile pair for an agent in an environment. Destructive to running behaviour and not recorded readOnly, so it stays off the shared portal."
     },
     {
+      "name": "mctl_rollback_revision",
+      "enabled": false,
+      "reason": "Restores a service's whole values.yaml and image digest from an earlier deployment record, changing production. New (mctlhq/mctl-api#1048) and not yet enabled on the shared portal: the owner decides visibility once deployment records exist for deploy-service."
+    },
+    {
       "name": "mctl_rollback_service",
       "enabled": true,
       "reason": "Rolls a service back to a prior image tag, changing production. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
