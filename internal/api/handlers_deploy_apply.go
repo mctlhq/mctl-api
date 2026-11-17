@@ -137,6 +137,15 @@ func planApplicableCheck(p *deployplan.Plan, now time.Time, imageOrg string) (de
 		slog.Error("deploy apply: stored plan does not match its digest", "plan", p.ID)
 		return deployplan.Intent{}, &planRefusal{http.StatusInternalServerError, codeDeployApplyUnavailable, "the stored plan does not match its digest"}
 	}
+	if p.Environment == deployplan.EnvironmentProduction && p.Action == deployplan.ActionPromote {
+		// A promotion has no deploy intent: its own intent names the
+		// preview record, tag and digest the plan's values were built from.
+		if _, err := deployplan.ParsePromoteIntent(p.IntentCanonical); err != nil {
+			slog.Error("deploy apply: stored promote intent does not parse", "plan", p.ID, "error", err)
+			return deployplan.Intent{}, &planRefusal{http.StatusInternalServerError, codeDeployApplyUnavailable, "the stored plan's intent cannot be read"}
+		}
+		return deployplan.Intent{}, nil
+	}
 	intent, _, err := deployplan.ParseIntent([]byte(p.IntentCanonical))
 	if err != nil {
 		slog.Error("deploy apply: stored intent does not parse", "plan", p.ID, "error", err)
@@ -164,9 +173,9 @@ func planApplicableCheck(p *deployplan.Plan, now time.Time, imageOrg string) (de
 	return intent, nil
 }
 
-// planApplicable is planApplicableCheck answered and audited.
+// planApplicable is checkPlan answered and audited.
 func (h *Handlers) planApplicable(w http.ResponseWriter, a *deployAudit, p *deployplan.Plan) (deployplan.Intent, bool) {
-	intent, ref := planApplicableCheck(p, h.deployPlanNow(), h.opts.PlatformImageOrg)
+	intent, ref := h.checkPlan(p)
 	if ref != nil {
 		a.refuse(w, ref.status, ref.code, ref.msg)
 		return deployplan.Intent{}, false
@@ -353,21 +362,44 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 
 	// The submission, built from the plan alone and validated before the
 	// grant is spent.
-	op, ok := h.opts.Registry.Get(previewDeployOp)
+	promote := p.Action == deployplan.ActionPromote
+	opName := previewDeployOp
+	if promote {
+		opName = promoteDeploymentOp
+		if !h.promoteTenantEnabled(p.Tenant) {
+			a.refuse(w, http.StatusForbidden, codePromoteTenantDisabled, "promotion to production is not enabled for this workspace yet")
+			return
+		}
+	}
+	op, ok := h.opts.Registry.Get(opName)
 	if !ok {
-		a.refuse(w, http.StatusInternalServerError, codeDeployApplyUnavailable, "the preview-deploy operation is not registered")
+		a.refuse(w, http.StatusInternalServerError, codeDeployApplyUnavailable, "the "+opName+" operation is not registered")
 		return
 	}
-	input := h.opts.Registry.ApplyDefaults(op, map[string]string{
-		"team_name":       p.Tenant,
-		"component_name":  p.Service,
-		"image_tag":       "rev-" + p.Revision,
-		"git_ref":         p.Revision,
-		"dockerfile_repo": intent.Spec.Source.Repository,
-		"dockerfile_path": intent.Spec.Source.Dockerfile,
-		"preview_id":      p.PreviewID,
-		"gitops_ref":      p.GitopsBaseSHA,
-	})
+	var input map[string]string
+	if promote {
+		// Tag and digest come from the approved plan alone.
+		pi, err := deployplan.ParsePromoteIntent(p.IntentCanonical)
+		if err != nil {
+			a.refuse(w, http.StatusInternalServerError, codeDeployApplyUnavailable, "the stored plan's intent cannot be read")
+			return
+		}
+		input = h.opts.Registry.ApplyDefaults(op, map[string]string{
+			"team_name": p.Tenant, "component_name": p.Service,
+			"image_tag": pi.ImageTag, "image_digest": pi.ImageDigest,
+		})
+	} else {
+		input = h.opts.Registry.ApplyDefaults(op, map[string]string{
+			"team_name":       p.Tenant,
+			"component_name":  p.Service,
+			"image_tag":       "rev-" + p.Revision,
+			"git_ref":         p.Revision,
+			"dockerfile_repo": intent.Spec.Source.Repository,
+			"dockerfile_path": intent.Spec.Source.Dockerfile,
+			"preview_id":      p.PreviewID,
+			"gitops_ref":      p.GitopsBaseSHA,
+		})
+	}
 	if p.Action == deployplan.ActionOnboard {
 		// The values come from the approved plan, never from the caller:
 		// rebuilt from its intent and held to the redacted rendering the
@@ -386,7 +418,9 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 		a.refuse(w, http.StatusInternalServerError, codeDeployApplyUnavailable, "the plan cannot be turned into a valid preview-deploy")
 		return
 	}
-	if err := h.checkBuildInputs(r.Context(), op, input, user, p.Tenant, false); err != nil {
+	if promote {
+		// Nothing is built or cloned from a caller-influenced repository.
+	} else if err := h.checkBuildInputs(r.Context(), op, input, user, p.Tenant, false); err != nil {
 		status, msg := http.StatusForbidden, err.Error()
 		if !errors.Is(err, errBuildRepoRefused) {
 			slog.Error("deploy apply: build input check could not be made", "plan", p.ID, "error", err)
@@ -450,7 +484,7 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 	submitCtx, executionEnded, prepared := h.prepareSubmitExecution(w, r, user, op, p.Tenant, input)
 	if !prepared {
 		// Nothing recorded yet, so the plan stays appliable with a new grant.
-		h.logAudit(r, audit.Entry{UserID: user.ID, Operation: previewDeployOp, Parameters: auditParams, Status: "failed",
+		h.logAudit(r, audit.Entry{UserID: user.ID, Operation: opName, Parameters: auditParams, Status: "failed",
 			RiskLevel: string(op.RiskLevel), Message: "could not create the run's execution; nothing was submitted"})
 		a.set("error", "error:execution_not_prepared")
 		return
@@ -495,25 +529,29 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 	note := executionEnded(result, err)
 	h.recordSubmission(r.Context(), rec.ID, result, err)
 	if err != nil {
-		h.logAudit(r, audit.Entry{UserID: user.ID, Operation: previewDeployOp, Parameters: auditParams, Status: "failed",
+		h.logAudit(r, audit.Entry{UserID: user.ID, Operation: opName, Parameters: auditParams, Status: "failed",
 			RiskLevel: string(op.RiskLevel), Message: "submit failed: " + err.Error()})
 		a.set("error", "error:submit_failed")
 		writeErrorCode(w, http.StatusBadGateway, codeDeployApplyUnavailable,
 			"the grant was spent but preview-deploy could not be submitted, and this plan cannot be applied again; create a new plan and request a grant for it"+note, nil)
 		return
 	}
-	h.logAudit(r, audit.Entry{UserID: user.ID, Operation: previewDeployOp, Parameters: auditParams,
+	h.logAudit(r, audit.Entry{UserID: user.ID, Operation: opName, Parameters: auditParams,
 		WorkflowName: result.WorkflowName, Status: "submitted", RiskLevel: string(op.RiskLevel)})
 	a.params["workflow"] = result.WorkflowName
 	a.set("succeeded", "submitted")
-	writeJSON(w, http.StatusAccepted, map[string]any{
+	resp := map[string]any{
 		"deployment_id": rec.ID,
 		"plan_id":       p.ID,
 		"approval_id":   spent.ID,
-		"preview_id":    p.PreviewID,
-		"preview_url":   "https://" + p.Host,
 		"workflow":      result,
-	})
+	}
+	if promote {
+		resp["environment"] = p.Environment
+	} else {
+		resp["preview_id"], resp["preview_url"] = p.PreviewID, "https://"+p.Host
+	}
+	writeJSON(w, http.StatusAccepted, resp)
 }
 
 // deployOwnerCheck answers whether principalID is a live owner of tenant:
@@ -592,4 +630,41 @@ func (h *Handlers) recordSubmission(reqCtx context.Context, id string, result *o
 		slog.Error("deploy apply: recording the submission outcome; the record stays in submitting",
 			"deployment", id, "status", status, "error", err)
 	}
+}
+
+// checkPlan is planApplicableCheck plus what needs the handlers' state. For a
+// promotion that is the tenant allowlist and production itself: the owner
+// approved a before/after diff computed against one production state, so a
+// plan whose production values have moved since (another promotion, a
+// changed repository) is refused, never applied over the newer state.
+func (h *Handlers) checkPlan(p *deployplan.Plan) (deployplan.Intent, *planRefusal) {
+	intent, ref := planApplicableCheck(p, h.deployPlanNow(), h.opts.PlatformImageOrg)
+	if ref != nil || p.Action != deployplan.ActionPromote {
+		return intent, ref
+	}
+	if !h.promoteTenantEnabled(p.Tenant) {
+		return intent, &planRefusal{http.StatusForbidden, codePromoteTenantDisabled, "promotion to production is not enabled for this workspace yet"}
+	}
+	if h.opts.DeployGitops == nil {
+		return intent, &planRefusal{http.StatusServiceUnavailable, "deploy_gitops_unavailable", "the gitops checkout cannot be read right now"}
+	}
+	base, _, exists, _, err := h.opts.DeployGitops.ServiceValuesAt(p.Tenant, p.Service)
+	if err != nil {
+		slog.Error("deploy apply: reading production values", "plan", p.ID, "error", err)
+		return intent, &planRefusal{http.StatusServiceUnavailable, "deploy_gitops_unavailable", "the gitops checkout cannot be read right now"}
+	}
+	stale := &planRefusal{http.StatusConflict, codeDeployApplyNotReproducible,
+		"production's values changed since this plan was made (another promotion or a gitops change); plan again"}
+	if !exists {
+		return intent, stale
+	}
+	cur, err := deployplan.ParseValuesForCheck(base)
+	if err != nil {
+		return intent, stale
+	}
+	curYAML, err := deployplan.RenderYAML(deployplan.Redact(cur))
+	if err != nil || deployplan.SHA256Hex(curYAML) != p.ValuesBeforeSHA256 {
+		return intent, stale
+	}
+	return intent, nil
 }

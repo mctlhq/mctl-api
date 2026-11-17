@@ -32,12 +32,12 @@ CREATE TABLE IF NOT EXISTS deploy_plans (
   schema_version       TEXT NOT NULL,
   tenant               TEXT NOT NULL,
   service              TEXT NOT NULL,
-  environment          TEXT NOT NULL CHECK (environment = 'preview'),
+  environment          TEXT NOT NULL CHECK (environment IN ('preview','production')),
   intent               JSONB NOT NULL,
   intent_canonical     TEXT NOT NULL,
   revision             TEXT NOT NULL CHECK (revision ~ '^[0-9a-f]{40}$'),
   gitops_base_sha      TEXT NOT NULL CHECK (gitops_base_sha ~ '^[0-9a-f]{40}$'),
-  action               TEXT NOT NULL CHECK (action IN ('onboard','update')),
+  action               TEXT NOT NULL CHECK (action IN ('onboard','update','promote')),
   preview_id           TEXT NOT NULL,
   values_before_sha256 TEXT NOT NULL,
   values_after         TEXT NOT NULL,
@@ -54,6 +54,15 @@ CREATE TABLE IF NOT EXISTS deploy_plans (
                          AND expires_at <= created_at + interval '24 hours')
 );
 ALTER TABLE deploy_plans ADD COLUMN IF NOT EXISTS intent_changes_values BOOLEAN;
+-- A table created before promote only allowed preview and onboard/update;
+-- widen it, and tie production to promote both ways so no other action can
+-- name production and a promote cannot name a preview.
+ALTER TABLE deploy_plans DROP CONSTRAINT IF EXISTS deploy_plans_environment_check;
+ALTER TABLE deploy_plans ADD CONSTRAINT deploy_plans_environment_check CHECK (environment IN ('preview','production'));
+ALTER TABLE deploy_plans DROP CONSTRAINT IF EXISTS deploy_plans_action_check;
+ALTER TABLE deploy_plans ADD CONSTRAINT deploy_plans_action_check CHECK (action IN ('onboard','update','promote'));
+ALTER TABLE deploy_plans DROP CONSTRAINT IF EXISTS deploy_plans_environment_action_check;
+ALTER TABLE deploy_plans ADD CONSTRAINT deploy_plans_environment_action_check CHECK ((environment = 'production') = (action = 'promote'));
 CREATE UNIQUE INDEX IF NOT EXISTS deploy_plans_idem
   ON deploy_plans (created_by, idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS deploy_plans_tenant ON deploy_plans (tenant, created_at DESC);

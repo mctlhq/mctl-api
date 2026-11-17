@@ -53,6 +53,39 @@ Planning the same intent twice gives the same digest. Pass idempotency_key to ge
 	return tool, handler
 }
 
+func (s *Server) toolPromoteDeployment() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_promote_deployment",
+		mcplib.WithTitleAnnotation("Plan Promotion To Production"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
+		mcplib.WithDescription(`Plan the promotion of one verified preview deployment to production (mctl-api#1049).
+
+Pass the deployment_id (dep_...) of a preview that succeeded, was observed healthy and reported the image digest it ran. The server reads that digest from the deployment record; there is no digest, tag or revision argument, so a caller cannot promote an image no preview ran. The plan pins that image by digest in the service's production values.
+
+Planning changes nothing but one stored plan row. Applying needs a deploy.apply grant decided by an owner on a fresh-sign-in page: request one with mctl_request_deploy_approval, then apply with mctl_deploy_apply. Available only for the platform's own workspace for now.`),
+		mcplib.WithString("deployment_id", mcplib.Required(), mcplib.Description("Preview deployment id (dep_...), as returned by mctl_deploy_apply")),
+		mcplib.WithNumber("ttl_seconds", mcplib.Description("Plan lifetime in seconds, 60 to 86400 (default 1800)")),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		id, _ := args["deployment_id"].(string)
+		if id == "" {
+			return mcplib.NewToolResultError("deployment_id is required"), nil
+		}
+		body := map[string]any{"deployment_id": id}
+		if v, ok := args["ttl_seconds"]; ok && v != nil {
+			body["ttl_seconds"] = v
+		}
+		out, err := s.deployPlanRequest(ctx, http.MethodPost, "/api/v1/deploy/promote", body)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to plan promotion: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(out)), nil
+	}
+	return tool, handler
+}
+
 func (s *Server) toolGetDeployPlan() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_get_deploy_plan",
 		mcplib.WithTitleAnnotation("Get Deploy Plan"),

@@ -178,6 +178,11 @@ type Options struct {
 	// onboard plan names it as the image repository; empty refuses onboard
 	// plans rather than guess one.
 	PlatformImageOrg string
+	// PromoteTenants are the workspaces that may promote a verified preview
+	// to production (mctl-api#1049). Until the MCP gateway restricts who may
+	// call the tool at all, this is only the platform's own. Empty enables
+	// nobody.
+	PromoteTenants []string
 	// ErpactDeployer is the ERPact site-deployer client (mctl-api#486). A
 	// temporary, tenant-`erpact`-only stopgap: nil makes every
 	// /api/v1/tenants/erpact/sites* route 503, which is also how the feature
@@ -775,6 +780,7 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/deploy/analyze", h.DeployAnalyze)
 			r.Get("/deploy/bindings", h.DeployBindings)
 			r.Post("/deploy/plan", h.DeployPlan)
+			r.Post("/deploy/promote", h.DeployPromote)
 			r.Get("/deploy/plans/{id}", h.GetDeployPlan)
 			r.Post("/deploy/plans/{id}/approval", h.RequestDeployApproval)
 			r.Post("/deploy/apply", h.DeployApply)
