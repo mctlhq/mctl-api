@@ -86,6 +86,39 @@ Planning changes nothing but one stored plan row. Applying needs a deploy.apply 
 	return tool, handler
 }
 
+func (s *Server) toolRollbackDeployment() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_rollback_deployment",
+		mcplib.WithTitleAnnotation("Plan Rollback Of Production"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(false),
+		mcplib.WithDescription(`Plan the rollback of a service's production to the state of one earlier production deployment (mctl-api#1049).
+
+Pass the deployment_id (dep_...) of a production deployment that succeeded, was observed healthy and recorded its gitops commit and image digest. The server reads both from the deployment record; there is no commit, digest or revision argument. The rollback restores the service's values.yaml as it was at that commit and the health gate must then see that digest.
+
+Planning changes nothing but one stored plan row. Applying needs a deploy.apply grant decided by an owner on a fresh-sign-in page: request one with mctl_request_deploy_approval, then apply with mctl_deploy_apply. Available only for the platform's own workspace for now. mctl_rollback_revision refuses production deployments.`),
+		mcplib.WithString("deployment_id", mcplib.Required(), mcplib.Description("Production deployment id (dep_...) to restore")),
+		mcplib.WithNumber("ttl_seconds", mcplib.Description("Plan lifetime in seconds, 60 to 86400 (default 1800)")),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		args := req.GetArguments()
+		id, _ := args["deployment_id"].(string)
+		if id == "" {
+			return mcplib.NewToolResultError("deployment_id is required"), nil
+		}
+		body := map[string]any{"deployment_id": id}
+		if v, ok := args["ttl_seconds"]; ok && v != nil {
+			body["ttl_seconds"] = v
+		}
+		out, err := s.deployPlanRequest(ctx, http.MethodPost, "/api/v1/deploy/rollback", body)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to plan rollback: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(out)), nil
+	}
+	return tool, handler
+}
+
 func (s *Server) toolGetDeployPlan() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_get_deploy_plan",
 		mcplib.WithTitleAnnotation("Get Deploy Plan"),

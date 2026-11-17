@@ -9,6 +9,9 @@ func RequiredApproval(environment string, action Action) Approval {
 	if environment == EnvironmentPreview && action == ActionOnboard {
 		return Approval{Required: true, Role: "owner", Reason: "preview_onboard_requires_approval"}
 	}
+	if environment == EnvironmentProduction && action == ActionRollback {
+		return Approval{Required: true, Role: "owner", Reason: "rollback_requires_approval"}
+	}
 	if environment == EnvironmentProduction && action == ActionPromote {
 		return Approval{Required: true, Role: "owner", Reason: "promote_requires_approval"}
 	}

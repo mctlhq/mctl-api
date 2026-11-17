@@ -2571,6 +2571,80 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /api/v1/deploy/rollback:
+    post:
+      summary: Plan the rollback of production to an earlier deployment
+      description: |
+        Plans restoring a service's production values.yaml as it was at the
+        gitops commit an earlier production deployment recorded
+        (mctl-api#1049). The body names only that deployment's
+        `deployment_id`; the commit and image digest are read from the record,
+        so no caller field can name a state production never had. The record
+        must be a submitted production deployment whose run succeeded,
+        observed healthy, with a recorded commit and image digest.
+
+        Planning writes one `deploy_plans` row and nothing else. The plan is
+        approved and applied with `/api/v1/deploy/plans/{id}/approval` and
+        `/api/v1/deploy/apply`: an owner's `deploy.apply` grant bound to the
+        plan digest. Available only for the workspaces the server lists in
+        its production allowlist (the platform's own, for now).
+
+        Needs the developer minimum role on the record's tenant. Every call
+        writes one audit entry (`deploy.rollback`).
+      tags: [Deploy]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [deployment_id]
+              properties:
+                deployment_id:
+                  type: string
+                  description: Id (`dep_...`) of the production deployment to restore
+                ttl_seconds:
+                  type: integer
+                  minimum: 60
+                  maximum: 86400
+      responses:
+        '201':
+          description: Plan created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeployPlan'
+        '400':
+          description: Unknown field (a commit or digest is not accepted), missing `deployment_id` or `ttl_seconds` out of range (rollback_invalid_input)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: The caller lacks the role, or production changes are not enabled for the workspace (promote_tenant_not_enabled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such deployment, or one of a workspace the caller is not in (rollback_deployment_not_found)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: The deployment cannot be rolled back to (rollback_deployment_not_usable), or the service has no production values (rollback_values_unusable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: The plan, record or gitops store is not available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /api/v1/deploy/plan:
     post:
       summary: Plan a preview deploy

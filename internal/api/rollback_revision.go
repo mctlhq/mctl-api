@@ -91,6 +91,12 @@ func (h *Handlers) prepareRollbackRevision(w http.ResponseWriter, r *http.Reques
 		writeErrorCode(w, http.StatusServiceUnavailable, codeRollbackStoreUnavailable, "the deployment record store is not available", nil)
 		return false
 	}
+	if rec.Tenant == input["team_name"] && rec.Service == input["component_name"] && rec.Environment == deployplan.EnvironmentProduction {
+		// Restoring a production state needs an owner's grant: this route has
+		// none, so it is only reachable through /deploy/rollback and apply.
+		return deny(http.StatusForbidden, codeRollbackRequiresGrant,
+			"rolling back to a production deployment needs an owner's approval: plan it with POST /api/v1/deploy/rollback", "denied:"+codeRollbackRequiresGrant)
+	}
 	switch why := rollbackRecordUnusable(rec, input["team_name"], input["component_name"]); why {
 	case "":
 	case "other_service":
