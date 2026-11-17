@@ -389,7 +389,8 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input map[string]string
-	if rollback {
+	switch {
+	case rollback:
 		// Commit and digest come from the approved plan alone.
 		ri, err := deployplan.ParseRollbackIntent(p.IntentCanonical)
 		if err != nil {
@@ -401,7 +402,7 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 			rollbackDeploymentIDParam: ri.TargetDeploymentID,
 			rollbackTargetCommitParam: ri.TargetCommit, rollbackExpectedDigestParam: ri.ExpectedDigest,
 		})
-	} else if promote {
+	case promote:
 		// Tag and digest come from the approved plan alone.
 		pi, err := deployplan.ParsePromoteIntent(p.IntentCanonical)
 		if err != nil {
@@ -412,7 +413,7 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 			"team_name": p.Tenant, "component_name": p.Service,
 			"image_tag": pi.ImageTag, "image_digest": pi.ImageDigest,
 		})
-	} else {
+	default:
 		input = h.opts.Registry.ApplyDefaults(op, map[string]string{
 			"team_name":       p.Tenant,
 			"component_name":  p.Service,
@@ -441,6 +442,12 @@ func (h *Handlers) DeployApply(w http.ResponseWriter, r *http.Request) {
 		slog.Error("deploy apply: plan-built input does not validate", "plan", p.ID, "errors", strings.Join(errs, "; "))
 		a.refuse(w, http.StatusInternalServerError, codeDeployApplyUnavailable, "the plan cannot be turned into a valid preview-deploy")
 		return
+	}
+	if rollback {
+		// The workflow takes the commit and digest and declares no
+		// deployment_id, so Argo would reject it; the record names the
+		// target as source_deployment_id.
+		delete(input, rollbackDeploymentIDParam)
 	}
 	if production {
 		// Nothing is built or cloned from a caller-influenced repository.

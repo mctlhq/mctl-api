@@ -70,6 +70,14 @@ func (h *Handlers) prepareRollbackRevision(w http.ResponseWriter, r *http.Reques
 		writeErrorCode(w, status, code, msg, nil)
 		return false
 	}
+	if h.promoteTenantEnabled(input["team_name"]) {
+		// The route rewrites the service's values.yaml from a gitops commit,
+		// the file production runs from; for a workspace whose production
+		// is governed by grants, a rollback is planned with
+		// POST /api/v1/deploy/rollback whatever deployment it restores.
+		return deny(http.StatusForbidden, codeRollbackRequiresGrant,
+			"production in this workspace changes only with an owner's approval: plan a rollback with POST /api/v1/deploy/rollback", "denied:"+codeRollbackRequiresGrant)
+	}
 	id := input[rollbackDeploymentIDParam]
 	if !strings.HasPrefix(id, deployplan.RecordIDPrefix) {
 		return deny(http.StatusNotFound, codeRollbackDeploymentNotFound, "no such deployment for this service", "denied:"+codeRollbackDeploymentNotFound)

@@ -6,8 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	mctlapi "github.com/mctlhq/mctl-api/internal/api"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/deployplan"
+	"github.com/mctlhq/mctl-api/internal/operations"
 	"github.com/mctlhq/mctl-api/internal/workitems"
 )
 
@@ -112,6 +114,11 @@ func TestDeployApply_RollbackRunsTheRecordedCommitOnce(t *testing.T) {
 			t.Errorf("rollback-revision %s = %q, want %q", k, got[k], want)
 		}
 	}
+	// The workflow declares no deployment_id, so Argo would reject it; the
+	// record names the target instead.
+	if _, leaked := got["deployment_id"]; leaked {
+		t.Fatalf("deployment_id reached the workflow: %v", got)
+	}
 	res := decodeJSON(t, w)
 	rec, err := f.records.GetRecord(context.Background(), res["deployment_id"].(string))
 	if err != nil || rec.Environment != deployplan.EnvironmentProduction || rec.SourceDeploymentID != rollbackDepID {
@@ -160,3 +167,16 @@ func TestRollbackRevision_ProductionNeedsAGrant(t *testing.T) {
 }
 
 func authDev() *auth.User { return auth.NewGitHubUser("dan-dev", []string{"erpact"}) }
+
+// A workspace whose production is governed by grants cannot reach its
+// values file through the ungoverned route either, with any record.
+func TestRollbackRevision_GovernedWorkspaceNeedsAGrantForAnyRecord(t *testing.T) {
+	f := newRollbackFixture(t)
+	f.router = mctlapi.NewRouter(mctlapi.Options{Registry: operations.NewRegistry(), GitReader: f.git,
+		AuditLog: f.audit, Executor: f.exec, DeployRecords: f.records, PromoteTenants: []string{"erpact"}})
+	f.put(func(r *deployplan.Record) { r.Environment = deployplan.EnvironmentPreview })
+	code, out := f.post(rbBody(), authDev())
+	if code != http.StatusForbidden || !strings.Contains(out, "rollback_requires_grant") || len(f.exec.submittedParams) != 0 {
+		t.Fatalf("generic rollback in a governed workspace = %d %s", code, out)
+	}
+}

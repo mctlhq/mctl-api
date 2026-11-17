@@ -23,8 +23,8 @@ import (
 // come from the record, never from the request.
 
 const (
-	codeRollbackInvalidInput  = "rollback_invalid_input"
-	codeRollbackValuesUnusage = "rollback_values_unusable"
+	codeRollbackInvalidInput   = "rollback_invalid_input"
+	codeRollbackValuesUnusable = "rollback_values_unusable"
 	// codeRollbackRequiresGrant is the answer of the ungoverned
 	// rollback-revision route for a production deployment.
 	codeRollbackRequiresGrant = "rollback_requires_grant"
@@ -122,7 +122,7 @@ func (h *Handlers) DeployRollback(w http.ResponseWriter, r *http.Request) {
 		a.refuse(w, http.StatusServiceUnavailable, "deploy_gitops_unavailable", "the gitops checkout cannot be read right now")
 		return
 	case !exists:
-		a.refuse(w, http.StatusConflict, codeRollbackValuesUnusage, "the service has no production values in gitops")
+		a.refuse(w, http.StatusConflict, codeRollbackValuesUnusable, "the service has no production values in gitops")
 		return
 	case !deployRevRe.MatchString(baseSHA):
 		slog.Error("deploy rollback: gitops revision is not a commit SHA")
