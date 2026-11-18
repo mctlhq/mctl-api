@@ -1480,6 +1480,11 @@ func main() {
 		if st, ok := glovoConsentRoutes.Store.(*glovoconsent.PostgresStore); ok {
 			defer st.Close()
 		}
+		// The link preview's masked identity reads live principal facts;
+		// without the principal store the label request answers 503.
+		if principalStore != nil {
+			glovoConsentRoutes.Identity = principalStore
+		}
 		if wireGlovoPersonalGrants(oauthServer, glovoRoutes, glovoConsentRoutes) {
 			slog.Info("glovo personal grants admitted for consenting principals with no eligible team")
 		}

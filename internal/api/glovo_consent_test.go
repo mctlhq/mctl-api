@@ -580,3 +580,120 @@ func TestGlovoConsentReadHandlerRefusesWithoutGate(t *testing.T) {
 		}
 	}
 }
+
+// fakeIdentity is a glovoconsent.IdentitySource that records the principal
+// it was asked about.
+type fakeIdentity struct {
+	facts map[string]glovoconsent.IdentityFacts
+	err   error
+	asked []string
+}
+
+func (f *fakeIdentity) IdentityFacts(_ context.Context, pid string) (glovoconsent.IdentityFacts, error) {
+	f.asked = append(f.asked, pid)
+	if f.err != nil {
+		return glovoconsent.IdentityFacts{}, f.err
+	}
+	return f.facts[pid], nil
+}
+
+func maskedConsentEnv(t *testing.T, id glovoconsent.IdentitySource) *consentEnv {
+	t.Helper()
+	store := newMemConsentStore()
+	g := mountedConsent(store, consentCap)
+	g.Identity = id
+	e := newConsentEnv(t, g, standardConsentUsers(t))
+	if rec := e.call("PUT", consentHumanURL, "alice", ""); rec.Code != http.StatusCreated {
+		t.Fatalf("record = %d %s", rec.Code, rec.Body.String())
+	}
+	return e
+}
+
+const maskedQuery = "?include=masked_identity"
+
+// The label is returned only when asked for, only for an active consent, and
+// never carries more than the first character.
+func TestGlovoConsentReadMaskedIdentity(t *testing.T) {
+	const rawLogin = "alice-the-real-login"
+	id := &fakeIdentity{facts: map[string]glovoconsent.IdentityFacts{
+		consentPIDA: {Identities: []glovoconsent.IdentityFact{{Provider: "github", Display: rawLogin}}},
+	}}
+	e := maskedConsentEnv(t, id)
+
+	rec := e.call("GET", consentReadURL(consentPIDA)+maskedQuery, "svc", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("read = %d %s", rec.Code, rec.Body.String())
+	}
+	if got := readState(t, rec); got.State != "active" || got.MaskedIdentity != "github:a***" {
+		t.Fatalf("read = %+v, want active with label github:a***", got)
+	}
+	if strings.Contains(rec.Body.String(), rawLogin) || strings.Contains(rec.Body.String(), "alice-") {
+		t.Fatalf("body leaks the raw login: %s", rec.Body.String())
+	}
+
+	// Without the opt-in the answer is unchanged and the source is not asked.
+	id.asked = nil
+	rec = e.call("GET", consentReadURL(consentPIDA), "svc", "")
+	if got := readState(t, rec); got.MaskedIdentity != "" || strings.Contains(rec.Body.String(), "masked_identity") || len(id.asked) != 0 {
+		t.Fatalf("plain read carried a label or asked the source: %s asked=%v", rec.Body.String(), id.asked)
+	}
+
+	// No consent: no label, and the source is not asked.
+	id.asked = nil
+	rec = e.call("GET", consentReadURL(consentPIDB)+maskedQuery, "svc", "")
+	if got := readState(t, rec); got.State != "none" || got.MaskedIdentity != "" || len(id.asked) != 0 {
+		t.Fatalf("none read = %s asked=%v", rec.Body.String(), id.asked)
+	}
+
+	// Revoked consent: no label.
+	if rec := e.call("DELETE", consentHumanURL, "alice", ""); rec.Code != http.StatusOK {
+		t.Fatalf("revoke = %d", rec.Code)
+	}
+	id.asked = nil
+	rec = e.call("GET", consentReadURL(consentPIDA)+maskedQuery, "svc", "")
+	if got := readState(t, rec); got.State != "none" || got.MaskedIdentity != "" || len(id.asked) != 0 {
+		t.Fatalf("revoked read = %s asked=%v", rec.Body.String(), id.asked)
+	}
+}
+
+// A label that cannot be built is a 503 for that request, never an omitted
+// field on a 200 and never a raw value.
+func TestGlovoConsentMaskedIdentityUnavailableIs503(t *testing.T) {
+	for name, id := range map[string]glovoconsent.IdentitySource{
+		"source error":     &fakeIdentity{err: errors.New("principal store down")},
+		"nothing readable": &fakeIdentity{facts: map[string]glovoconsent.IdentityFacts{}},
+		"no source":        nil,
+	} {
+		e := maskedConsentEnv(t, id)
+		rec := e.call("GET", consentReadURL(consentPIDA)+maskedQuery, "svc", "")
+		if rec.Code != http.StatusServiceUnavailable || strings.Contains(rec.Body.String(), "masked_identity") || strings.Contains(rec.Body.String(), "principal store down") {
+			t.Errorf("%s: %d %s, want a bare 503", name, rec.Code, rec.Body.String())
+		}
+		// The ordinary read is unaffected.
+		if rec := e.call("GET", consentReadURL(consentPIDA), "svc", ""); rec.Code != http.StatusOK {
+			t.Errorf("%s: plain read = %d", name, rec.Code)
+		}
+	}
+}
+
+// The label is built for the principal in the path only, and the human
+// routes never carry it.
+func TestGlovoConsentMaskedIdentityIsPerPrincipalAndServiceOnly(t *testing.T) {
+	id := &fakeIdentity{facts: map[string]glovoconsent.IdentityFacts{
+		consentPIDA: {Identities: []glovoconsent.IdentityFact{{Provider: "github", Display: "alice"}}},
+		consentPIDB: {Identities: []glovoconsent.IdentityFact{{Provider: "github", Display: "bob"}}},
+	}}
+	e := maskedConsentEnv(t, id)
+	if rec := e.call("PUT", consentHumanURL, "bob", ""); rec.Code != http.StatusCreated {
+		t.Fatalf("bob record = %d", rec.Code)
+	}
+	if got := readState(t, e.call("GET", consentReadURL(consentPIDB)+maskedQuery, "svc", "")); got.MaskedIdentity != "github:b***" {
+		t.Fatalf("bob label = %q", got.MaskedIdentity)
+	}
+	if rec := e.call("GET", consentHumanURL+maskedQuery, "alice", ""); strings.Contains(rec.Body.String(), "masked_identity") {
+		t.Fatalf("the human route carries a label: %s", rec.Body.String())
+	}
+	if rec := e.call("GET", consentReadURL(consentPIDA)+maskedQuery, "alice", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("a human read of the service route = %d, want 401", rec.Code)
+	}
+}
