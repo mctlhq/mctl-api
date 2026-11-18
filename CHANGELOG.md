@@ -1,5 +1,29 @@
 # Changelog
 
+## [4.170.0](https://github.com/mctlhq/mctl-api/compare/4.169.1...4.170.0) (2026-11-18)
+
+
+### Features
+
+* **deploy:** let a DeployIntent expose a Service port below 1024 ([c6ace41](https://github.com/mctlhq/mctl-api/commit/c6ace41f96f6acb4ccad2354db5c70967f06139e))
+* **glovo:** masked identity on the consent service read (mctl-glovo[#42](https://github.com/mctlhq/mctl-api/issues/42)) ([1b7e06e](https://github.com/mctlhq/mctl-api/commit/1b7e06ee174fe795a01bae21d49bda7a0969d8ec))
+* **oauth:** glovo link resource with forced fresh login ([e81beff](https://github.com/mctlhq/mctl-api/commit/e81beffa95d464a5721e5ffb2495f37e47b161aa))
+* **oauth:** glovo link resource with forced fresh login ([14f3531](https://github.com/mctlhq/mctl-api/commit/14f3531e12fb721f6a10eb9a813337b8e00fb231))
+
+
+### Bug Fixes
+
+* **api:** decide DevLoop approvals on the decide page only ([fca507e](https://github.com/mctlhq/mctl-api/commit/fca507e29f8aef7ca69754baad0c609e4606ed43))
+* **api:** decide DevLoop approvals on the decide page only ([2019361](https://github.com/mctlhq/mctl-api/commit/2019361bda0f50a6d006e0b0d7e27e273adce51c))
+* **api:** gate the refusal decide_url on grant visibility ([236b60e](https://github.com/mctlhq/mctl-api/commit/236b60ec4098ef4b8b460306b0c632a6984e71b8))
+* **api:** keep a closed DevLoop grant's state refusal; lint ([46569d7](https://github.com/mctlhq/mctl-api/commit/46569d7e468f63d8f071b23ed62d284a973ac434))
+* **api:** refuse direct mctl-agents-approve without the decide page ([7f14cb2](https://github.com/mctlhq/mctl-api/commit/7f14cb242b5721cd093e74741a3e14f30b71302c))
+* **api:** refuse direct mctl-agents-approve without the decide page ([0453322](https://github.com/mctlhq/mctl-api/commit/04533226a5f444c0eb4a884ac338be224e2eb0db))
+* **glovo:** bump the consent version constant to c2-link-v2 ([bf4d577](https://github.com/mctlhq/mctl-api/commit/bf4d577f395800faef1da17e0eff84e41d442651))
+* **glovo:** record consent text version c2-link-v2 ([a4cbf88](https://github.com/mctlhq/mctl-api/commit/a4cbf8872ba3be0dd0332b942156cb8bf199dda9))
+* **glovo:** record consent text version c2-link-v2 ([52b0595](https://github.com/mctlhq/mctl-api/commit/52b0595e21da58a594fd9fdf18320754a4d1a75c))
+* **oauth:** use a switch for the code issuer ([89e5407](https://github.com/mctlhq/mctl-api/commit/89e5407f318645bd8c08f9689bee444c7443e322))
+
 ## [4.169.1](https://github.com/mctlhq/mctl-api/compare/4.169.0...4.169.1) (2026-11-18)
 
 
