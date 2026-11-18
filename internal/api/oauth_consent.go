@@ -95,11 +95,12 @@ func (h *Handlers) issueGrant(r *http.Request, c authzCompletion) (string, error
 	o := h.opts.OAuthServer
 	var code string
 	var err error
-	if o.IsGlovoLinkFlow(c.Resource) {
+	switch {
+	case o.IsGlovoLinkFlow(c.Resource):
 		code, err = o.IssueCodeForLink(r.Context(), c.Login, c.PrincipalID, c.ClientID, c.RedirectURI, c.CodeChallenge, c.Groups, c.AuthMethod, c.Resource, c.AuthTime)
-	} else if c.PersonalGrant {
+	case c.PersonalGrant:
 		code, err = o.IssueCodeForPersonalGrant(r.Context(), c.Login, c.PrincipalID, c.ClientID, c.RedirectURI, c.CodeChallenge, c.Groups, c.AuthMethod, c.Resource, c.TeamGrantID)
-	} else {
+	default:
 		code, err = o.IssueCodeForTeamGrant(r.Context(), c.Login, c.PrincipalID, c.ClientID, c.RedirectURI, c.CodeChallenge, c.Groups, c.AuthMethod, c.Resource, c.TeamGrantID, c.SelectedTenant)
 	}
 	if err != nil {
