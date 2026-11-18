@@ -768,15 +768,13 @@ func (h *Handlers) mayDirectApproveProposal(r *http.Request, user *auth.User) bo
 func (h *Handlers) refuseDirectProposalApprove(w http.ResponseWriter, r *http.Request, user *auth.User, op operations.Operation, input map[string]string) {
 	params := legacyRelayParams(user, op.Name, input)
 	details := map[string]interface{}{}
-	workflowID, err := temporalclient.WorkflowIDForProposalRef(input["service"] + "/" + input["slug"])
-	if err != nil {
-		workflowID = ""
-	}
+	// An error leaves workflowID "": the proposal names no DevLoop.
+	workflowID, _ := temporalclient.WorkflowIDForProposalRef(input["service"] + "/" + input["slug"])
 	var ref, decideURL string
 	if workflowID != "" {
 		params["workflow_id"] = workflowID
 		details["workflow_id"] = workflowID
-		ref, decideURL = h.pendingDevLoopDecideURL(r.Context(), workflowID)
+		ref, decideURL = h.pendingDevLoopDecideURL(r.Context(), user, workflowID)
 	}
 	if ref != "" {
 		params["approval_ref"] = ref
@@ -809,8 +807,10 @@ func (h *Handlers) refuseDirectProposalApprove(w http.ResponseWriter, r *http.Re
 
 // pendingDevLoopDecideURL is the decide_url of workflowID's newest
 // mctl-agents-approve grant when that grant is pending and the page is
-// enabled; "" otherwise, including when the store could not be read.
-func (h *Handlers) pendingDevLoopDecideURL(ctx context.Context, workflowID string) (ref, decideURL string) {
+// enabled and user may read that grant (canSeeActionApproval, the rule of
+// GetDevLoopApproval); "" otherwise, including when the store could not be
+// read.
+func (h *Handlers) pendingDevLoopDecideURL(ctx context.Context, user *auth.User, workflowID string) (ref, decideURL string) {
 	if h.opts.WorkItems == nil {
 		return "", ""
 	}
@@ -833,6 +833,9 @@ func (h *Handlers) pendingDevLoopDecideURL(ctx context.Context, workflowID strin
 		return "", ""
 	}
 	newest := &list[0]
+	if !canSeeActionApproval(user, newest) {
+		return "", ""
+	}
 	dc := h.decisionContext(newest)
 	u, _ := h.decideURL(workflowID, decisionBinding{
 		ApprovalRef: newest.ID, ContextDigest: dc.ContextDigest, ContentDigest: dc.ArtifactHash,

@@ -18,7 +18,9 @@ import (
 // the operation.
 func (g *grantEnv) decidePageDenials() int {
 	n := 0
-	for _, e := range g.audit.List(1000) {
+	entries := g.audit.List(1000)
+	for i := range entries {
+		e := &entries[i]
 		if e.Operation == devLoopApprovalKind && e.Status == "denied" && e.RefusalCode == devLoopCodeDecidePageRequired {
 			n++
 		}
