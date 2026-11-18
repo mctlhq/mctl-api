@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.169.1](https://github.com/mctlhq/mctl-api/compare/4.169.0...4.169.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* **api:** refuse a decide link whose binding is not exact ([afdad78](https://github.com/mctlhq/mctl-api/commit/afdad785fc65cd1d53d4f079ead3bf3780f6f3aa))
+* **api:** refuse a decide link whose binding is not exact ([0469fed](https://github.com/mctlhq/mctl-api/commit/0469fed5e6bda50366b86b13692ec62535d67b11))
+* **zitadelhook:** read Google userinfo under rawInformation.User ([91d269e](https://github.com/mctlhq/mctl-api/commit/91d269e4e5890f71d707f02d093dda94cab48a31))
+
 ## [4.169.0](https://github.com/mctlhq/mctl-api/compare/4.168.0...4.169.0) (2026-11-18)
 
 
