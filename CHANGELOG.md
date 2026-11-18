@@ -1,5 +1,22 @@
 # Changelog
 
+## [4.169.0](https://github.com/mctlhq/mctl-api/compare/4.168.0...4.169.0) (2026-11-18)
+
+
+### Features
+
+* **api:** --check-config validates the zitadel-iac Secret values without booting ([e12bd6c](https://github.com/mctlhq/mctl-api/commit/e12bd6c1213ec4bec38ddabeea77453139fc4f67))
+* **api:** link tag commit and release on the release approval page ([98bdd6b](https://github.com/mctlhq/mctl-api/commit/98bdd6b85f2b1f409b0ded17b310441bbba3abbf))
+* **api:** link tag commit and release on the release approval page ([8972d94](https://github.com/mctlhq/mctl-api/commit/8972d94c4779812a6a7ce7e36b41c6eaec8adc87))
+* **api:** require MFA on the DevLoop decide page, hand out decide_url ([57563a9](https://github.com/mctlhq/mctl-api/commit/57563a9384f53124572bdc3f5bec453886f56016))
+* **auth:** allow service_subjects with customers_org_id ([d1e3394](https://github.com/mctlhq/mctl-api/commit/d1e33943951c102270019a212093c71e0309ef7e))
+* **chart:** optional sidecar slots and pod securityContext ([7118647](https://github.com/mctlhq/mctl-api/commit/7118647f4fb5c7761d14e2fba8c5b3fa301023c1))
+
+
+### Bug Fixes
+
+* **check-config:** iterate OIDC entries by index (gocritic rangeValCopy) ([69dd8d3](https://github.com/mctlhq/mctl-api/commit/69dd8d31a9f4a63fdf02ddd75a86b9442f7c6528))
+
 ## [4.168.0](https://github.com/mctlhq/mctl-api/compare/4.167.0...4.168.0) (2026-11-18)
 
 
