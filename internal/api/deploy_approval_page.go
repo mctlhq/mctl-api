@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -187,7 +188,7 @@ func setDeployCookie(w http.ResponseWriter, value string, maxAge int) {
 
 // deployPage draws the plan's diff. html/template escapes every value; there
 // is no script on the page.
-var deployPage = shellPage("deploy-approval", `{{with .Diff}}<pre style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:.8125rem;margin:.5rem 0 1rem">{{.}}</pre>{{end}}
+var deployPage = shellPage("deploy-approval", `{{with .Diff}}<pre style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:.8125rem;margin:.5rem 0 1rem;max-height:18rem;overflow:auto">{{.}}</pre>{{end}}
 {{if .SignIn}}<form class="actions" method="post" action="{{.SignIn.Action}}">
 <input type="hidden" name="approval_ref" value="{{.SignIn.ApprovalRef}}">
 <button type="submit">Sign in to review this deploy</button></form>{{end}}
@@ -199,6 +200,7 @@ var deployPage = shellPage("deploy-approval", `{{with .Diff}}<pre style="white-s
 
 type deployPageData struct {
 	Diff   string
+	Links  []shellLink
 	SignIn *struct{ Action, ApprovalRef string }
 	Decide *struct{ Action, Challenge, CSRF string }
 }
@@ -213,7 +215,7 @@ func (d *deployDecider) renderPage(w http.ResponseWriter, status int, title stri
 		}
 	}
 	renderShellPage(w, status, "default-src 'none'; style-src 'unsafe-inline'; form-action "+formAction+"; frame-ancestors 'none'; base-uri 'none'",
-		deployPage, shellData{Title: title, Lines: lines, Page: p})
+		deployPage, shellData{Title: title, Lines: lines, Links: p.Links, Wide: true, Page: p})
 }
 
 func (d *deployDecider) failed(w http.ResponseWriter, status int, msg string) {
@@ -343,6 +345,38 @@ func (s *deployShown) lines(display string) []string {
 	}
 	if s.unapplicable != nil {
 		out = append(out, "This plan cannot be applied: "+s.unapplicable.msg+".")
+	}
+	return out
+}
+
+var (
+	linkRepoRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	linkSHARe  = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	linkHostRe = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]*$`)
+)
+
+// gitopsRepoURL is where the plan's GitOps commit and a rollback's target
+// commit can be read.
+const gitopsRepoURL = "https://github.com/mctlhq/mctl-gitops/commit/"
+
+// links are the values on the page a reviewer will want to open: the source
+// commit the preview builds, the GitOps commit the plan was made against,
+// the preview's address. Each is built from a validated field, https only.
+func (s *deployShown) links() []shellLink {
+	p := s.plan
+	var out []shellLink
+	if intent, _, err := deployplan.ParseIntent([]byte(p.IntentCanonical)); err == nil &&
+		linkRepoRe.MatchString(intent.Spec.Source.Repository) && linkSHARe.MatchString(p.Revision) {
+		out = append(out, shellLink{Text: p.Revision, URL: "https://github.com/" + intent.Spec.Source.Repository + "/commit/" + p.Revision})
+	}
+	if linkSHARe.MatchString(p.GitopsBaseSHA) {
+		out = append(out, shellLink{Text: p.GitopsBaseSHA, URL: gitopsRepoURL + p.GitopsBaseSHA})
+	}
+	if p.Host != "" && linkHostRe.MatchString(p.Host) {
+		out = append(out, shellLink{Text: "https://" + p.Host, URL: "https://" + p.Host})
+	}
+	if ri, err := deployplan.ParseRollbackIntent(p.IntentCanonical); err == nil && linkSHARe.MatchString(ri.TargetCommit) {
+		out = append(out, shellLink{Text: ri.TargetCommit, URL: gitopsRepoURL + ri.TargetCommit})
 	}
 	return out
 }
@@ -482,7 +516,7 @@ func (h *Handlers) handleDeployApprovalCallback(w http.ResponseWriter, r *http.R
 		d.failed(w, ref.status, ref.msg)
 		return
 	}
-	page := deployPageData{Diff: shown.plan.Diff}
+	page := deployPageData{Diff: shown.plan.Diff, Links: shown.links()}
 	if !shown.decidable(d.now()) {
 		title, status := "This deploy approval is "+basketStateWord(shown.approval.State), http.StatusOK
 		switch {
@@ -514,7 +548,7 @@ func (h *Handlers) handleDeployApprovalCallback(w http.ResponseWriter, r *http.R
 	}
 	page.Decide = &struct{ Action, Challenge, CSRF string }{Action: deployConfirmPath, Challenge: challenge, CSRF: csrf}
 	d.renderPage(w, http.StatusOK, "Approve or reject this deploy", append(shown.lines(display),
-		"Approving lets the requester apply exactly this plan, once, to the preview above. It deploys nothing by itself."), page)
+		"Approving lets the requester apply exactly this plan, once, to "+approvalTarget(shown.plan)+". It deploys nothing by itself."), page)
 }
 
 // handleDeployApprovalConfirm: POST /deploy/approvals/confirm.
@@ -609,7 +643,7 @@ func (h *Handlers) handleDeployApprovalConfirm(w http.ResponseWriter, r *http.Re
 		title, outcome = "Deploy rejected", "The assistant that asked cannot apply this plan. Nothing was deployed."
 	}
 	shown.approval = decided
-	d.renderPage(w, http.StatusOK, title, append(shown.lines(id.Display), outcome), deployPageData{Diff: shown.plan.Diff})
+	d.renderPage(w, http.StatusOK, title, append(shown.lines(id.Display), outcome, "You can close this tab."), deployPageData{Diff: shown.plan.Diff, Links: shown.links()})
 }
 
 // auditDeployPage records what the page itself decided. Ids only.
@@ -626,6 +660,15 @@ func (h *Handlers) auditDeployPage(r *http.Request, user *auth.User, id auth.Ide
 		RiskLevel:  string(operations.RiskMedium),
 		Message:    msg,
 	})
+}
+
+// approvalTarget names what an approved plan is applied to: a promotion or a
+// rollback changes production, any other plan is a preview.
+func approvalTarget(p *deployplan.Plan) string {
+	if p.Environment == deployplan.EnvironmentProduction {
+		return "production, as shown above"
+	}
+	return "the preview above"
 }
 
 // hostLine names what the plan serves: a preview's address, or, for a
