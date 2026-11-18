@@ -68,7 +68,8 @@ grant with the same binding returns the existing decision.
 Since the owner decision of 2026-11-18 neither route decides a DevLoop
 approval for a bearer-token caller: both answer 403 `decide_page_required`
 unless `DEVLOOP_BEARER_APPROVE_ENABLED` is on, and the decide page is where a
-person decides (docs/principals.md, "Decide page only").
+person decides (docs/principals.md, "Decide page only"). The same holds for a
+direct, non-grant `mctl-agents-approve` submit (`mctl_trigger_approve`).
 
 `MCTL_APPROVAL_BINDING` migrates legacy callers: `off` (no check on absence),
 `observe` (default; a decision without `binding` is accepted, audited as

@@ -577,6 +577,20 @@ approval is therefore decided on the decide page only:
   page; a `deny` stays open (the page's Reject uses it), and a closed grant
   keeps its typed state refusal.
 - A service or agent credential is refused as before (`decider_forbidden`).
+- `POST /api/v1/operations/mctl-agents-approve/execute` off the grant path
+  (a human admin's token; the MCP tool `mctl_trigger_approve` calls exactly
+  this) flips the proposal to `accepted` itself, so it is refused with 403
+  `decide_page_required` before anything in the body is weighed, audited as a
+  `denied` `mctl-agents-approve` entry with that refusal code. `details`
+  names the proposal's DevLoop `workflow_id` and, when its newest grant is
+  pending and the page is enabled, `approval_ref` and `decide_url`. Under the
+  break-glass only a human admin acting directly may submit it; a service
+  principal still cannot approve without a grant (no content digest), and an
+  agent credential is refused either way.
+- The DevLoop's own flip is unaffected: after the page approves the grant,
+  the worker's agent run submits `mctl-agents-approve` with
+  `X-MCTL-On-Behalf-Of: aar_...`, which the grant authorizes (see "DevLoop
+  approval by grant"). Spending a decision is not making one.
 
 `DEVLOOP_BEARER_APPROVE_ENABLED=true` is the break-glass that restores the
 bearer decision; empty or `false` is off, any other value refuses startup.

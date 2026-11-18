@@ -127,8 +127,10 @@ env:
   MCTL_AGENTS_APPROVE_LEGACY_APPROVER: ""
   # Break-glass of the DevLoop decide-page-only rule (owner decision
   # 2026-11-18). Empty or "false": a bearer-token caller may not decide a
-  # DevLoop approval (403 decide_page_required with the decide_url); only the
-  # decide page's second-factor sign-in does. "true" lets a human admin
+  # DevLoop approval (403 decide_page_required with the decide_url), nor
+  # submit mctl-agents-approve directly (the MCP tool mctl_trigger_approve);
+  # only the decide page's second-factor sign-in decides, and the DevLoop
+  # exercises that decision through its grant. "true" lets a human admin
   # bearer decide again. Any other value refuses boot.
   DEVLOOP_BEARER_APPROVE_ENABLED: ""
   # How long an action approval stays spendable after a human decided it

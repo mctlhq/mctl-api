@@ -960,7 +960,7 @@ var builtinOperations = []Operation{
 		// `mctl-agents-investigate` ClusterWorkflowTemplate.
 		Name:             "mctl-agents-investigate",
 		DisplayName:      "Run mctl-agents issue-investigator",
-		Description:      "Issue-driven entry point: take a GitHub issue URL and turn it into a spec-driven proposal (requirements/design/tasks.md) under platform-gitops/agents-state/<service>/proposals/<slug>/ with .status.yaml status=proposed. The investigator reads the issue, clones the target repo read-only to ground the design in real code, and comments the proposal link back on the issue. The proposal then awaits human approval (the dev-loop approve signal, or the mctl-agents-approve operation, flips .status.yaml to accepted) before the Tier 2 implementer picks it up. Admin-only. Cost: ~$3 (subscription quota). Duration: ~5-10 min. Updates mctl-gitops main with the new proposal directory.",
+		Description:      "Issue-driven entry point: take a GitHub issue URL and turn it into a spec-driven proposal (requirements/design/tasks.md) under platform-gitops/agents-state/<service>/proposals/<slug>/ with .status.yaml status=proposed. The investigator reads the issue, clones the target repo read-only to ground the design in real code, and comments the proposal link back on the issue. The proposal then awaits human approval on the DevLoop decide page (the DevLoop then flips .status.yaml to accepted) before the Tier 2 implementer picks it up. Admin-only. Cost: ~$3 (subscription quota). Duration: ~5-10 min. Updates mctl-gitops main with the new proposal directory.",
 		WorkflowTemplate: "mctl-agents-investigate",
 		RiskLevel:        RiskLow,
 		RequiresConfirm:  false,
@@ -1040,14 +1040,17 @@ var builtinOperations = []Operation{
 		// Approve step — flips exactly one proposal's .status.yaml from
 		// proposed to accepted as an Argo-executed gitops commit under the
 		// mctl-gitops-main-writes mutex (mctlhq/mctl-agents#150). Submitted
-		// by the Temporal DevLoopWorkflow after its approve() signal; also
-		// usable directly for a manual approve. Idempotent: approving an
+		// by the Temporal DevLoopWorkflow after its approve() signal, through
+		// the action-approval grant a person approved on the DevLoop decide
+		// page. A direct submit from a bearer token is refused with 403
+		// decide_page_required unless DEVLOOP_BEARER_APPROVE_ENABLED is on
+		// (owner decision 2026-11-18; ExecuteOperation). Idempotent: approving an
 		// already-accepted proposal is a successful no-op. RiskMedium — the
 		// flip authorizes the Tier 2 implementer to spend a model attempt
 		// and open a PR for that proposal.
 		Name:             "mctl-agents-approve",
 		DisplayName:      "Approve mctl-agents proposal",
-		Description:      "Approve one proposal: flip platform-gitops/agents-state/<service>/proposals/<slug>/.status.yaml from proposed to accepted via a gitops commit, recording the approver identity. This is the automated form of the old manual .status.yaml edit; the Tier 2 implementer only picks up accepted proposals. Idempotent on already-accepted proposals; any other status fails. Admin-only. Cost: none (no model). Duration: <1 min.",
+		Description:      "Approve one proposal: flip platform-gitops/agents-state/<service>/proposals/<slug>/.status.yaml from proposed to accepted via a gitops commit, recording the approver identity. This is the automated form of the old manual .status.yaml edit; the Tier 2 implementer only picks up accepted proposals. Idempotent on already-accepted proposals; any other status fails. Submitted by the DevLoop through the approval grant a person approved on the DevLoop decide page; a direct call from a bearer token is refused with 403 decide_page_required unless the server's break-glass DEVLOOP_BEARER_APPROVE_ENABLED is on, and then only for a human admin acting directly. Cost: none (no model). Duration: <1 min.",
 		WorkflowTemplate: "mctl-agents-approve",
 		RiskLevel:        RiskMedium,
 		RequiresConfirm:  false,
