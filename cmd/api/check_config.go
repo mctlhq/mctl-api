@@ -27,8 +27,11 @@ package main
 // re-implementation, which would drift from it.
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"os"
+	"strings"
 
 	mctlapi "github.com/mctlhq/mctl-api/internal/api"
 	"github.com/mctlhq/mctl-api/internal/auth"
@@ -55,7 +58,7 @@ const checkConfigOK = "mctl-api check-config: ok"
 //     OAUTH_ZITADEL_PROVIDER keyed on sub, and OAUTH_ZITADEL_PROVIDER equal to
 //     ZITADEL_LINK_PROVIDER (validateOAuthUpstream);
 //   - MCTL_OIDC_PROVIDERS itself (auth.ParseOIDCProviders: shape, service_subjects
-//     versus customers_org_id, reserved and duplicate names and issuers), at most
+//     rules, reserved and duplicate names and issuers), at most
 //     one entry with customers_org_id, and that entry's customers_org_id equal to
 //     ZITADEL_HOOK_CUSTOMERS_ORG_ID (customersProvider);
 //   - ZITADEL_HOOK_GITHUB_IDP_ID being a ZITADEL id where the customer sign-in
@@ -90,7 +93,13 @@ func (c config) validateZitadelSecretConfig(skipFederation bool) error {
 	// Dex provider would also be caught. Skipped while
 	// MCTL_FEDERATION_DISABLED is on, so the kill switch can roll back a
 	// value that would otherwise refuse boot.
-	if _, err := auth.ParseOIDCProviders(c.OIDCProvidersRaw); err != nil {
+	entries, err := auth.ParseOIDCProviders(c.OIDCProvidersRaw)
+	if err != nil {
+		return err
+	}
+	// The Glovo consent reader must resolve to kind service on the provider
+	// it names, or the consent gate admits nobody.
+	if err := validateGlovoConsentReader(entries, os.LookupEnv); err != nil {
 		return err
 	}
 	// customers_org_id on two entries, or one that disagrees with the
@@ -126,4 +135,65 @@ func runCheckConfig(stdout, stderr io.Writer) int {
 	}
 	_, _ = fmt.Fprintln(stdout, checkConfigOK)
 	return 0
+}
+
+// validateGlovoConsentReader cross-checks GLOVO_CONSENT_SERVICE_PROVIDER and
+// GLOVO_CONSENT_SERVICE_SUBJECT against MCTL_OIDC_PROVIDERS when
+// GLOVO_CONSENT_ENABLED is true. The gate admits only a verified identity of
+// kind service with exactly that provider and subject, so a reader that can
+// never resolve to one is a misconfiguration to refuse now rather than a
+// consent read that answers 401 forever:
+//
+//   - the provider must be an entry of MCTL_OIDC_PROVIDERS (the whole list is
+//     read, so absent really is absent; the "dex" shim cannot be a service);
+//   - on a kind service entry any subject resolves to service;
+//   - on a human or agent entry the subject must be one of its
+//     service_subjects (the only way such an entry yields kind service).
+//
+// Enabled with no provider or subject, or with a value that is neither true
+// nor false, is refused too: configureGlovoConsent alone would log it and keep
+// the routes off while the flag says on (a boot-time refusal where routes used
+// to stay silently off; GLOVO_CONSENT_ENABLED is not set in any deployment
+// today). Not enabled (unset or false) is left to configureGlovoConsent. The
+// database URL is not checked: it comes from a Secret this check cannot see.
+func validateGlovoConsentReader(entries []auth.OIDCProviderConfigEntry, lookup func(string) (string, bool)) error {
+	v, _ := lookup("GLOVO_CONSENT_ENABLED")
+	switch strings.TrimSpace(v) {
+	case "", "false":
+		return nil
+	case "true":
+	default:
+		// configureGlovoConsent logs this and leaves the routes off; an
+		// operator who typed it meant "on", so unknown is not ok.
+		return fmt.Errorf("GLOVO_CONSENT_ENABLED %q must be true or false", v)
+	}
+	provider, _ := lookup("GLOVO_CONSENT_SERVICE_PROVIDER")
+	subject, _ := lookup("GLOVO_CONSENT_SERVICE_SUBJECT")
+	provider, subject = strings.TrimSpace(provider), strings.TrimSpace(subject)
+	if provider == "" || subject == "" {
+		// Enabled but no reader named: configureGlovoConsent would only log
+		// and keep the routes off while the flag says on. Refuse instead.
+		return errors.New("GLOVO_CONSENT_ENABLED=true requires GLOVO_CONSENT_SERVICE_PROVIDER and GLOVO_CONSENT_SERVICE_SUBJECT: the consent routes would silently stay off")
+	}
+	for i := range entries {
+		e := &entries[i]
+		if e.Name != provider {
+			continue
+		}
+		if e.Kind == auth.KindService {
+			return nil
+		}
+		if _, ok := e.ServiceSubjects[subject]; ok {
+			return nil
+		}
+		return fmt.Errorf("GLOVO_CONSENT_SERVICE_SUBJECT %q is not a service identity of MCTL_OIDC_PROVIDERS entry %q (kind %q): list it in that entry's service_subjects, or the consent gate admits nobody", subject, provider, entryKind(e))
+	}
+	return fmt.Errorf("GLOVO_CONSENT_SERVICE_PROVIDER %q is not an MCTL_OIDC_PROVIDERS entry: the consent gate admits nobody", provider)
+}
+
+func entryKind(e *auth.OIDCProviderConfigEntry) string {
+	if e.Kind == "" {
+		return auth.KindHuman
+	}
+	return e.Kind
 }

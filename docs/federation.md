@@ -168,9 +168,9 @@ A JSON array, parsed by `auth.ParseOIDCProviders` and validated in
 | `groups_claim` | no | `groups` | Claim read for groups: an array of strings, or (outside the trusted Dex slot) an object whose keys are the group names (ZITADEL's `urn:zitadel:iam:org:project:roles`). Any other shape, or non-string array elements, counts in `federation_groups_claim_unreadable_total{provider}` and is dropped. It reaches `User.Groups` only for the trusted Dex slot or when `grant_groups` is on (see "Groups" below). |
 | `kind` | no | `human` | One of `human`, `agent`, `service`. |
 | `grant_groups` | no | `false` | Whether this entry's groups reach `User.Groups`, i.e. grant tenant access. Off: the claim is dropped and counted in `federation_groups_withheld_total{provider}`. On: kept, with `admins` still stripped. Refused at boot on the trusted Dex slot. See "Groups" below. |
-| `customers_org_id` | no | — | The ZITADEL organization of self-service customer accounts (digits; `human` entries only; at most one entry). When set, every token from this entry must carry `urn:zitadel:iam:user:resourceowner:id` or it is refused, and a customers token resolves by its proven GitHub id. See "Self-service customers" below. |
+| `customers_org_id` | no | — | The ZITADEL organization of self-service customer accounts (digits; `human` entries only; at most one entry). When set, every token from this entry must carry `urn:zitadel:iam:user:resourceowner:id` or it is refused (except a listed `service_subjects` machine user, which skips this), and a customers token resolves by its proven GitHub id. See "Self-service customers" below. |
 | `subject_audiences` | no | — | Extra accepted audiences for single verified subjects, as `{"<subject>": ["<audience>", ...]}` (not on `dex`, and only with the default `subject_claim` `sub`: a mutable claim such as email could be taken by another user). A ZITADEL machine user signing in with its own key (JWT profile) gets only the project id in `aud`, never the client id this entry enforces. Listing the project id in `audiences` would accept it from every client that requests the project audience scope, so any relying party could replay its users' tokens here; keyed by subject, it holds for that machine user alone. Signature, issuer and expiry are checked as for every token. Used by the orchestrator DevLoop principal (docs/orchestrator-devloop.md). |
-| `service_subjects` | no | — | Exact machine subjects that resolve to `kind: service` on this otherwise `human` entry, as `{"<subject>": "<audience>"}`, each pinned to the one audience it must present (also in `audit` mode). For a ZITADEL machine user (JWT profile) that must be a service identity, e.g. the Glovo consent reader, without converting the human ZITADEL entry or adding a second entry on the same issuer (refused). Rules: exact match only (no wildcard, no padding, no empty subject or audience); never derived from token claims, so a human subject of the issuer cannot become a service; such an identity carries no groups even with `grant_groups`; refused at boot on `dex`, on a `kind` other than `human`, with `customers_org_id`, with a `subject_claim` other than `sub`, when empty, when a subject repeats, and when a subject is also a `subject_audiences` key. Unset: no behaviour change. |
+| `service_subjects` | no | — | Exact machine subjects that resolve to `kind: service` on this otherwise `human` entry, as `{"<subject>": "<audience>"}`, each pinned to the one audience it must present (also in `audit` mode). For a ZITADEL machine user (JWT profile) that must be a service identity, e.g. the Glovo consent reader, without converting the human ZITADEL entry or adding a second entry on the same issuer (refused). Rules: exact match only (no wildcard, no padding, no empty subject or audience); never derived from token claims, so a human subject of the issuer cannot become a service; such an identity carries no groups even with `grant_groups`; refused at boot on `dex`, on a `kind` other than `human`, with a `subject_claim` other than `sub`, when empty, when a subject repeats, when a subject is also a `subject_audiences` key, and when the same subject is listed on two entries. It may share an entry with `customers_org_id` (see "Threat model" below). Unset: no behaviour change. |
 
 A malformed value, an entry missing `audiences`, an invalid
 `audience_enforcement` or `kind`, a reserved or surface-colliding name, or two
@@ -791,6 +791,131 @@ GLOVO_CONSENT_SERVICE_SUBJECT=<consent-reader-machine-user-id>
 The audience is the project id a machine user receives in `aud` with a JWT
 profile exchange (the same value `subject_audiences` uses). The kill-switch
 caller (mctl-api to mctl-glovo) is outbound and needs no entry here.
+
+With `GLOVO_CONSENT_ENABLED=true`, boot (and `--check-config`) also refuses a
+reader that can never resolve to kind `service`: a provider that is not an
+`MCTL_OIDC_PROVIDERS` entry, or, on a `human` or `agent` entry, a subject that
+is not in its `service_subjects`.
+
+Boot-time refusals where the consent routes used to stay silently off (new in
+this change; `GLOVO_CONSENT_ENABLED` is not set in any deployment today, checked
+on mctl-gitops `origin/main`, so no existing rollout changes). With
+`GLOVO_CONSENT_ENABLED=true` (env names exact):
+
+- `GLOVO_CONSENT_SERVICE_PROVIDER` or `GLOVO_CONSENT_SERVICE_SUBJECT` empty or
+  unset: refused (`--check-config` exits 1; boot exits 1). Before, boot logged
+  `glovo link consent disabled` and kept the routes off while the flag said on.
+- `GLOVO_CONSENT_ENABLED` set to anything other than `true` or `false` (for
+  example `yes`, `TRUE`): refused the same way. Unset or `false` is off and
+  unchecked.
+- Like every federation check, boot skips these while
+  `MCTL_FEDERATION_DISABLED` is on; `--check-config` never skips.
+
+Not checked, because the values live in Secrets `--check-config` cannot see:
+`GLOVO_CONSENT_DB_URL` / `AUDIT_DB_URL` (a missing one still leaves the routes
+off with a boot log line) and whether the store opens.
+
+#### What a machine-user token carries (evidence and gaps)
+
+Sources: ZITADEL docs via Context7 (`/zitadel/zitadel`: service-account
+"private key JWT" guide and the reserved-scopes reference), the zitadel-iac
+Terraform and the mctl-glovo `token-refresher` on `origin/main`.
+
+- Grant: the refresher posts `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`,
+  an RS256 `assertion` (`iss` = `sub` = machine user id, `aud` = the issuer URL,
+  5 minute lifetime) and `scope` = the value of `ZITADEL_SCOPE`
+  (`mctl-glovo/internal/tokenrefresh`; `cmd/token-refresher` reads
+  `ZITADEL_SCOPE`, `ZITADEL_USER_ID`, `ZITADEL_KEY_ID`, `KEY_FILE`, `TOKEN_FILE`).
+- Access token format: the consent reader is declared with
+  `access_token_type = ACCESS_TOKEN_TYPE_JWT` (`iac/c2-machine-users.tf`), so the
+  token is a JWT mctl-api can verify against the issuer's keys.
+- `sub`: the machine user id. `iss`: the ZITADEL issuer. These are the standard
+  claims of the issued token.
+- `aud`: ZITADEL documents that the reserved scope
+  `urn:zitadel:iam:org:project:id:{projectId}:aud` "adds the requested project id
+  to the audience of the access token". It adds; it does not say the audience is
+  that id alone. So `aud` contains the project id when that scope is requested,
+  and may contain other values. mctl-api only requires that `aud` CONTAINS the
+  subject's pinned audience, and refuses a listed subject whose `aud` lacks it,
+  so extra values are harmless; a token minted without the scope is refused.
+- `urn:zitadel:iam:org:project:id:{projectId}:aud` is also what the docs require
+  for the token to pass ZITADEL's own introspection; mctl-api does not
+  introspect, it verifies the JWT.
+- `resourceowner`: ZITADEL documents `urn:zitadel:iam:user:resourceowner`
+  ("id, name and primary_domain of the user's organization will be included").
+  The claim `urn:zitadel:iam:user:resourceowner:id` is therefore present only when
+  that scope is requested. The consent refresher's scope does not request it,
+  which is why the customers rule above exempts a listed service subject.
+- The pinned audience: zitadel-iac publishes, in the ConfigMap
+  `mctl-api-c2-machine-ids` (ids only, no secret), `consent_audience` =
+  the `mctl-api` project id and `consent_scope` =
+  `openid urn:zitadel:iam:org:project:id:<that project id>:aud`
+  (`iac/c2-machine-users.tf`, pinned by `tests/c2_machine_users.tftest.hcl`). The
+  Deployment of the refresher takes `ZITADEL_SCOPE` from the `scope` key of the
+  `<app>-consent-reader` Secret, which the operator copies from that ConfigMap by
+  hand into Vault (the c2-machine-users.tf comment: "The operator copies the
+  consumer's values into Vault by hand").
+
+So the assumption "aud contains the project id" holds if, and only if, the value
+operators put into Vault for `scope` equals the ConfigMap's `consent_scope` and
+`service_subjects` pins `consent_audience`. The unit tests here fake the verified
+token with `aud = [project id]`, which is the minimal shape and a subset of what
+ZITADEL may issue.
+
+Unverified until a live token is minted (nobody has decoded one): the exact `aud`
+list ZITADEL puts into a JWT-profile token of this machine user (extra entries,
+the order); that `sub` and `iss` are exactly the user id and
+`https://auth.mctl.ai` in the issued JWT; that the Vault `scope` value is the
+ConfigMap one (the secret is not read); and that no `resourceowner` claim is
+present. Check once: mint with the refresher, decode the payload locally and
+compare `sub`, `iss` and `aud` with `consent_user_id`, the issuer and
+`consent_audience` from the ConfigMap, never printing the token.
+
+#### `service_subjects` with `customers_org_id` (the live ZITADEL entry)
+
+The ZITADEL entry carries `customers_org_id`, so every other token of it must
+name its user's organization. A machine user's JWT-profile token carries no
+`urn:zitadel:iam:user:resourceowner:id` claim unless that scope is requested,
+so the rule is per subject:
+
+| Token | Result |
+| --- | --- |
+| `sub` is a listed service subject, `aud` contains its pinned audience | `kind: service`. No resourceowner needed; a resourceowner or customer claims it carries are ignored. Never a customer, no groups (not even with `grant_groups`), no principal mapping by GitHub id. |
+| `sub` is a listed service subject, any other audience (the entry's own included), in `audit` mode too | refused |
+| any other subject | exactly as before: resourceowner required (else refused), customers-org users resolve as customers, a user of another org is `human`, an unproven customer is refused |
+
+Precedence: `service_subjects` is decided first, by exact match on `sub`; only
+a subject that is not listed reaches the customers checks. Nothing in a token
+(`kind`, `groups`, `azp`, `client_id`, `preferred_username`, a resourceowner)
+can make an unlisted subject a service, or a listed one a customer.
+
+#### Threat model
+
+The service identity is a verified machine user of the issuer, listed by id in
+configuration, presenting a token minted for one audience only. What an
+attacker would need and what stops it:
+
+- Be a human with the machine user's id as `sub`: the id is the issuer's, a
+  human cannot choose it; and such a token still needs the pinned audience,
+  which a user-facing client does not request (the entry's own audience is
+  refused for the listed subject).
+- Replay the machine user's token elsewhere: it carries the project audience,
+  which no other subject may use on this entry, and the consent gate reaches
+  only its own prefix (every other path is 401 for it).
+- Present a token from another issuer or signed by another key: issuer routing
+  and the signature check are unchanged; the same subject on two entries is
+  refused at boot.
+- Pad, case-fold or extend the id, send it empty, swap `sub` and `aud`: exact
+  match only; no wildcard, padded or empty key or audience is accepted.
+- Gain a customer identity (and so a customers-org principal) through a
+  resourceowner claim of the customers org: the customers block is skipped for
+  a listed subject, so the identity has `Customer == nil`.
+- Gain tenant or admin access through groups: groups are dropped for a service
+  subject whatever `grant_groups` says.
+
+A `kind: service` federated identity has no capability beyond the kind itself:
+it is not the built-in service token, not an agent, not CI, and the consent
+gate additionally requires the exact provider and subject.
 
 ## Checking the configuration without booting
 
