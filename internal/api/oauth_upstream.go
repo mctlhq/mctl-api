@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/prometheus/client_golang/prometheus"
@@ -392,7 +393,13 @@ func (h *Handlers) startZitadelAuthorize(w http.ResponseWriter, r *http.Request,
 		cfg.Scopes = append(cfg.Scopes,
 			auth.ScopeOrgIDPrefix+z.opts.CustomersOrgID, auth.ScopeIdPIDPrefix+customerIdP)
 	}
-	authURL := cfg.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier), oidc.Nonce(nonce))
+	opts := []oauth2.AuthCodeOption{oauth2.S256ChallengeOption(verifier), oidc.Nonce(nonce)}
+	if o.IsGlovoLinkFlow(resource) {
+		// Only the Glovo link flow: the human must authenticate again now,
+		// and the callback checks the ID token's auth_time says they did.
+		opts = append(opts, oauth2.SetAuthURLParam("prompt", "login"), oauth2.SetAuthURLParam("max_age", "0"))
+	}
+	authURL := cfg.AuthCodeURL(state, opts...)
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
@@ -460,11 +467,25 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 	var claims struct {
 		Nonce             string `json:"nonce"`
 		PreferredUsername string `json:"preferred_username"`
+		AuthTime          int64  `json:"auth_time"`
 	}
 	if err := idt.Claims(&claims); err != nil || subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(pending.Nonce)) != 1 {
 		result = "invalid_token"
 		http.Error(w, "the ZITADEL sign-in does not belong to this authorization", http.StatusBadRequest)
 		return
+	}
+	var authTime int64
+	if o.IsGlovoLinkFlow(pending.Resource) {
+		// The sign-in must have happened inside this authorization
+		// (prompt=login, max_age=0): a missing, zero or older auth_time is
+		// a session ZITADEL reused, which the link flow never accepts.
+		if claims.AuthTime <= 0 || time.Unix(claims.AuthTime, 0).Before(pending.CreatedAt.Add(-time.Minute)) {
+			slog.Warn("oauth: link sign-in without a fresh authentication", "zitadel_subject", idt.Subject)
+			result = "stale_auth"
+			oauthError(w, pending.RedirectURI, pending.ClientState, "access_denied", "a fresh sign-in is required")
+			return
+		}
+		authTime = claims.AuthTime
 	}
 	display := claims.PreferredUsername
 	if display == "" {
@@ -485,7 +506,7 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 			Login: login, PrincipalID: principalID, Groups: groups,
 			ClientID: pending.ClientID, RedirectURI: pending.RedirectURI,
 			CodeChallenge: pending.CodeChallenge, ClientState: pending.ClientState,
-			Upstream: auth.UpstreamZitadel, Resource: pending.Resource,
+			Upstream: auth.UpstreamZitadel, Resource: pending.Resource, AuthTime: authTime,
 		})
 		slog.Info("oauth: ZITADEL sign-in", "principal_id", principalID, "login", login, "zitadel_subject", idt.Subject, "result", result)
 	}

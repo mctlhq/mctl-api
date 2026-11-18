@@ -66,6 +66,14 @@ func (s *OAuthServer) ResolveResource(values []string) (string, error) {
 	if s.SupportResource != "" && n == normalizeIssuer(s.SupportResource) {
 		return s.SupportResource, nil
 	}
+	if s.GlovoLinkResource != "" && n == normalizeIssuer(s.GlovoLinkResource) {
+		// The link resource opens with the same readiness as the Glovo
+		// one, and GLOVO_LINK_RESOURCE alone never opens it.
+		if !s.GlovoReady() {
+			return "", ErrGlovoNotReady
+		}
+		return s.GlovoLinkResource, nil
+	}
 	if s.GlovoResource != "" && n == normalizeIssuer(s.GlovoResource) {
 		// Admitted only with the kill switch on and every readiness
 		// dependency present; GLOVO_MCP_RESOURCE alone never opens it.
@@ -128,6 +136,37 @@ func (s *OAuthServer) ValidateGlovoResource() error {
 	if s.SupportResource != "" && n == normalizeIssuer(s.SupportResource) {
 		return fmt.Errorf("GLOVO_MCP_RESOURCE %q equals OAUTH_SUPPORT_RESOURCE", r)
 	}
+	if s.GlovoLinkResource != "" && n == normalizeIssuer(s.GlovoLinkResource) {
+		return fmt.Errorf("GLOVO_MCP_RESOURCE %q equals GLOVO_LINK_RESOURCE", r)
+	}
+	return nil
+}
+
+// ValidateGlovoLinkResource refuses a GlovoLinkResource that is not an
+// absolute https URL without a fragment, or that equals the Glovo MCP, the
+// support or a downstream resource, or names this API. Empty (disabled) is
+// valid.
+func (s *OAuthServer) ValidateGlovoLinkResource() error {
+	r := s.GlovoLinkResource
+	if r == "" {
+		return nil
+	}
+	u, err := url.Parse(r)
+	if err != nil || !u.IsAbs() || u.Scheme != "https" || u.Host == "" || u.Fragment != "" || strings.Contains(r, "#") {
+		return fmt.Errorf("GLOVO_LINK_RESOURCE %q must be an absolute https URL without a fragment", r)
+	}
+	n := normalizeIssuer(r)
+	switch {
+	case s.namesThisAPI(n):
+		return fmt.Errorf("GLOVO_LINK_RESOURCE %q names this API (its audience, base URL or /mcp endpoint)", r)
+	case s.GlovoResource != "" && n == normalizeIssuer(s.GlovoResource):
+		return fmt.Errorf("GLOVO_LINK_RESOURCE %q equals GLOVO_MCP_RESOURCE", r)
+	case s.SupportResource != "" && n == normalizeIssuer(s.SupportResource):
+		return fmt.Errorf("GLOVO_LINK_RESOURCE %q equals OAUTH_SUPPORT_RESOURCE", r)
+	}
+	if _, ok := s.downstreamResource(n); ok {
+		return fmt.Errorf("GLOVO_LINK_RESOURCE %q equals an OAUTH_MCP_RESOURCES entry", r)
+	}
 	return nil
 }
 
@@ -154,6 +193,11 @@ func (s *OAuthServer) FlowResource(values []string) (string, error) {
 func (s *OAuthServer) sessionAudience(resource string) (string, error) {
 	if resource == "" {
 		return s.accessAudience(), nil
+	}
+	if s.isGlovoLinkFlow(resource) {
+		// A link session is never refreshed: it has no refresh token, and
+		// one that somehow existed would not mint another link token.
+		return "", fmt.Errorf("%w: the glovo link resource has no refresh", ErrInvalidTarget)
 	}
 	aud, err := s.ResolveResource([]string{resource})
 	if err != nil {

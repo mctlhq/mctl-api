@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -215,6 +216,14 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// The link flow forces a fresh sign-in, which prompt=none forbids; and
+	// only ZITADEL can be told to force one, so no other upstream serves it.
+	linkFlow := o.IsGlovoLinkFlow(resource)
+	if linkFlow && hasPrompt(q, "none") {
+		oauthError(w, redirectURI, state, "invalid_request", "prompt=none is not allowed for this resource")
+		return
+	}
+
 	// The team of a Glovo flow is chosen by the human at consent and nowhere
 	// else: no authorize parameter may carry one.
 	if o.IsGlovoFlow(resource) && (q.Has("tenant") || q.Has("selected_tenant")) {
@@ -224,6 +233,10 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 
 	upstream, customerIdP, ok := h.pickOAuthUpstream(w, r)
 	if !ok {
+		return
+	}
+	if linkFlow && upstream != auth.UpstreamZitadel {
+		oauthError(w, redirectURI, state, "invalid_request", "this resource requires a ZITADEL sign-in")
 		return
 	}
 	if upstream == auth.UpstreamZitadel {
@@ -547,13 +560,18 @@ func (h *Handlers) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"access_token":  accessToken,
-		"refresh_token": refreshToken,
-		"token_type":    "Bearer",
-		"expires_in":    int(ttl.Seconds()),
-		"scope":         oauthScope,
-	})
+	resp := map[string]any{
+		"access_token": accessToken,
+		"token_type":   "Bearer",
+		"expires_in":   int(ttl.Seconds()),
+		"scope":        oauthScope,
+	}
+	// The Glovo link resource has no refresh token: omit the member rather
+	// than send an empty one.
+	if refreshToken != "" {
+		resp["refresh_token"] = refreshToken
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // handleOAuthRevoke accepts a token revocation request.
@@ -866,4 +884,9 @@ func tokenError(w http.ResponseWriter, errCode, errDesc string) {
 		"error":             errCode,
 		"error_description": errDesc,
 	})
+}
+
+// hasPrompt reports whether the space-delimited prompt parameter holds v.
+func hasPrompt(q url.Values, v string) bool {
+	return slices.Contains(strings.Fields(q.Get("prompt")), v)
 }

@@ -127,8 +127,10 @@ type fakeIdP struct {
 	// overrides for negative cases
 	nonceOverride string
 	authTime      time.Time
-	audOverride   string
-	username      string // preferred_username; "dmitrii" when empty
+	// omitAuthTime leaves auth_time out of the ID token.
+	omitAuthTime bool
+	audOverride  string
+	username     string // preferred_username; "dmitrii" when empty
 	// extra claims added to the ID token
 	extra map[string]any
 	// redirectURI, when set, is the redirect_uri the token endpoint
@@ -221,6 +223,9 @@ func (f *fakeIdP) token(w http.ResponseWriter, r *http.Request) {
 		"iss": f.srv.URL, "sub": "z-sub", "aud": aud, "nonce": nonce,
 		"iat": now.Unix(), "exp": now.Add(time.Hour).Unix(), "auth_time": f.authTime.Unix(),
 		"preferred_username": username,
+	}
+	if f.omitAuthTime {
+		delete(claims, "auth_time")
 	}
 	for k, v := range f.extra {
 		claims[k] = v

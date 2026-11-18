@@ -229,6 +229,11 @@ func main() {
 			stopSignals()
 			os.Exit(1)
 		}
+		if err := configureGlovoLinkResource(oauthServer, os.LookupEnv); err != nil {
+			slog.Error("invalid configuration", "error", err)
+			stopSignals()
+			os.Exit(1)
+		}
 		// Downstream MCP servers that trust this server's tokens
 		// (mctl-api#1062). Empty: none, exactly as before.
 		if err := configureDownstreamResources(oauthServer, os.Getenv("OAUTH_MCP_RESOURCES"), cfg.adminPrincipals()); err != nil {
@@ -3481,6 +3486,18 @@ func configureGlovoResource(o *auth.OAuthServer, lookup func(string) (string, bo
 		o.GlovoResource = strings.TrimSpace(v)
 	}
 	return o.ValidateGlovoResource()
+}
+
+// configureGlovoLinkResource sets the Glovo account-link RFC 8707 resource
+// from GLOVO_LINK_RESOURCE (unset or empty: disabled, every other flow
+// unchanged) and refuses an invalid one. Call it after
+// configureGlovoResource and before configureDownstreamResources.
+func configureGlovoLinkResource(o *auth.OAuthServer, lookup func(string) (string, bool)) error {
+	o.GlovoLinkResource = ""
+	if v, ok := lookup("GLOVO_LINK_RESOURCE"); ok {
+		o.GlovoLinkResource = strings.TrimSpace(v)
+	}
+	return o.ValidateGlovoLinkResource()
 }
 
 // reviewConfigFromEnv reads REVIEW_REQUEST_TTL and REVIEW_POOL_MAX. Empty

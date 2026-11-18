@@ -84,6 +84,9 @@ type authzCompletion struct {
 	SelectedTenant string
 	// PersonalGrant marks TeamGrantID as a personal grant, with no team.
 	PersonalGrant bool
+	// AuthTime is the upstream's report of when the human last
+	// authenticated (ID token auth_time), set for a link flow only.
+	AuthTime int64
 }
 
 // issueGrant issues the authorization code, writes the oauth.grant_issued
@@ -92,9 +95,12 @@ func (h *Handlers) issueGrant(r *http.Request, c authzCompletion) (string, error
 	o := h.opts.OAuthServer
 	var code string
 	var err error
-	if c.PersonalGrant {
+	switch {
+	case o.IsGlovoLinkFlow(c.Resource):
+		code, err = o.IssueCodeForLink(r.Context(), c.Login, c.PrincipalID, c.ClientID, c.RedirectURI, c.CodeChallenge, c.Groups, c.AuthMethod, c.Resource, c.AuthTime)
+	case c.PersonalGrant:
 		code, err = o.IssueCodeForPersonalGrant(r.Context(), c.Login, c.PrincipalID, c.ClientID, c.RedirectURI, c.CodeChallenge, c.Groups, c.AuthMethod, c.Resource, c.TeamGrantID)
-	} else {
+	default:
 		code, err = o.IssueCodeForTeamGrant(r.Context(), c.Login, c.PrincipalID, c.ClientID, c.RedirectURI, c.CodeChallenge, c.Groups, c.AuthMethod, c.Resource, c.TeamGrantID, c.SelectedTenant)
 	}
 	if err != nil {
@@ -192,7 +198,7 @@ func (h *Handlers) requestConsent(w http.ResponseWriter, r *http.Request, c auth
 		Login: c.Login, PrincipalID: c.PrincipalID, Groups: c.Groups,
 		ClientID: c.ClientID, ClientName: client.ClientName, RedirectURI: c.RedirectURI,
 		CodeChallenge: c.CodeChallenge, ClientState: []byte(c.ClientState), Upstream: c.Upstream,
-		AuthMethod: client.AuthMethod, Resource: c.Resource, BrowserHash: consentHash(token),
+		AuthMethod: client.AuthMethod, Resource: c.Resource, AuthTime: c.AuthTime, BrowserHash: consentHash(token),
 	})
 	if err != nil {
 		slog.Error("failed to store consent", "error", err)
@@ -333,6 +339,7 @@ func (h *Handlers) takeConsentDecision(w http.ResponseWriter, r *http.Request) s
 		Login: e.Login, PrincipalID: e.PrincipalID, Groups: e.Groups, ClientID: e.ClientID,
 		RedirectURI: e.RedirectURI, CodeChallenge: e.CodeChallenge, ClientState: state,
 		Upstream: e.Upstream, ClientName: e.ClientName, AuthMethod: e.AuthMethod, Resource: e.Resource,
+		AuthTime: e.AuthTime,
 	}
 	if e.PersonalGrant {
 		if result, ok := h.selectPersonal(w, r, e, &c); !ok {
