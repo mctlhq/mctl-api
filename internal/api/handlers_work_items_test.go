@@ -54,7 +54,12 @@ func newWorkItemsEnv(t *testing.T) *workItemsEnv {
 		store.Close()
 	})
 	env := &workItemsEnv{t: t, tenant: tenant, audit: audit.NewLogger(), connStr: connStr}
-	env.h = &Handlers{opts: Options{WorkItems: store, AuditLog: env.audit, GitReader: ownerEverywhere{}}}
+	// DevLoopBearerApproveEnabled: the work-item and grant tests predate the
+	// decide-page-only rule and approve DevLoop grants as a bearer, so they
+	// run under the break-glass. The rule itself is tested with it off
+	// (TestDevLoopApprove_BearerDecisionNeedsTheDecidePage, the decide page
+	// tests).
+	env.h = &Handlers{opts: Options{WorkItems: store, AuditLog: env.audit, GitReader: ownerEverywhere{}, DevLoopBearerApproveEnabled: true}}
 	env.router = workItemsRouter(env.h)
 	return env
 }

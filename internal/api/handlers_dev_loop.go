@@ -443,7 +443,7 @@ func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) 
 			"run_id":      result.RunID,
 			"started":     true,
 			"outcome":     result.Outcome,
-			"message":     "DevLoopWorkflow started. Approve the implement step with POST /api/v1/agents/dev-loop/{workflow_id}/approve once the proposal is reviewed.",
+			"message":     "DevLoopWorkflow started. Its implement step is decided by a person on the DevLoop decide page: once the proposal waits for approval, read decide_url with GET /api/v1/agents/dev-loop/{workflow_id}/approval and hand it to them.",
 		})
 	case devLoopOutcomeRestartedAfterAbandon:
 		auditParams["previous_run_id"] = result.PreviousRunID
@@ -462,7 +462,7 @@ func (h *Handlers) StartDevLoopWorkflow(w http.ResponseWriter, r *http.Request) 
 			"previous_run_id": result.PreviousRunID,
 			"started":         true,
 			"outcome":         result.Outcome,
-			"message":         "The previous DevLoopWorkflow run for this issue was abandoned, so a new run started on the same workflow id. It re-investigates the issue; approve the implement step with POST /api/v1/agents/dev-loop/{workflow_id}/approve once the proposal is reviewed.",
+			"message":         "The previous DevLoopWorkflow run for this issue was abandoned, so a new run started on the same workflow id. It re-investigates the issue; its implement step is decided by a person on the DevLoop decide page (decide_url from GET /api/v1/agents/dev-loop/{workflow_id}/approval).",
 		})
 	case devLoopOutcomeAlreadyRunning:
 		h.logAudit(r, audit.Entry{
@@ -548,6 +548,19 @@ type approveDevLoopRequest struct {
 // A request that still carries an `approver` is rejected rather than having
 // the field quietly ignored: a caller that believes it is setting the
 // approver must be told it is not.
+//
+// Since the owner decision of 2026-11-18 a bearer-token call no longer
+// decides: deciding a pending grant, or recording a legacy approval with no
+// grant, is refused with 403 decide_page_required (and the decide_url of a
+// pending grant) unless it comes from the decide page or
+// DEVLOOP_BEARER_APPROVE_ENABLED is on; see mayDecideDevLoop. A grant a
+// person already approved is still re-sent as its approval_ref: that call
+// decides nothing, and it is the one way to deliver a decision whose signal
+// was lost after the decide page recorded it (the page then reports the
+// grant approved and offers nothing more, and the run parks on the signal).
+// The generic decision route no longer approves an mctl-agents-approve
+// grant from a bearer either (DecideActionApproval), so an approved grant
+// was decided on the page, under the break-glass, or before this rule.
 func (h *Handlers) ApproveDevLoopWorkflow(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.requireTemporalAdmin(w, r)
 	if !ok {
@@ -670,7 +683,63 @@ func (h *Handlers) ApproveDevLoopWorkflow(w http.ResponseWriter, r *http.Request
 const (
 	devLoopCodeGrantMissing       = "approval_grant_missing"
 	devLoopCodeExecutionAmbiguous = "execution_ambiguous"
+	// devLoopCodeDecidePageRequired refuses a bearer-token decision of a
+	// DevLoop approval: it is made on the decide page only (owner decision
+	// 2026-11-18), unless DEVLOOP_BEARER_APPROVE_ENABLED is on.
+	devLoopCodeDecidePageRequired = "decide_page_required"
 )
+
+// mayDecideDevLoop reports whether this request may DECIDE a DevLoop
+// approval: approve a pending mctl-agents-approve grant, or record a legacy
+// approval with no grant at all. The owner's identity token is also held by
+// AI clients (the mctl CLI token Claude Code and Codex use, the claude.ai and
+// ChatGPT MCP connectors), so a bearer call cannot be told apart from the
+// owner's own click. Only the decide page's fresh second-factor sign-in can,
+// and its approve runs ApproveDevLoopWorkflow in-process under
+// withDecidePage. DEVLOOP_BEARER_APPROVE_ENABLED is the break-glass.
+func (h *Handlers) mayDecideDevLoop(r *http.Request) bool {
+	return fromDecidePage(r.Context()) || h.opts.DevLoopBearerApproveEnabled
+}
+
+// refuseDevLoopBearerDecision answers a bearer call that would decide a
+// DevLoop approval: 403 decide_page_required, audited as denied, with the
+// decide page link for the grant when there is a pending one and the page is
+// enabled. ref is the grant, "" when there is none.
+func (h *Handlers) refuseDevLoopBearerDecision(w http.ResponseWriter, r *http.Request, user *auth.User, workflowID, ref string, auditParams map[string]string, decideURL string) {
+	params := map[string]string{}
+	for k, v := range auditParams {
+		params[k] = v
+	}
+	if ref != "" {
+		params["approval_ref"] = ref
+	}
+	h.logAudit(r, audit.Entry{
+		UserID:       user.ID,
+		Operation:    "dev-loop-approve",
+		Parameters:   params,
+		WorkflowName: workflowID,
+		Status:       "denied",
+		RiskLevel:    string(operations.RiskMedium),
+		Message:      devLoopCodeDecidePageRequired + ": a bearer-token caller may not decide a DevLoop approval",
+	})
+	msg := "a DevLoop approval is decided on the DevLoop decide page only, by a person signing in there with a second factor; " +
+		"a bearer token cannot prove a person decided, because AI clients hold it too. "
+	details := map[string]interface{}{"workflow_id": workflowID}
+	if ref != "" {
+		details["approval_ref"] = ref
+	}
+	switch {
+	case decideURL != "":
+		details["decide_url"] = decideURL
+		msg += "Hand decide_url to the person who decides; do not open it on their behalf."
+	case ref != "":
+		msg += "Read decide_url with GET /api/v1/agents/dev-loop/{workflow_id}/approval and hand it to the person who decides."
+	default:
+		msg += "This DevLoop has no approval grant to decide, so there is nothing the decide page can offer; " +
+			"the legacy approval without a grant needs DEVLOOP_BEARER_APPROVE_ENABLED (break-glass)."
+	}
+	writeErrorCode(w, http.StatusForbidden, devLoopCodeDecidePageRequired, msg, details)
+}
 
 // GetDevLoopApproval handles GET /api/v1/agents/dev-loop/{workflow_id}/approval
 // (mctl-api#936): the grant a bound approve of this workflow would decide,
@@ -799,6 +868,12 @@ func (h *Handlers) decideDevLoopApproval(w http.ResponseWriter, r *http.Request,
 			return refuse(http.StatusConflict, devLoopCodeGrantMissing,
 				why+"; the legacy approver payload is disabled (MCTL_AGENTS_APPROVE_LEGACY_APPROVER=false)")
 		}
+		// A legacy approval records the caller as the approver: it is a
+		// decision, so it is the decide page's or the break-glass's alone.
+		if !h.mayDecideDevLoop(r) {
+			h.refuseDevLoopBearerDecision(w, r, user, workflowID, "", auditParams, "")
+			return "", false
+		}
 		return "", true
 	}
 	unavailable := func(err error) (string, bool) {
@@ -809,6 +884,10 @@ func (h *Handlers) decideDevLoopApproval(w http.ResponseWriter, r *http.Request,
 		if h.opts.LegacyApproverDisabled || bind != nil {
 			return refuse(http.StatusServiceUnavailable, wiCodeUnavailable,
 				"the work-item store is not configured, so the DevLoop's approval grant cannot be read")
+		}
+		if !h.mayDecideDevLoop(r) {
+			h.refuseDevLoopBearerDecision(w, r, user, workflowID, "", auditParams, "")
+			return "", false
 		}
 		return "", true
 	}
@@ -855,6 +934,15 @@ func (h *Handlers) decideDevLoopApproval(w http.ResponseWriter, r *http.Request,
 		}
 		return newest.ID, true
 	case workitems.ApprovalPending:
+		// Deciding the grant is the human act; see mayDecideDevLoop.
+		if !h.mayDecideDevLoop(r) {
+			dc := h.decisionContext(&newest)
+			u, _ := h.decideURL(workflowID, decisionBinding{
+				ApprovalRef: newest.ID, ContextDigest: dc.ContextDigest, ContentDigest: dc.ArtifactHash,
+			})
+			h.refuseDevLoopBearerDecision(w, r, user, workflowID, newest.ID, auditParams, u)
+			return "", false
+		}
 		digest, ok := h.guardDecision(w, r, user, &newest, workitems.DecisionApprove, "", bind)
 		if !ok {
 			return "", false

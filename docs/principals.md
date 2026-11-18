@@ -434,8 +434,11 @@ that submits (actor, `agent:<name>` with its `art_` token), the run's
    action kind `mctl-agents-approve`, target `<service>/<slug>`, policy
    `dev-loop.human-approval`/`v1`. Creating it still takes the
    `mctl-agent` service token.
-2. A human admin approves with
-   `POST /api/v1/agents/dev-loop/{workflow_id}/approve`. The workflow id is
+2. A human admin approves on the DevLoop decide page (below, "Deciding
+   from a link"), which runs
+   `POST /api/v1/agents/dev-loop/{workflow_id}/approve` in process as
+   them; a bearer-token call of that route no longer decides (see
+   "Decide page only" below). The workflow id is
    resolved to its one open `we_` (more than one is 409
    `execution_ambiguous`), and the newest `aar_` of that kind for it, in
    any state, decides the answer: a pending one is decided and its
@@ -540,10 +543,40 @@ no secret and grants nothing; whoever sends it attests nothing.
 Configuration: `DEVLOOP_DECIDE_CLIENT_ID` and `DEVLOOP_DECIDE_CLIENT_SECRET`,
 a confidential ZITADEL web client (PKCE, bearer access tokens, ID token
 userinfo assertion) whose redirect URI is `<SELF_URL>/devloop/decide/callback`.
+
+The callback holds the ID token to this client, not merely to an `aud` that
+contains it: ZITADEL puts the project id and the project's other client ids
+into `aud`, so `azp` is required when `aud` has more than one entry and, when
+present, must be the decide client (OIDC Core 3.1.3.7, the release approval
+page's rule). A token issued to any other client is refused and audited as a
+`denied` `dev-loop-decide-page` entry.
 Both empty keeps the page off (503). It also needs the principal store,
 `TENANT_AUTHZ_MODE=principal` (outside it a federated user has no admin bit,
 so nobody could decide) and the `ZITADEL_LINK_PROVIDER` entry in
 `MCTL_OIDC_PROVIDERS`; with any missing it logs one line and stays off.
+
+### Decide page only (owner decision 2026-11-18)
+
+The owner's identity token is also held by AI clients (the mctl CLI token
+Claude Code and Codex use, the claude.ai and ChatGPT MCP connectors), so a
+bearer-token call cannot be told apart from the owner's own click. A DevLoop
+approval is therefore decided on the decide page only:
+
+- `POST /api/v1/agents/dev-loop/{workflow_id}/approve` from a bearer caller
+  that would decide -- approve a pending grant, or record a legacy approval
+  for a loop with no grant -- answers 403 `decide_page_required`, audited as a
+  `denied` `dev-loop-approve` entry. For a pending grant `details` carries
+  `approval_ref` and, when the page is enabled, `decide_url`.
+- A grant already approved is still re-sent as its `approval_ref`: that
+  decides nothing, and it is how a decision whose signal was lost after the
+  page recorded it reaches the parked run (the page then offers nothing more).
+- `POST /api/v1/action-approvals/{id}/decision` refuses an `approve` of an
+  `mctl-agents-approve` grant the same way, so it is not the way around the
+  page; a `deny` stays open (the page's Reject uses it).
+- A service or agent credential is refused as before (`decider_forbidden`).
+
+`DEVLOOP_BEARER_APPROVE_ENABLED=true` is the break-glass that restores the
+bearer decision; empty or `false` is off, any other value refuses startup.
 
 ## Surface actors and human-input respondents by principal (#629)
 

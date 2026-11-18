@@ -64,7 +64,7 @@ func TestApproveDevLoopWorkflow_UnaffectedByTheIdentityFieldCheck(t *testing.T) 
 		t.Run(name, func(t *testing.T) {
 			fake := &fakeDevLoopClient{}
 			logger := audit.NewLogger()
-			h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
+			h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger, DevLoopBearerApproveEnabled: true}}
 
 			var req *http.Request
 			if body == "" {

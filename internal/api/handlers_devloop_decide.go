@@ -102,6 +102,22 @@ const (
 	decideAuditOp       = "dev-loop-decide-page"
 )
 
+// decidePageKey marks the context of the decide page's in-process approve
+// call. Only handleDevLoopDecideConfirm sets it, after a fresh second-factor
+// sign-in; a request from the network cannot, because a context value is
+// never read from the wire. ApproveDevLoopWorkflow decides a DevLoop
+// approval only under it, unless the bearer break-glass is on.
+type decidePageKey struct{}
+
+func withDecidePage(ctx context.Context) context.Context {
+	return context.WithValue(ctx, decidePageKey{}, true)
+}
+
+func fromDecidePage(ctx context.Context) bool {
+	v, _ := ctx.Value(decidePageKey{}).(bool)
+	return v
+}
+
 // decideRequiredAMR: the decide page's ID token must name one of these
 // methods in amr. A password alone does not decide a DevLoop.
 var decideRequiredAMR = []string{"mfa"}
@@ -484,12 +500,9 @@ func (h *Handlers) handleDevLoopDecideCallback(w http.ResponseWriter, r *http.Re
 		d.failed(w, http.StatusBadRequest, "The ZITADEL ID token was not valid.")
 		return
 	}
-	var claims struct {
-		Nonce             string   `json:"nonce"`
-		AuthTime          int64    `json:"auth_time"`
-		PreferredUsername string   `json:"preferred_username"`
-		AMR               []string `json:"amr"`
-	}
+	// The release approval page's claims: aud and azp are read so the token
+	// can be held to this page's client, not merely to an aud containing it.
+	var claims releaseClaims
 	if err := idt.Claims(&claims); err != nil || subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(c.nonce)) != 1 {
 		d.failed(w, http.StatusBadRequest, "The ZITADEL sign-in does not belong to this decision.")
 		return
@@ -503,6 +516,21 @@ func (h *Handlers) handleDevLoopDecideCallback(w http.ResponseWriter, r *http.Re
 		display = idt.Subject
 	}
 	id := auth.Identity{Provider: d.opts.ProviderName, Issuer: idt.Issuer, Subject: idt.Subject, Display: display, Kind: auth.KindHuman}
+	// go-oidc only checks that aud contains this client. ZITADEL puts the
+	// project's other client ids into aud too, so a token minted for another
+	// application of the project (an MCP client, say) can carry this
+	// client's id in aud. azp names the client it was issued to: required
+	// with more than one audience, and when present it must be this page
+	// (OIDC Core 3.1.3.7; release_approval_page.go, mctl-api#1022).
+	if !issuedToClient(claims.Aud, claims.AZP, d.opts.ClientID) {
+		azp := claims.AZP
+		if azp == "" {
+			azp = "none"
+		}
+		h.auditDecidePage(r, nil, id, c, "denied", "ID token not issued to the decide page client (azp: "+azp+")")
+		d.failed(w, http.StatusBadRequest, "The ZITADEL ID token was not issued to the DevLoop decide page.")
+		return
+	}
 	user, err := d.signedInAdmin(r.Context(), id)
 	if err != nil {
 		h.auditDecidePage(r, user, id, c, "denied", err.Error())
@@ -628,7 +656,9 @@ func (h *Handlers) handleDevLoopDecideConfirm(w http.ResponseWriter, r *http.Req
 	var status int
 	var body []byte
 	if decision == "approve" {
-		status, body = h.callAs(r, user, http.MethodPost, "workflow_id", c.workflowID,
+		// The one caller that may decide a DevLoop approval by default: the
+		// person proved themselves just now, fresh and with a second factor.
+		status, body = h.callAs(r.WithContext(withDecidePage(r.Context())), user, http.MethodPost, "workflow_id", c.workflowID,
 			map[string]any{"binding": c.bind, "reason": decideReasonApprove}, h.ApproveDevLoopWorkflow)
 	} else {
 		status, body = h.callAs(r, user, http.MethodPost, "id", c.bind.ApprovalRef,

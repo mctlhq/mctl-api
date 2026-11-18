@@ -65,6 +65,11 @@ newest: a newer grant is 409 `approval_context_changed` with
 differing digest is the same 409 and the grant stays pending. An approved
 grant with the same binding returns the existing decision.
 
+Since the owner decision of 2026-11-18 neither route decides a DevLoop
+approval for a bearer-token caller: both answer 403 `decide_page_required`
+unless `DEVLOOP_BEARER_APPROVE_ENABLED` is on, and the decide page is where a
+person decides (docs/principals.md, "Decide page only").
+
 `MCTL_APPROVAL_BINDING` migrates legacy callers: `off` (no check on absence),
 `observe` (default; a decision without `binding` is accepted, audited as
 `approval.binding_absent` and counted in `approval_binding_absent_total`),

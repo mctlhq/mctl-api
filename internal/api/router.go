@@ -211,6 +211,16 @@ type Options struct {
 	// free-text approver relay on mctl-agents-approve, audited per use as
 	// approver.legacy_relay; true refuses it.
 	LegacyApproverDisabled bool
+	// DevLoopBearerApproveEnabled is DEVLOOP_BEARER_APPROVE_ENABLED, the
+	// break-glass of the DevLoop decide-page-only rule (owner decision
+	// 2026-11-18). The zero value refuses every bearer-token decision of a
+	// DevLoop approval -- POST /agents/dev-loop/{id}/approve deciding a
+	// pending grant or recording a legacy approval, and an approve of an
+	// mctl-agents-approve grant on POST /action-approvals/{id}/decision --
+	// with 403 decide_page_required: a bearer token is also held by AI
+	// clients, so only the decide page's fresh second-factor sign-in proves
+	// a person decided. True restores the bearer decision.
+	DevLoopBearerApproveEnabled bool
 	// TenantAuthzMode is TENANT_AUTHZ_MODE (mctl-api#377). The zero value
 	// behaves as legacy; shadow also compares the principal-keyed decision
 	// (tenantAuthzShadow) without acting on it.
