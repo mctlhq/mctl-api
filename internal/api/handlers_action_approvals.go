@@ -853,7 +853,11 @@ func (h *Handlers) DecideActionApproval(w http.ResponseWriter, r *http.Request) 
 	// ApproveDevLoopWorkflow, never through this route, so a bearer approve
 	// here would be the way around it. A deny stays open, and is what the
 	// page's reject uses: refusing a DevLoop needs no proof of a person.
-	if cur.ActionKind == devLoopApprovalKind && body.Decision == workitems.DecisionApprove && !h.mayDecideDevLoop(r) {
+	// Only a pending grant can be approved, so only that is refused here; a
+	// closed one keeps its typed state refusal, since the page has nothing
+	// to offer for it either.
+	if cur.ActionKind == devLoopApprovalKind && cur.State == workitems.ApprovalPending &&
+		body.Decision == workitems.DecisionApprove && !h.mayDecideDevLoop(r) {
 		h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", cur.ID, devLoopCodeDecidePageRequired)
 		writeErrorCode(w, http.StatusForbidden, devLoopCodeDecidePageRequired,
 			"an "+devLoopApprovalKind+" approval is approved on the DevLoop decide page only, by a person signing in there with a second factor; "+

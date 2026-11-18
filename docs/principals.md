@@ -570,9 +570,12 @@ approval is therefore decided on the decide page only:
 - A grant already approved is still re-sent as its `approval_ref`: that
   decides nothing, and it is how a decision whose signal was lost after the
   page recorded it reaches the parked run (the page then offers nothing more).
-- `POST /api/v1/action-approvals/{id}/decision` refuses an `approve` of an
-  `mctl-agents-approve` grant the same way, so it is not the way around the
-  page; a `deny` stays open (the page's Reject uses it).
+- `POST /api/v1/action-approvals/{id}/decision` refuses an `approve` of a
+  pending `mctl-agents-approve` grant with 403 `decide_page_required` too
+  (`details.approval_ref` only; read `decide_url` from
+  `GET .../dev-loop/{workflow_id}/approval`), so it is not the way around the
+  page; a `deny` stays open (the page's Reject uses it), and a closed grant
+  keeps its typed state refusal.
 - A service or agent credential is refused as before (`decider_forbidden`).
 
 `DEVLOOP_BEARER_APPROVE_ENABLED=true` is the break-glass that restores the

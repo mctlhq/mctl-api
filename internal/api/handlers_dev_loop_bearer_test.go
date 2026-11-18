@@ -151,3 +151,18 @@ func TestDecideActionApproval_DevLoopApproveNeedsTheDecidePage(t *testing.T) {
 		t.Fatalf("grant state = %v, want denied", a["state"])
 	}
 }
+
+// A closed DevLoop grant keeps its typed state refusal on the generic route:
+// the page has nothing to offer for it, so decide_page_required would send
+// the caller nowhere.
+func TestDecideActionApproval_ClosedDevLoopGrantKeepsItsStateRefusal(t *testing.T) {
+	d := newDecideEnv(t)
+	run := d.run("closed")
+	if res := d.workItemsEnv.do(rootAdmin, "POST", "/api/v1/action-approvals/"+run.grant+"/decision", map[string]any{"decision": workitems.DecisionDeny, "reason": "no"}); res.code != http.StatusOK {
+		t.Fatalf("deny = %d %s", res.code, res.raw)
+	}
+	res := d.workItemsEnv.do(rootAdmin, "POST", "/api/v1/action-approvals/"+run.grant+"/decision", map[string]any{"decision": workitems.DecisionApprove})
+	if res.code == http.StatusOK || res.body["code"] == devLoopCodeDecidePageRequired {
+		t.Fatalf("approve of a denied grant = %d %s, want its state refusal", res.code, res.raw)
+	}
+}

@@ -8,7 +8,13 @@ import (
 )
 
 func TestDevLoopBearerApproveIsOffUnlessExplicitlyTrue(t *testing.T) {
-	for raw, want := range map[string]bool{"": false, "false": false, " FALSE ": false, "true": true, "True": true} {
+	for _, c := range []struct {
+		raw  string
+		want bool
+	}{
+		{"", false}, {"false", false}, {" FALSE ", false}, {"true", true}, {"True", true},
+	} {
+		raw, want := c.raw, c.want
 		cfg := config{DevLoopBearerApproveRaw: raw, CommerceDisabled: true}
 		if err := cfg.validate(); err != nil {
 			t.Errorf("%q: validate() = %v", raw, err)
