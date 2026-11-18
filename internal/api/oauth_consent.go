@@ -152,7 +152,10 @@ func (h *Handlers) finishAuthorization(w http.ResponseWriter, r *http.Request, c
 		// choosing a team.
 		return h.requestTeamConsent(w, r, c)
 	}
-	if o.IsCIMDClient(c.ClientID) {
+	// A CIMD client is always shown the consent page. So is every client kind
+	// on the Glovo account-link resource: the human must see which client
+	// asks for an account-link token, whether it is CIMD, DCR or static.
+	if o.IsCIMDClient(c.ClientID) || o.IsGlovoLinkFlow(c.Resource) {
 		return h.requestConsent(w, r, c)
 	}
 	loc, err := h.issueGrant(r, c)
@@ -173,11 +176,20 @@ func consentHash(token string) string {
 
 func (h *Handlers) requestConsent(w http.ResponseWriter, r *http.Request, c authzCompletion) string {
 	o := h.opts.OAuthServer
-	client, err := o.ResolveCIMDClient(r.Context(), c.ClientID)
-	if err != nil {
-		slog.Warn("oauth: client metadata document refused at consent", "client_id", c.ClientID, "error", err)
-		http.Error(w, "the client's metadata document is unavailable", http.StatusBadRequest)
-		return "client_unavailable"
+	var client auth.RegisteredClient
+	if o.IsCIMDClient(c.ClientID) {
+		var err error
+		client, err = o.ResolveCIMDClient(r.Context(), c.ClientID)
+		if err != nil {
+			slog.Warn("oauth: client metadata document refused at consent", "client_id", c.ClientID, "error", err)
+			http.Error(w, "the client's metadata document is unavailable", http.StatusBadRequest)
+			return "client_unavailable"
+		}
+	} else {
+		// A DCR, static or allowlisted client reaches the page on the link
+		// resource only. It has no document, so its registry entry names it;
+		// one with no entry (an allowlisted redirect) is shown by client id.
+		client, _ = o.GetClient(c.ClientID)
 	}
 	redirect, err := url.Parse(c.RedirectURI)
 	if err != nil {
@@ -188,6 +200,9 @@ func (h *Handlers) requestConsent(w http.ResponseWriter, r *http.Request, c auth
 	name := client.ClientName
 	if name == "" && clientURL != nil {
 		name = clientURL.Hostname()
+	}
+	if name == "" {
+		name = c.ClientID
 	}
 	token, err := auth.NewConsentToken()
 	if err != nil {
