@@ -28,8 +28,8 @@ func TestVersionMatchesMctlGlovo(t *testing.T) {
 	}
 }
 
-// A consent recorded to the earlier text (c2-link-v1, which allowed more
-// than the current read-only wording) is not a consent to the current one:
+// A consent recorded to the earlier text (c2-link-v1)
+// is not a consent to the current text:
 // it grants nothing and starts no personal grant. Re-consent is required.
 func TestPreviousTextConsentIsNotCurrent(t *testing.T) {
 	ctx := context.Background()
