@@ -105,7 +105,13 @@
               "type": "integer",
               "minimum": 1024,
               "maximum": 65535,
-              "description": "Containers run as non-root, so a privileged port could never bind."
+              "description": "The port the container listens on (base-service service.containerPort). Containers run as non-root, so a privileged port could never bind."
+            },
+            "servicePort": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "description": "The port the Service and Ingress expose (base-service service.port). The Service reaches the container through the named targetPort, so this may be below 1024. When absent, a service whose values already set service.port keeps it, because Service ports merge by number and changing one on a live service fails to apply (mctl-gitops#1933); otherwise it is runtime.port."
             },
             "healthPath": {
               "type": "string",

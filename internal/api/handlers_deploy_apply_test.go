@@ -478,6 +478,24 @@ probes:
 	f.request(t, f.dev, planID, http.StatusCreated)
 }
 
+// mctl-api#1118: a service that exposes 80 and listens on 8080 (mctl-docs,
+// mctl-web) is reproducible, so its plan reaches a grant request instead of
+// deploy_apply_not_reproducible.
+func TestDeployApply_SplitPortsAreReproducible(t *testing.T) {
+	f := newGrantFixture(t, planBaseValues+`
+service:
+  port: 80
+  containerPort: 8080
+probes:
+  liveness:
+    path: /healthz
+  readiness:
+    path: /healthz
+`)
+	planID := f.newPlan(t, faithfulIntent())
+	f.request(t, f.dev, planID, http.StatusCreated)
+}
+
 // preview_id and gitops_ref come only from an approved plan.
 func TestPreviewDeploy_ServerSetParamsRefusedInBody(t *testing.T) {
 	f := newGrantFixture(t, faithfulValues)

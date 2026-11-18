@@ -71,7 +71,13 @@ func detectUser(s *Stage) bool {
 }
 
 // detectPort returns the single usable port, a privileged-port verdict, or a
-// needs_input entry.
+// needs_input entry. The port is the one the container binds (runtime.port,
+// service.containerPort), so an image that exposes only ports below 1024
+// stays unsupported: runtime.servicePort can put the Service on 80, but it
+// cannot make a non-root process bind 80 (mctl-api#1118). The analyzer never
+// drafts servicePort either; when it is absent the compiler keeps the
+// Service port the values already set, which is the conservative choice for
+// a service that exists.
 func detectPort(s *Stage) (port int, reason Reason, need *NeedsInput) {
 	seen := map[int]bool{}
 	unresolved := false

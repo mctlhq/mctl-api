@@ -1,0 +1,11 @@
+image:
+  repository: ghcr.io/acme/docs
+  tag: 1.4.0
+service:
+  port: 80
+  containerPort: 8080
+probes:
+  liveness:
+    path: /healthz
+  readiness:
+    path: /healthz

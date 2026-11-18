@@ -1,0 +1,31 @@
+blueGreen:
+  enabled: false
+dbInitJob:
+  enabled: false
+image:
+  digest: ''
+  repository: ghcr.io/acme/site
+  tag: rev-0123456789abcdef0123456789abcdef01234567
+ingress:
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  className: traefik
+  enabled: true
+  hosts:
+  - site-abc123.mctl.ai
+  tls:
+  - hosts:
+    - site-abc123.mctl.ai
+    secretName: preview-site-abc123-tls
+podLabels:
+  mctl.ai/preview: 'true'
+  mctl.ai/preview-id: abc123
+probes:
+  liveness:
+    path: /healthz
+  readiness:
+    path: /healthz
+replicaCount: 1
+service:
+  containerPort: 9090
+  port: 80

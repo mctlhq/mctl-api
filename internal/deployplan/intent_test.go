@@ -66,3 +66,36 @@ func digestOf(t *testing.T, in Intent, canon []byte) string {
 		Action: ActionUpdate, PreviewID: "abc123", ValuesAfter: "a: 1\n", Host: "web-abc123.mctl.ai",
 	})
 }
+
+// mctl-api#1118: runtime.port is the port the container binds, so the floor
+// of 1024 stays; runtime.servicePort is the Service port and may be any
+// valid port, privileged ones included.
+func TestParseIntent_Ports(t *testing.T) {
+	good := string(testIntentJSON("acme", "web", ""))
+	withRuntime := func(rt string) []byte {
+		return []byte(strings.Replace(good, `"runtime":{"port":8080,"healthPath":"/healthz"}`, `"runtime":`+rt, 1))
+	}
+	for name, rt := range map[string]string{
+		"privileged container port": `{"port":80,"healthPath":"/healthz"}`,
+		"container port 1023":       `{"port":1023,"healthPath":"/healthz"}`,
+		"service port 0":            `{"port":8080,"servicePort":0,"healthPath":"/healthz"}`,
+		"service port above 65535":  `{"port":8080,"servicePort":65536,"healthPath":"/healthz"}`,
+		"service port as a string":  `{"port":8080,"servicePort":"80","healthPath":"/healthz"}`,
+	} {
+		if _, _, err := ParseIntent(withRuntime(rt)); !errors.Is(err, ErrIntentInvalid) {
+			t.Errorf("%s: err = %v, want ErrIntentInvalid", name, err)
+		}
+	}
+	in, canon := mustParse(t, withRuntime(`{"port":8080,"servicePort":80,"healthPath":"/healthz"}`))
+	if in.Spec.Runtime.Port != 8080 || in.Spec.Runtime.ServicePort != 80 {
+		t.Fatalf("runtime = %+v", in.Spec.Runtime)
+	}
+	if !strings.Contains(string(canon), `"servicePort":80`) {
+		t.Fatalf("canonical intent lacks servicePort: %s", canon)
+	}
+	// An intent without servicePort canonicalizes as before the field
+	// existed, so stored plans keep their digests.
+	if _, c := mustParse(t, []byte(good)); strings.Contains(string(c), "servicePort") {
+		t.Fatalf("absent servicePort leaked into the canonical intent: %s", c)
+	}
+}
