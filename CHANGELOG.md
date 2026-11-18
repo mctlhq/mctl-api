@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.168.0](https://github.com/mctlhq/mctl-api/compare/4.167.0...4.168.0) (2026-11-18)
+
+
+### Features
+
+* **api:** link commits and preview host on the deploy approval page ([a0306e1](https://github.com/mctlhq/mctl-api/commit/a0306e1433792bf8f20f23e3a81a4b9e1bb4f1f3))
+
+
+### Bug Fixes
+
+* **approval-page:** fit long hashes, say where a promotion goes, end with close-tab ([438007a](https://github.com/mctlhq/mctl-api/commit/438007acb35e194e4016b8c7b81f254275bfec22))
+* **approval-page:** fit long hashes, say where a promotion goes, end with close-tab ([ad889ab](https://github.com/mctlhq/mctl-api/commit/ad889ab9a68307d2c6ed1d87389ae7193df4afec))
+* **release:** say on the approval page that the ledger is enforced ([a101af2](https://github.com/mctlhq/mctl-api/commit/a101af2ee997a14eab81bedd39f45f8c5ff5c4b5))
+* **release:** say on the approval page that the ledger is enforced ([193abba](https://github.com/mctlhq/mctl-api/commit/193abba9ee9e8d38abda0450b0781fbca5898760)), closes [#1022](https://github.com/mctlhq/mctl-api/issues/1022)
+
 ## [4.167.0](https://github.com/mctlhq/mctl-api/compare/4.166.0...4.167.0) (2026-11-17)
 
 
