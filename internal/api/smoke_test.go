@@ -327,6 +327,13 @@ func (f *fakeExecutor) ListCronAgentRuns(_ context.Context, _, _ string, _ time.
 
 func newTestRouter(t *testing.T) (http.Handler, *fakeExecutor) {
 	t.Helper()
+	return newTestRouterWith(t, nil)
+}
+
+// newTestRouterWith is newTestRouter with its Options adjusted by mod
+// before the router is built (nil leaves them as they are).
+func newTestRouterWith(t *testing.T, mod func(*mctlapi.Options)) (http.Handler, *fakeExecutor) {
+	t.Helper()
 	// Only set dev mode if the caller hasn't already configured AUTH_REQUIRED.
 	if os.Getenv("AUTH_REQUIRED") == "" {
 		t.Setenv("AUTH_REQUIRED", "false") // dev mode: auto-admin user
@@ -367,15 +374,25 @@ func newTestRouter(t *testing.T) (http.Handler, *fakeExecutor) {
 	}
 	exec := &fakeExecutor{}
 
-	router := mctlapi.NewRouter(mctlapi.Options{
+	opts := mctlapi.Options{
 		Registry:  operations.NewRegistry(),
 		GitReader: gitReader,
 		ArgoCD:    argoClient,
 		AuditLog:  audit.NewLogger(),
 		Executor:  exec,
-	})
-	return router, exec
+	}
+	if mod != nil {
+		mod(&opts)
+	}
+	return mctlapi.NewRouter(opts), exec
 }
+
+// breakGlass turns DEVLOOP_BEARER_APPROVE_ENABLED on: the one setting under
+// which a human admin's token may still submit mctl-agents-approve directly
+// (owner decision 2026-11-18). Tests of what such a direct approve records
+// or refuses run under it; the refusal without it is pinned in
+// handlers_write_decide_page_test.go.
+func breakGlass(o *mctlapi.Options) { o.DevLoopBearerApproveEnabled = true }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -823,7 +840,7 @@ func TestSmoke_CreateTenantRBAC(t *testing.T) {
 }
 
 func TestSmoke_AgentsApproveApproverIdentity(t *testing.T) {
-	router, executor := newTestRouter(t)
+	router, executor := newTestRouterWith(t, breakGlass)
 
 	t.Run("approver defaults to the authenticated caller", func(t *testing.T) {
 		w := postAs(t, router, "/api/v1/operations/mctl-agents-approve/execute", map[string]string{

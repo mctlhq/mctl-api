@@ -3279,7 +3279,21 @@ paths:
         The grant replaces the admin check for this call only; every other
         caller and grant kind is authorized as before.
 
-        **Direct approval is content-bound (mctl-api#722).** A
+        **Direct approval needs the decide page (owner decision
+        2026-11-18).** A `mctl-agents-approve` call without a grant flips the
+        proposal itself, so from a bearer token it is refused with 403
+        `decide_page_required` before the body is weighed, unless
+        `DEVLOOP_BEARER_APPROVE_ENABLED` is on, and then only for a human
+        admin acting directly (an agent credential is refused either way).
+        `details` carries the proposal's DevLoop `workflow_id` and, when its
+        newest grant is pending and the decide page is enabled,
+        `approval_ref` and `decide_url`. The refusal is audited as a denied
+        `mctl-agents-approve` with refusal code `decide_page_required`. The
+        grant-authorized approve above, which the DevLoop makes after a
+        person approved on the decide page, is unaffected.
+
+        **Direct approval is content-bound (mctl-api#722).** Under the
+        break-glass, a
         `mctl-agents-approve` call without a grant must carry
         `expected_content_digest`, the `sha256:<64 lowercase hex>` digest of
         the proposal content the approver reviewed (compute it with

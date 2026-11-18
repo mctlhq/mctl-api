@@ -741,6 +741,105 @@ func (h *Handlers) refuseDevLoopBearerDecision(w http.ResponseWriter, r *http.Re
 	writeErrorCode(w, http.StatusForbidden, devLoopCodeDecidePageRequired, msg, details)
 }
 
+// mayDirectApproveProposal reports whether a caller off the grant path may
+// submit mctl-agents-approve itself. That operation flips a proposal's
+// .status.yaml to accepted: it IS the decision, so it falls under the same
+// decide-page-only rule as the DevLoop approve route (owner decision
+// 2026-11-18). Without the break-glass nobody may; with it, a human admin
+// acting directly only, never a service, agent, surface or relayed caller.
+// isHumanAdmin alone does not exclude an agent run credential, so that is
+// checked here too.
+//
+// The DevLoop worker never comes through here: after the decide page
+// approves the grant, the worker's agent run exercises it as
+// X-MCTL-On-Behalf-Of: aar_..., which ExecuteOperation authorizes from the
+// grant (grantAuthorized) before this check is reached.
+func (h *Handlers) mayDirectApproveProposal(r *http.Request, user *auth.User) bool {
+	return h.mayDecideDevLoop(r) && isHumanAdmin(user) && !user.IsAgent()
+}
+
+// refuseDirectProposalApprove answers a direct mctl-agents-approve that
+// mayDirectApproveProposal refused: 403 decide_page_required, audited as a
+// denied mctl-agents-approve with that refusal code. When the proposal maps
+// to a DevLoop whose newest grant is pending and the page is enabled, the
+// refusal carries that grant's decide_url. The lookup is best effort: a read
+// that fails only leaves the link out (and is logged), it never turns the
+// refusal into anything else.
+func (h *Handlers) refuseDirectProposalApprove(w http.ResponseWriter, r *http.Request, user *auth.User, op operations.Operation, input map[string]string) {
+	params := legacyRelayParams(user, op.Name, input)
+	details := map[string]interface{}{}
+	workflowID, err := temporalclient.WorkflowIDForProposalRef(input["service"] + "/" + input["slug"])
+	if err != nil {
+		workflowID = ""
+	}
+	var ref, decideURL string
+	if workflowID != "" {
+		params["workflow_id"] = workflowID
+		details["workflow_id"] = workflowID
+		ref, decideURL = h.pendingDevLoopDecideURL(r.Context(), workflowID)
+	}
+	if ref != "" {
+		params["approval_ref"] = ref
+		details["approval_ref"] = ref
+	}
+	h.logAudit(r, audit.Entry{
+		UserID:       user.ID,
+		Operation:    op.Name,
+		Parameters:   params,
+		WorkflowName: workflowID,
+		Status:       "denied",
+		RiskLevel:    string(op.RiskLevel),
+		Message:      devLoopCodeDecidePageRequired + ": a bearer-token caller may not approve a proposal with " + op.Name,
+		RefusalCode:  devLoopCodeDecidePageRequired,
+	})
+	msg := "a proposal is approved on the DevLoop decide page only, by a person signing in there with a second factor; " +
+		"a bearer token cannot prove a person decided, because AI clients hold it too, so " + op.Name +
+		" is not submitted from a bearer token. "
+	switch {
+	case decideURL != "":
+		details["decide_url"] = decideURL
+		msg += "Hand decide_url to the person who decides; do not open it on their behalf."
+	case workflowID != "":
+		msg += "Read decide_url with GET /api/v1/agents/dev-loop/" + workflowID + "/approval and hand it to the person who decides."
+	default:
+		msg += "Read decide_url with GET /api/v1/agents/dev-loop/{workflow_id}/approval for the proposal's DevLoop and hand it to the person who decides."
+	}
+	writeErrorCode(w, http.StatusForbidden, devLoopCodeDecidePageRequired, msg, details)
+}
+
+// pendingDevLoopDecideURL is the decide_url of workflowID's newest
+// mctl-agents-approve grant when that grant is pending and the page is
+// enabled; "" otherwise, including when the store could not be read.
+func (h *Handlers) pendingDevLoopDecideURL(ctx context.Context, workflowID string) (ref, decideURL string) {
+	if h.opts.WorkItems == nil {
+		return "", ""
+	}
+	execs, err := h.opts.WorkItems.OpenExecutionsOfEngineRun(ctx, workitems.EngineTemporal, workflowID)
+	if err != nil {
+		slog.Warn("direct approve refusal: decide_url lookup failed", "workflow_id", workflowID, "error", err)
+		return "", ""
+	}
+	if len(execs) != 1 {
+		return "", ""
+	}
+	list, err := h.opts.WorkItems.ActionApprovals(ctx, workitems.ActionApprovalFilter{
+		ExecutionID: execs[0].ID, ActionKind: devLoopApprovalKind, Limit: 1,
+	})
+	if err != nil {
+		slog.Warn("direct approve refusal: decide_url lookup failed", "workflow_id", workflowID, "error", err)
+		return "", ""
+	}
+	if len(list) == 0 || list[0].State != workitems.ApprovalPending {
+		return "", ""
+	}
+	newest := &list[0]
+	dc := h.decisionContext(newest)
+	u, _ := h.decideURL(workflowID, decisionBinding{
+		ApprovalRef: newest.ID, ContextDigest: dc.ContextDigest, ContentDigest: dc.ArtifactHash,
+	})
+	return newest.ID, u
+}
+
 // GetDevLoopApproval handles GET /api/v1/agents/dev-loop/{workflow_id}/approval
 // (mctl-api#936): the grant a bound approve of this workflow would decide,
 // with its decision context, so a reviewer can check what they are about to

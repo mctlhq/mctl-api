@@ -35,7 +35,7 @@ func approveParams(t *testing.T, router http.Handler, exec *fakeExecutor, body m
 }
 
 func TestApprove_ApproverComesFromTheCaller(t *testing.T) {
-	router, exec := newTestRouter(t)
+	router, exec := newTestRouterWith(t, breakGlass)
 	code, params := approveParams(t, router, exec, map[string]string{
 		"service": "mctl-web", "slug": "issue-1", "expected_content_digest": reviewedDigest,
 	}, adminUser)
@@ -49,7 +49,7 @@ func TestApprove_ApproverComesFromTheCaller(t *testing.T) {
 }
 
 func TestApprove_ExplicitDifferentApproverIsRejected(t *testing.T) {
-	router, exec := newTestRouter(t)
+	router, exec := newTestRouterWith(t, breakGlass)
 	code, params := approveParams(t, router, exec, map[string]string{
 		"service": "mctl-web", "slug": "issue-2", "approver": "someone-else", "expected_content_digest": reviewedDigest,
 	}, adminUser)
@@ -66,7 +66,7 @@ func TestApprove_ExplicitDifferentApproverIsRejected(t *testing.T) {
 // Naming yourself is redundant but not a lie, so it is accepted rather than
 // made an error — the same shape handlers_dev_loop.go settled on.
 func TestApprove_NamingYourselfIsAccepted(t *testing.T) {
-	router, exec := newTestRouter(t)
+	router, exec := newTestRouterWith(t, breakGlass)
 	code, params := approveParams(t, router, exec, map[string]string{
 		"service": "mctl-web", "slug": "issue-3", "approver": adminUser.ID, "expected_content_digest": reviewedDigest,
 	}, adminUser)
@@ -124,7 +124,7 @@ func TestApprove_ServiceWithoutAGrantCannotApprove(t *testing.T) {
 // not inherit the service principal's relay privilege. IsService() is proof of
 // how the caller authenticated, not a claim about their name (claude P2).
 func TestApprove_AHumanNamedLikeTheServiceMayNotRelay(t *testing.T) {
-	router, exec := newTestRouter(t)
+	router, exec := newTestRouterWith(t, breakGlass)
 	impostor := &auth.User{ID: auth.ServiceUserID, Groups: []string{"admins"}}
 
 	code, params := approveParams(t, router, exec, map[string]string{
@@ -142,7 +142,7 @@ func TestApprove_AHumanNamedLikeTheServiceMayNotRelay(t *testing.T) {
 // The denial must leave a record: it returns before Submit, so the audit entry
 // written on the success path never happens here.
 func TestApprove_ASpoofAttemptIsAudited(t *testing.T) {
-	router, exec := newTestRouter(t)
+	router, exec := newTestRouterWith(t, breakGlass)
 	_, _ = approveParams(t, router, exec, map[string]string{
 		"service": "mctl-web", "slug": "issue-7", "approver": "someone-else",
 	}, adminUser)
@@ -175,18 +175,26 @@ func TestApprove_ASpoofAttemptIsAudited(t *testing.T) {
 // exactly what a request recorded.
 func newApproveRouter(t *testing.T, legacyOff bool) (http.Handler, *fakeExecutor, *audit.Logger) {
 	t.Helper()
+	return newApproveRouterWith(t, legacyOff, false)
+}
+
+// newApproveRouterWith is newApproveRouter with the break-glass
+// DEVLOOP_BEARER_APPROVE_ENABLED under test as well.
+func newApproveRouterWith(t *testing.T, legacyOff, bearerApprove bool) (http.Handler, *fakeExecutor, *audit.Logger) {
+	t.Helper()
 	if os.Getenv("AUTH_REQUIRED") == "" {
 		t.Setenv("AUTH_REQUIRED", "false")
 	}
 	exec := &fakeExecutor{}
 	logger := audit.NewLogger()
 	router := mctlapi.NewRouter(mctlapi.Options{
-		Registry:               operations.NewRegistry(),
-		GitReader:              &fakeGitReader{},
-		ArgoCD:                 &fakeArgoCD{},
-		AuditLog:               logger,
-		Executor:               exec,
-		LegacyApproverDisabled: legacyOff,
+		Registry:                    operations.NewRegistry(),
+		GitReader:                   &fakeGitReader{},
+		ArgoCD:                      &fakeArgoCD{},
+		AuditLog:                    logger,
+		Executor:                    exec,
+		LegacyApproverDisabled:      legacyOff,
+		DevLoopBearerApproveEnabled: bearerApprove,
 	})
 	return router, exec, logger
 }
@@ -281,7 +289,7 @@ func TestApprove_LegacyRelayRefusedWhenDisabled(t *testing.T) {
 // The flag governs the service relay only: a human approving as themselves
 // is untouched by it.
 func TestApprove_HumanUnaffectedByTheFlag(t *testing.T) {
-	router, exec, _ := newApproveRouter(t, true)
+	router, exec, _ := newApproveRouterWith(t, true, true)
 	code, params := approveParams(t, router, exec, map[string]string{
 		"service": "mctl-web", "slug": "issue-11", "expected_content_digest": reviewedDigest,
 	}, adminUser)
@@ -314,7 +322,7 @@ func TestApprove_ServiceMayNotAssertAContentDigest(t *testing.T) {
 		}
 	}
 
-	router, exec := newTestRouter(t)
+	router, exec := newTestRouterWith(t, breakGlass)
 	code, params := approveParams(t, router, exec, map[string]string{
 		"service": "mctl-web", "slug": "issue-681", "expected_content_digest": digest,
 	}, adminUser)
@@ -341,7 +349,7 @@ func TestApprove_BodyApprovalRefIsRefusedOffTheGrantPath(t *testing.T) {
 				{"service": "mctl-web", "slug": "issue-ref", "approval_ref": value},
 				{"service": "mctl-web", "slug": "issue-ref", "approver": "mashkovd", "approval_ref": value},
 			} {
-				router, exec, logger := newApproveRouter(t, false)
+				router, exec, logger := newApproveRouterWith(t, false, true)
 				code, params := approveParams(t, router, exec, body, user)
 				if *code != http.StatusBadRequest {
 					t.Fatalf("%s: status = %d, want 400 for %v", name, *code, body)
@@ -360,7 +368,7 @@ func TestApprove_BodyApprovalRefIsRefusedOffTheGrantPath(t *testing.T) {
 	// argument is absent altogether, not "": only a spent grant puts one in
 	// the submit. (A service principal off the grant path cannot approve at
 	// all: TestApprove_ServiceWithoutAGrantCannotApprove.)
-	router, exec := newTestRouter(t)
+	router, exec := newTestRouterWith(t, breakGlass)
 	code, params := approveParams(t, router, exec, map[string]string{
 		"service": "mctl-web", "slug": "issue-ref", "expected_content_digest": reviewedDigest,
 	}, adminUser)
@@ -376,7 +384,7 @@ func TestApprove_BodyApprovalRefIsRefusedOffTheGrantPath(t *testing.T) {
 // reviewed, or it is refused before anything is submitted, with the code the
 // approve CWFT itself would refuse with, and an audit row carrying that code.
 func TestApprove_DirectApproveWithoutADigestIsUnbound(t *testing.T) {
-	router, exec, logger := newApproveRouter(t, true)
+	router, exec, logger := newApproveRouterWith(t, true, true)
 	w := postAs(t, router, "/api/v1/operations/mctl-agents-approve/execute", map[string]string{
 		"service": "mctl-web", "slug": "issue-722",
 	}, adminUser)
@@ -393,7 +401,7 @@ func TestApprove_DirectApproveWithAMalformedDigestIsRefused(t *testing.T) {
 		"sha256:" + strings.Repeat("a", 64) + "\nx: y", // trailing line
 		"sha512:" + strings.Repeat("a", 64),
 	} {
-		router, exec, logger := newApproveRouter(t, true)
+		router, exec, logger := newApproveRouterWith(t, true, true)
 		w := postAs(t, router, "/api/v1/operations/mctl-agents-approve/execute", map[string]string{
 			"service": "mctl-web", "slug": "issue-722", "expected_content_digest": digest,
 		}, adminUser)

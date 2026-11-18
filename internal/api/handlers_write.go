@@ -403,6 +403,15 @@ func (h *Handlers) ExecuteOperation(w http.ResponseWriter, r *http.Request) {
 				legacyRelay = true
 			}
 		} else {
+			// A direct approve by a person's token is a decision made
+			// without the decide page; refused before anything in the body
+			// is weighed (owner decision 2026-11-18). A service principal
+			// cannot approve off the grant path at all (no digest, above
+			// and below), so this branch is the one that needed closing.
+			if !h.mayDirectApproveProposal(r, user) {
+				h.refuseDirectProposalApprove(w, r, user, op, input)
+				return
+			}
 			if input["approver"] != "" && input["approver"] != user.ID {
 				// Audited like the other denials in this handler. An attempt
 				// to attribute an approval to a colleague is exactly the event

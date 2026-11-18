@@ -216,7 +216,9 @@ type Options struct {
 	// 2026-11-18). The zero value refuses every bearer-token decision of a
 	// DevLoop approval -- POST /agents/dev-loop/{id}/approve deciding a
 	// pending grant or recording a legacy approval, and an approve of an
-	// mctl-agents-approve grant on POST /action-approvals/{id}/decision --
+	// mctl-agents-approve grant on POST /action-approvals/{id}/decision, and
+	// a direct (non-grant) POST /operations/mctl-agents-approve/execute,
+	// which the MCP tool mctl_trigger_approve calls --
 	// with 403 decide_page_required: a bearer token is also held by AI
 	// clients, so only the decide page's fresh second-factor sign-in proves
 	// a person decided. True restores the bearer decision.

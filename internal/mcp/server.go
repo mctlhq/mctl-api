@@ -2795,9 +2795,24 @@ func (s *Server) doRequest(req *http.Request, token string) ([]byte, error) {
 
 	if resp.StatusCode >= 400 {
 		var apiErr struct {
-			Error string `json:"error"`
+			Error   string `json:"error"`
+			Code    string `json:"code"`
+			Details struct {
+				DecideURL string `json:"decide_url"`
+			} `json:"details"`
 		}
 		if json.Unmarshal(body, &apiErr) == nil && apiErr.Error != "" {
+			// A decide_page_required refusal (a DevLoop approval or a
+			// proposal approve from a bearer token) is only useful with its
+			// code and the decide page link the person must open, so both
+			// are kept rather than reduced to the message.
+			if apiErr.Code == "decide_page_required" {
+				msg := apiErr.Code + ": " + apiErr.Error
+				if apiErr.Details.DecideURL != "" {
+					msg += " decide_url: " + apiErr.Details.DecideURL
+				}
+				return nil, fmt.Errorf("%s", msg)
+			}
 			return nil, fmt.Errorf("%s", apiErr.Error)
 		}
 		return nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(body))
@@ -3136,18 +3151,20 @@ Admin-only. Returns a link to the workflow's run list — the dispatch API retur
 
 func (s *Server) toolTriggerApprove() (mcplib.Tool, server.ToolHandlerFunc) {
 	tool := mcplib.NewTool("mctl_trigger_approve",
-		mcplib.WithTitleAnnotation("Approve mctl-agents proposal"),
+		mcplib.WithTitleAnnotation("Approve mctl-agents proposal (break-glass only)"),
 		// Destructive: authorizes the Tier 2 implementer to spend a model
 		// attempt and open a PR for the approved proposal, same class as
 		// toolTriggerImplementer and toolTriggerShepherd.
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithIdempotentHintAnnotation(true),
-		mcplib.WithDescription(`Approve one proposal: flip platform-gitops/agents-state/<service>/proposals/<slug>/.status.yaml from proposed to accepted via a gitops commit, recording the approver identity.
+		mcplib.WithDescription(`Break-glass only: flip platform-gitops/agents-state/<service>/proposals/<slug>/.status.yaml from proposed to accepted via a gitops commit, recording the approver identity. This tool does not approve a proposal on a normal server.
 
-This is the automated form of the old manual .status.yaml edit; the Tier 2 implementer only picks up accepted proposals. Idempotent on already-accepted proposals; any other status fails.
+A proposal is approved on the DevLoop decide page only (owner decision 2026-11-18): a bearer token cannot prove a person decided, because AI clients hold it too. So this call is refused with 403 decide_page_required unless the server's break-glass DEVLOOP_BEARER_APPROVE_ENABLED is on, and even then only for a human admin acting directly. The refusal names the proposal's DevLoop workflow_id and, when its grant is pending and the page is enabled, the decide_url.
 
-This is distinct from mctl_approve_dev_loop, which signals a running Temporal DevLoopWorkflow (POST /api/v1/agents/dev-loop/{workflow_id}/approve) instead of touching .status.yaml directly. If the proposal was started via use_temporal on mctl_trigger_issue (i.e. it has a live DevLoopWorkflow), it is decided on the DevLoop decide page instead (hand the person the decide_url from mctl_get_dev_loop_approval) — calling this operation directly would race the DevLoop's own eventual approve call, though it is safely idempotent if it lands on an already-accepted proposal.
+To get a proposal approved: call mctl_get_dev_loop_approval for its DevLoop, give the person its decide_url and ask them to open it. The page has them sign in fresh to ZITADEL with a second factor and approve or reject there; the DevLoop then flips the proposal itself. Do not open the link for them, never call this tool on your own initiative, and never to relay a "yes", "approve" or "go ahead" typed in chat.
+
+Under the break-glass this is the automated form of the old manual .status.yaml edit; the Tier 2 implementer only picks up accepted proposals. Idempotent on already-accepted proposals; any other status fails. It is distinct from mctl_approve_dev_loop, which signals a running Temporal DevLoopWorkflow; for a proposal with a live DevLoopWorkflow, calling this operation would race the DevLoop's own approve, though it is idempotent if it lands on an already-accepted proposal.
 
 The approver parameter is optional: if omitted, the server defaults it to the authenticated caller's identity.
 
@@ -3155,9 +3172,9 @@ expected_content_digest is required: the digest of the proposal content you revi
 
 Cost: none (no model).
 Duration: <1 minute.
-Result: .status.yaml for the one named proposal flips to accepted in mctl-gitops main.
+Result: under the break-glass, .status.yaml for the one named proposal flips to accepted in mctl-gitops main.
 
-Admin-only.`),
+Human admins only, acting directly, and only under the break-glass; a service or agent credential is refused either way.`),
 		mcplib.WithString("service",
 			mcplib.Required(),
 			mcplib.Description("Service owning the proposal."),
@@ -3200,7 +3217,7 @@ func (s *Server) toolTriggerIssue() (mcplib.Tool, server.ToolHandlerFunc) {
 
 Given a GitHub issue URL under the mctlhq org, the investigator reads the issue, clones the target repo read-only to ground the design in real code, and writes requirements.md / design.md / tasks.md plus a .status.yaml (status=proposed) under platform-gitops/agents-state/<service>/proposals/<slug>/. It then comments the proposal link back on the issue.
 
-The proposal stops at status=proposed and awaits human approval — review the spec, then approve it (the dev-loop approve signal, or the mctl-agents-approve operation, flips .status.yaml to 'accepted') before the Tier 2 implementer (mctl_trigger_implementer) picks it up. No PR is opened by this step.
+The proposal stops at status=proposed and awaits human approval — a person approves it on the DevLoop decide page (hand them the decide_url from mctl_get_dev_loop_approval; the DevLoop then flips .status.yaml to 'accepted') before the Tier 2 implementer (mctl_trigger_implementer) picks it up. No PR is opened by this step.
 
 Only when the server runs with MCTL_SUBMIT_CREATES_EXECUTION=on (off by default): the server first records the run as an execution of the issue's work item (opening the item if the issue has none) and passes its ids to the workflow; if that cannot be done nothing is submitted, and a second trigger while the issue's previous run is still open is refused (409 execution_active). With the switch off, the run is submitted without a server-created execution.
 
@@ -3259,7 +3276,7 @@ The one remaining use: the grant is already in state "approved" (decided on the 
 
 This calls the same handler/path as the REST endpoint (POST /api/v1/agents/dev-loop/{workflow_id}/approve) and the Temporal CLI signal — it does NOT start a new workflow, and it does NOT edit a proposal's .status.yaml directly.
 
-This is distinct from the standalone mctl-agents-approve REST operation, which directly mutates a proposal's .status.yaml outside DevLoop's ownership (the gitops-file path used when a proposal was not started via use_temporal on mctl_trigger_issue). Use this tool only for workflow_ids returned by mctl_trigger_issue with use_temporal=true or by mctl_get_workflow_status for a dev-loop-* workflow.
+This is distinct from the standalone mctl-agents-approve REST operation (mctl_trigger_approve), which directly mutates a proposal's .status.yaml outside DevLoop's ownership and, like a bearer decision here, is refused with 403 decide_page_required unless the break-glass is on. Use this tool only for workflow_ids returned by mctl_trigger_issue with use_temporal=true or by mctl_get_workflow_status for a dev-loop-* workflow.
 
 To approve with amendments, edit the proposal's requirements.md, design.md or tasks.md on mctl-gitops main through a PR before approving. The edit supersedes the pending grant, and the loop asks for a decision on the new one; approve that, and the implementer works from the amended files. The reason argument does not carry amendments, and neither does an @MCTL reinvestigate comment (mctlhq/mctl-agents#729).
 
