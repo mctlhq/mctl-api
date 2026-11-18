@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -198,6 +199,7 @@ var releasePage = shellPage("release-approval", `{{if .SignIn}}<form class="acti
 <button type="submit" name="decision" value="reject" class="secondary">Reject</button></form>{{end}}`)
 
 type releasePageData struct {
+	Links  []shellLink
 	SignIn *struct{ Action, ApprovalRef string }
 	Decide *struct{ Action, Challenge, CSRF string }
 }
@@ -210,7 +212,7 @@ func (d *releaseDecider) renderPage(w http.ResponseWriter, status int, title str
 		}
 	}
 	renderShellPage(w, status, "default-src 'none'; style-src 'unsafe-inline'; form-action "+formAction+"; frame-ancestors 'none'; base-uri 'none'",
-		releasePage, shellData{Title: title, Lines: lines, Page: p})
+		releasePage, shellData{Title: title, Lines: lines, Links: p.Links, Page: p})
 }
 
 func (d *releaseDecider) failed(w http.ResponseWriter, status int, msg string) {
@@ -317,12 +319,38 @@ func (s *releaseShown) lines(display string) []string {
 	}
 	return []string{
 		"Signed in as " + display + ".",
-		"Repository: " + art.Repository + ", version: " + art.Version,
+		"Repository: " + art.Repository,
+		"Version: " + art.Version,
 		"Tag commit: " + art.TagCommit,
 		"Image digest: " + art.ImageDigest,
 		"Requested by: " + requester,
 		"Approval: " + a.ID + " (" + basketStateWord(a.State) + "), expires " + a.ExpiresAt.UTC().Format(time.RFC3339),
 	}
+}
+
+var linkVersionRe = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+
+// links are what the decider will want to open before deciding: the commit
+// the tag points at and the GitHub release of the version (its notes say what
+// changes). Both are built only from the grant's own repository, validated
+// like the deploy page's links, so a malformed value stays plain text. There
+// is no "changes since the deployed version" link: the grant does not carry
+// the deployed version, and the page makes no extra call to find it. The
+// image digest stays text.
+func (s *releaseShown) links() []shellLink {
+	art := s.artifact
+	if !linkRepoRe.MatchString(art.Repository) {
+		return nil
+	}
+	base := "https://github.com/" + art.Repository
+	var out []shellLink
+	if linkSHARe.MatchString(art.TagCommit) {
+		out = append(out, shellLink{Text: art.TagCommit, URL: base + "/commit/" + art.TagCommit})
+	}
+	if linkVersionRe.MatchString(art.Version) {
+		out = append(out, shellLink{Text: art.Version, URL: base + "/releases/tag/" + art.Version})
+	}
+	return out
 }
 
 type releasePageRefusal struct {
@@ -516,7 +544,7 @@ func (h *Handlers) handleReleaseApprovalCallback(w http.ResponseWriter, r *http.
 		if shown.approval.State == workitems.ApprovalPending {
 			title = "This release approval has expired"
 		}
-		d.renderPage(w, http.StatusOK, title, append(shown.lines(display), "There is nothing to decide here."), releasePageData{})
+		d.renderPage(w, http.StatusOK, title, append(shown.lines(display), "There is nothing to decide here."), releasePageData{Links: shown.links()})
 		return
 	}
 	evidence := workitems.ReleaseEvidence{Schema: workitems.ReleaseEvidenceSchema, ArgsDigest: shown.approval.ArgsDigest,
@@ -544,7 +572,7 @@ func (h *Handlers) handleReleaseApprovalCallback(w http.ResponseWriter, r *http.
 	}
 	d.renderPage(w, http.StatusOK, "Approve or reject this release", append(shown.lines(display),
 		"Approving lets exactly this image of this version reach production. It deploys nothing by itself."),
-		releasePageData{Decide: &struct{ Action, Challenge, CSRF string }{Action: releaseConfirmPath, Challenge: challenge, CSRF: csrf}})
+		releasePageData{Links: shown.links(), Decide: &struct{ Action, Challenge, CSRF string }{Action: releaseConfirmPath, Challenge: challenge, CSRF: csrf}})
 }
 
 // handleReleaseApprovalConfirm: POST /release/approvals/confirm.
@@ -636,7 +664,7 @@ func (h *Handlers) handleReleaseApprovalConfirm(w http.ResponseWriter, r *http.R
 		title, outcome = "Release rejected", "Your rejection of exactly this image is recorded in the release ledger. The release gate refuses to bump this image; a release needs a new build and a new approval. This page deployed nothing."
 	}
 	shown.approval = decided
-	d.renderPage(w, http.StatusOK, title, append(shown.lines(id.Display), outcome), releasePageData{})
+	d.renderPage(w, http.StatusOK, title, append(shown.lines(id.Display), outcome), releasePageData{Links: shown.links()})
 }
 
 // auditReleasePage records what the page itself decided. Ids only.

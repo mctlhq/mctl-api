@@ -569,3 +569,64 @@ func TestIssuedToClient(t *testing.T) {
 		t.Error("an empty client id matched an empty aud")
 	}
 }
+
+func TestReleaseApprovalPage_ValuesAreLinks(t *testing.T) {
+	e := newReleasePageEnv(t)
+	id, art := e.pendingRelease()
+	rec, _, _ := e.signIn(id, deciderClaims())
+	body := rec.Body.String()
+	for _, want := range []string{
+		`<a href="https://github.com/mctlhq/mctl-api/commit/` + art.TagCommit + `" target="_blank" rel="noopener noreferrer">` + art.TagCommit + `</a>`,
+		`<a href="https://github.com/mctlhq/mctl-api/releases/tag/` + art.Version + `" target="_blank" rel="noopener noreferrer">` + art.Version + `</a>`,
+		"Image digest: " + art.ImageDigest,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("no %q in %s", want, body)
+		}
+	}
+	if strings.Contains(body, "/compare/") {
+		t.Errorf("a compare link without a known deployed version: %s", body)
+	}
+}
+
+// A value that is not in canonical form is shown as text, never as a link.
+// The approval record is validated before the page sees it; this holds the
+// page to it on its own.
+func TestReleaseShown_LinksOnlyValidValues(t *testing.T) {
+	good := workitems.ReleaseArtifact{Repository: "mctlhq/mctl-api", Version: "4.168.0",
+		TagCommit: strings.Repeat("c", 40), ImageDigest: "sha256:" + strings.Repeat("d", 64)}
+	render := func(art workitems.ReleaseArtifact) string {
+		s := &releaseShown{approval: &workitems.ActionApprovalRequest{ID: "aar_x", ExpiresAt: time.Now()}, artifact: art}
+		rec := httptest.NewRecorder()
+		var d *releaseDecider
+		d.renderPage(rec, http.StatusOK, "t", s.lines("owner"), releasePageData{Links: s.links()})
+		return rec.Body.String()
+	}
+	body := render(good)
+	if strings.Count(body, "<a ") != 2 {
+		t.Fatalf("valid release: want 2 links, got %s", body)
+	}
+	cases := map[string]struct {
+		mut   func(*workitems.ReleaseArtifact)
+		links int
+		text  string
+	}{
+		"repository not owner/name": {func(a *workitems.ReleaseArtifact) { a.Repository = `evil.com/x/y` }, 0, "evil.com/x/y"},
+		"repository with markup":    {func(a *workitems.ReleaseArtifact) { a.Repository = `a/b"><b>x` }, 0, "a/b&#34;&gt;&lt;b&gt;x"},
+		"short sha":                 {func(a *workitems.ReleaseArtifact) { a.TagCommit = "abc123" }, 1, "Tag commit: abc123"},
+		"upper-case sha":            {func(a *workitems.ReleaseArtifact) { a.TagCommit = strings.Repeat("C", 40) }, 1, strings.Repeat("C", 40)},
+		"v-prefixed version":        {func(a *workitems.ReleaseArtifact) { a.Version = "v4.168.0" }, 1, "Version: v4.168.0"},
+		"version with a path":       {func(a *workitems.ReleaseArtifact) { a.Version = "4.168.0/../../x" }, 1, "Version: 4.168.0/../../x"},
+	}
+	for name, c := range cases {
+		art := good
+		c.mut(&art)
+		body := render(art)
+		if got := strings.Count(body, "<a "); got != c.links {
+			t.Errorf("%s: %d links, want %d: %s", name, got, c.links, body)
+		}
+		if !strings.Contains(body, c.text) {
+			t.Errorf("%s: value %q not shown as text: %s", name, c.text, body)
+		}
+	}
+}
