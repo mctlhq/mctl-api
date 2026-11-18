@@ -41,6 +41,8 @@ spec:
               value: "argo-workflows"
             - name: COMMERCE_ACCEPT_DISABLED
               value: ""
+            - name: DEVLOOP_BEARER_APPROVE_ENABLED
+              value: ""
             - name: GITOPS_BRANCH
               value: "main"
             - name: GITOPS_LOCAL_PATH

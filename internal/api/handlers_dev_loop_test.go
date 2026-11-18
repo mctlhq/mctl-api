@@ -549,7 +549,7 @@ func TestApproveDevLoopWorkflow_MissingWorkflowID(t *testing.T) {
 func TestApproveDevLoopWorkflow_UnknownWorkflowIs404(t *testing.T) {
 	fake := &fakeDevLoopClient{approveErr: serviceerror.NewNotFound("workflow not found")}
 	logger := audit.NewLogger()
-	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger, DevLoopBearerApproveEnabled: true}}
 
 	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-999/approve", nil)
 	req = withChiParam(req, "workflow_id", "dev-loop-mctlhq-mctl-telegram-999")
@@ -577,7 +577,7 @@ func TestApproveDevLoopWorkflow_UnknownWorkflowIs404(t *testing.T) {
 func TestApproveDevLoopWorkflow_TemporalFailureIs502(t *testing.T) {
 	fake := &fakeDevLoopClient{approveErr: serviceerror.NewUnavailable("temporal frontend unreachable")}
 	logger := audit.NewLogger()
-	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger, DevLoopBearerApproveEnabled: true}}
 
 	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-1/approve", nil)
 	req = withChiParam(req, "workflow_id", "dev-loop-mctlhq-mctl-telegram-1")
@@ -599,7 +599,7 @@ func TestApproveDevLoopWorkflow_TemporalFailureIs502(t *testing.T) {
 func TestApproveDevLoopWorkflow_Success(t *testing.T) {
 	fake := &fakeDevLoopClient{}
 	logger := audit.NewLogger()
-	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger, DevLoopBearerApproveEnabled: true}}
 
 	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-1/approve", nil)
 	req = withChiParam(req, "workflow_id", "dev-loop-mctlhq-mctl-telegram-1")
@@ -635,6 +635,30 @@ func TestApproveDevLoopWorkflow_Success(t *testing.T) {
 	}
 }
 
+// Without a work-item store there is no grant to read, so an approve can only
+// be the legacy one; a bearer caller may not record it without the
+// break-glass (decide-page-only rule, 2026-11-18).
+func TestApproveDevLoopWorkflow_NoStoreBearerNeedsTheBreakGlass(t *testing.T) {
+	fake := &fakeDevLoopClient{}
+	logger := audit.NewLogger()
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
+	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/dev-loop-x/approve", nil)
+	req = withChiParam(req, "workflow_id", "dev-loop-x")
+	req = adminCtx(req)
+	rec := httptest.NewRecorder()
+	h.ApproveDevLoopWorkflow(rec, req)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), devLoopCodeDecidePageRequired) {
+		t.Fatalf("got %d %s, want 403 %s", rec.Code, rec.Body.String(), devLoopCodeDecidePageRequired)
+	}
+	if fake.lastApprovePayload != nil {
+		t.Fatalf("signalled %v", fake.lastApprovePayload)
+	}
+	entries := logger.List(10)
+	if len(entries) != 1 || entries[0].Status != "denied" || entries[0].Operation != "dev-loop-approve" {
+		t.Fatalf("audit = %+v, want one denied dev-loop-approve", entries)
+	}
+}
+
 // The approver is a fact about who called, not a claim in the body. A request
 // that names someone else is rejected outright rather than having the field
 // quietly ignored — a caller that believes it is recording an approval under
@@ -642,7 +666,7 @@ func TestApproveDevLoopWorkflow_Success(t *testing.T) {
 func TestApproveDevLoopWorkflow_ExplicitDifferentApproverIs400(t *testing.T) {
 	fake := &fakeDevLoopClient{}
 	logger := audit.NewLogger()
-	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger, DevLoopBearerApproveEnabled: true}}
 
 	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-1/approve",
 		bytes.NewBufferString(`{"approver":"someone-else","reason":"looks good"}`))
@@ -663,7 +687,7 @@ func TestApproveDevLoopWorkflow_ExplicitDifferentApproverIs400(t *testing.T) {
 func TestApproveDevLoopWorkflow_ApproverComesFromCredential(t *testing.T) {
 	fake := &fakeDevLoopClient{}
 	logger := audit.NewLogger()
-	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger, DevLoopBearerApproveEnabled: true}}
 
 	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-1/approve",
 		bytes.NewBufferString(`{"reason":"looks good"}`))
@@ -697,7 +721,7 @@ func TestApproveDevLoopWorkflow_ApproverComesFromCredential(t *testing.T) {
 func TestApproveDevLoopWorkflow_MalformedBodyIs400(t *testing.T) {
 	fake := &fakeDevLoopClient{}
 	logger := audit.NewLogger()
-	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger}}
+	h := &Handlers{opts: Options{TemporalClient: fake, AuditLog: logger, DevLoopBearerApproveEnabled: true}}
 
 	req := httptest.NewRequest("POST", "/api/v1/agents/dev-loop/dev-loop-mctlhq-mctl-telegram-1/approve",
 		bytes.NewBufferString(`{"approver":`))

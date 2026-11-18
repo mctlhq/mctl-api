@@ -1572,55 +1572,56 @@ func main() {
 		PlatformDomain:                 cfg.PlatformDomain,
 		// Must equal the workflow's GITOPS_ORG (mctl-platform-config):
 		// preview-deploy refuses an image outside ghcr.io/<GITOPS_ORG>/.
-		PlatformImageOrg:        cfg.GitHubOrg,
-		PromoteTenants:          []string{"admins"},
-		ErpactDeployer:          erpactDeployer,
-		TemporalClient:          devLoopClient,
-		HumanInputLedger:        humanInputLedger,
-		WorkItems:               workItemsStore,
-		IssueWorkItemTenant:     os.Getenv("ISSUE_WORK_ITEM_TENANT"),
-		SubmitCreatesExecution:  submitCreatesExecution,
-		AgentRunBinder:          agentRunBinder,
-		SurfaceIdentities:       surfaceIDs,
-		TenantResolver:          gitReader,
-		Principals:              principalResolver,
-		TenantAuthzMode:         cfg.tenantAuthzMode(),
-		AgentReceiptGateMode:    cfg.agentReceiptGateMode(),
-		ApprovalBindingMode:     cfg.approvalBindingMode(),
-		AgentReceiptMaxAge:      cfg.agentReceiptMaxAge(),
-		LegacyApproverDisabled:  cfg.legacyApproverDisabled(),
-		PrincipalMembership:     gitReader,
-		GlovoAllowlist:          glovoAllowlist(glovoStore),
-		Glovo:                   glovoRoutes,
-		GlovoBasket:             glovoBasketRoutes,
-		GlovoControl:            glovoControlRoutes,
-		GlovoJoin:               glovoJoinRoutes,
-		GlovoBasketJoin:         glovoBasketJoinRoutes,
-		GlovoConsent:            glovoConsentRoutes,
-		AdminPrincipals:         cfg.adminPrincipals(),
-		RequireRegisteredPolicy: cfg.requireRegisteredPolicy(),
-		Clock:                   approvalClock,
-		ApprovalMaxDecisionAge:  cfg.approvalMaxDecisionAge(),
-		PrincipalAuthz:          principalAuthz,
-		MemberKeyPlan:           memberKeyPlanOptions(principalStore, gitReader),
-		Delegation:              delegationResolver,
-		WorkflowDispatcher:      workflowDispatcher,
-		GitopsReady:             gitopsReady,
-		PostgresReady:           postgresReady,
-		DexReady:                dexReady,
-		VaultReady:              vaultReady,
-		StoreInitFailures:       storeFailures.List,
-		TemporalState:           temporalState,
-		GitopsSynced:            func() bool { return !gitReader.LastSync().IsZero() },
-		Draining:                draining.Load,
-		ArgoWebhookSecret:       cfg.ArgoWebhookSecret,
-		GitHubWebhookSecret:     cfg.GitHubWebhookSecret,
-		GitHubWebhookOwners:     cfg.GitHubWebhookOwners,
-		ZitadelHook:             zitadelHookOptions(cfg, gitReader, zitadelHookProbes{creationPending: customerDeletionPending(principalStore, deletionProbeRequired), invitationAllowed: signupInvitationAllowed(cfg, principalStore)}),
-		GitHubEventOutbox:       githubEventOutboxOption(githubEventOutbox),
-		GitHubEventNotify:       githubEventNotify(githubEventRelay),
-		OAuthRegistrationToken:  cfg.OAuthRegistrationToken,
-		TrustedProxyCIDRs:       trustedProxies,
+		PlatformImageOrg:            cfg.GitHubOrg,
+		PromoteTenants:              []string{"admins"},
+		ErpactDeployer:              erpactDeployer,
+		TemporalClient:              devLoopClient,
+		HumanInputLedger:            humanInputLedger,
+		WorkItems:                   workItemsStore,
+		IssueWorkItemTenant:         os.Getenv("ISSUE_WORK_ITEM_TENANT"),
+		SubmitCreatesExecution:      submitCreatesExecution,
+		AgentRunBinder:              agentRunBinder,
+		SurfaceIdentities:           surfaceIDs,
+		TenantResolver:              gitReader,
+		Principals:                  principalResolver,
+		TenantAuthzMode:             cfg.tenantAuthzMode(),
+		AgentReceiptGateMode:        cfg.agentReceiptGateMode(),
+		ApprovalBindingMode:         cfg.approvalBindingMode(),
+		AgentReceiptMaxAge:          cfg.agentReceiptMaxAge(),
+		LegacyApproverDisabled:      cfg.legacyApproverDisabled(),
+		DevLoopBearerApproveEnabled: cfg.devLoopBearerApproveEnabled(),
+		PrincipalMembership:         gitReader,
+		GlovoAllowlist:              glovoAllowlist(glovoStore),
+		Glovo:                       glovoRoutes,
+		GlovoBasket:                 glovoBasketRoutes,
+		GlovoControl:                glovoControlRoutes,
+		GlovoJoin:                   glovoJoinRoutes,
+		GlovoBasketJoin:             glovoBasketJoinRoutes,
+		GlovoConsent:                glovoConsentRoutes,
+		AdminPrincipals:             cfg.adminPrincipals(),
+		RequireRegisteredPolicy:     cfg.requireRegisteredPolicy(),
+		Clock:                       approvalClock,
+		ApprovalMaxDecisionAge:      cfg.approvalMaxDecisionAge(),
+		PrincipalAuthz:              principalAuthz,
+		MemberKeyPlan:               memberKeyPlanOptions(principalStore, gitReader),
+		Delegation:                  delegationResolver,
+		WorkflowDispatcher:          workflowDispatcher,
+		GitopsReady:                 gitopsReady,
+		PostgresReady:               postgresReady,
+		DexReady:                    dexReady,
+		VaultReady:                  vaultReady,
+		StoreInitFailures:           storeFailures.List,
+		TemporalState:               temporalState,
+		GitopsSynced:                func() bool { return !gitReader.LastSync().IsZero() },
+		Draining:                    draining.Load,
+		ArgoWebhookSecret:           cfg.ArgoWebhookSecret,
+		GitHubWebhookSecret:         cfg.GitHubWebhookSecret,
+		GitHubWebhookOwners:         cfg.GitHubWebhookOwners,
+		ZitadelHook:                 zitadelHookOptions(cfg, gitReader, zitadelHookProbes{creationPending: customerDeletionPending(principalStore, deletionProbeRequired), invitationAllowed: signupInvitationAllowed(cfg, principalStore)}),
+		GitHubEventOutbox:           githubEventOutboxOption(githubEventOutbox),
+		GitHubEventNotify:           githubEventNotify(githubEventRelay),
+		OAuthRegistrationToken:      cfg.OAuthRegistrationToken,
+		TrustedProxyCIDRs:           trustedProxies,
 	})
 
 	srv := &http.Server{
@@ -1947,6 +1948,11 @@ type config struct {
 	// whether the service principal may still relay a free-text approver on
 	// mctl-agents-approve. Empty means on; validated at startup.
 	LegacyApproverRaw string
+	// DevLoopBearerApproveRaw is DEVLOOP_BEARER_APPROVE_ENABLED: the
+	// break-glass that lets a bearer-token caller decide a DevLoop approval
+	// again (owner decision 2026-11-18). Empty or "false" is off; validated
+	// at startup.
+	DevLoopBearerApproveRaw string
 	// SubmitCreatesExecutionRaw is MCTL_SUBMIT_CREATES_EXECUTION (mctl-agents#717
 	// S3): on or off, empty is off; validated at startup.
 	SubmitCreatesExecutionRaw string
@@ -2123,6 +2129,7 @@ func loadConfig() config {
 		AgentReceiptMaxAgeRaw:               os.Getenv("MCTL_AGENT_RECEIPT_MAX_AGE"),
 		WorkItemsConfigured:                 workItemsStoreConfigured(),
 		LegacyApproverRaw:                   os.Getenv("MCTL_AGENTS_APPROVE_LEGACY_APPROVER"),
+		DevLoopBearerApproveRaw:             os.Getenv("DEVLOOP_BEARER_APPROVE_ENABLED"),
 		SubmitCreatesExecutionRaw:           os.Getenv(operations.SubmitCreatesExecutionEnv),
 		ExecutionRequestQueueWhileActiveRaw: os.Getenv(workitems.QueueWhileActiveEnv),
 		ApprovalMaxDecisionAgeRaw:           os.Getenv("ACTION_APPROVAL_MAX_DECISION_AGE"),
@@ -2386,6 +2393,9 @@ func (c config) validate() error {
 		return err
 	}
 	if _, err := parseLegacyApprover(c.LegacyApproverRaw); err != nil {
+		return err
+	}
+	if _, err := parseDevLoopBearerApprove(c.DevLoopBearerApproveRaw); err != nil {
 		return err
 	}
 	if _, err := operations.ParseSubmitCreatesExecution(c.SubmitCreatesExecutionRaw); err != nil {
@@ -2921,6 +2931,30 @@ func parseLegacyApprover(v string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("MCTL_AGENTS_APPROVE_LEGACY_APPROVER=%q: want true or false", v)
+}
+
+// parseDevLoopBearerApprove reads DEVLOOP_BEARER_APPROVE_ENABLED. Empty or
+// "false" is off, "true" is on. Anything else refuses boot rather than being
+// read as either answer: guessing "on" reopens the bearer decision of a
+// DevLoop approval, which AI clients can make with the owner's token.
+func parseDevLoopBearerApprove(v string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "false":
+		return false, nil
+	case "true":
+		return true, nil
+	}
+	return false, fmt.Errorf("DEVLOOP_BEARER_APPROVE_ENABLED=%q: want true or false", v)
+}
+
+// devLoopBearerApproveEnabled is the parsed break-glass; an invalid value,
+// which validate refuses, reads as off.
+func (c config) devLoopBearerApproveEnabled() bool {
+	on, err := parseDevLoopBearerApprove(c.DevLoopBearerApproveRaw)
+	if err == nil && on {
+		slog.Warn("DEVLOOP_BEARER_APPROVE_ENABLED is on: bearer-token callers may decide DevLoop approvals (break-glass)")
+	}
+	return err == nil && on
 }
 
 // legacyApproverDisabled is the parsed flag, inverted for Options' zero

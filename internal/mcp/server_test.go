@@ -1779,7 +1779,8 @@ func TestToolGetDevLoopApproval_ReadsTheGrantByIssueURL(t *testing.T) {
 }
 
 // decide_url reaches the model unchanged, and both DevLoop tools tell the
-// model to hand it to the person rather than decide (mctl-api#964).
+// model to hand it to the person rather than decide (mctl-api#964), and that
+// the approve tool is refused to decide without the break-glass.
 func TestToolGetDevLoopApproval_HandsOverTheDecideURL(t *testing.T) {
 	grant := `{"workflow_id":"w","approval":{"id":"aar_1","state":"pending"},"decide_url":"https://api.example/devloop/decide/w?cd=d&grant=aar_1&xd=c"}`
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1799,8 +1800,8 @@ func TestToolGetDevLoopApproval_HandsOverTheDecideURL(t *testing.T) {
 		desc  string
 		needs []string
 	}{
-		{"mctl_get_dev_loop_approval", get.Description, []string{"decide_url", "give it to them", "second factor", "do not call mctl_approve_dev_loop", "relay"}},
-		{"mctl_approve_dev_loop", approve.Description, []string{"decide_url", "do not call this tool", "Never call this tool on your own initiative", "relay", "second factor"}},
+		{"mctl_get_dev_loop_approval", get.Description, []string{"decide_url", "give it to them", "second factor", "decide_page_required", "do not call it on your own initiative", "relay"}},
+		{"mctl_approve_dev_loop", approve.Description, []string{"decide_url", "does not decide a DevLoop approval", "decide_page_required", "DEVLOOP_BEARER_APPROVE_ENABLED", "never relay", "second factor"}},
 	} {
 		for _, n := range tc.needs {
 			if !strings.Contains(tc.desc, n) {

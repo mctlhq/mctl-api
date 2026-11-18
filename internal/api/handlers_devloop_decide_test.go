@@ -63,6 +63,8 @@ type decideEnv struct {
 func newDecideEnv(t *testing.T) *decideEnv {
 	t.Helper()
 	e, fake := newDevLoopGrantEnv(t)
+	// The page decides without the bearer break-glass.
+	e.h.opts.DevLoopBearerApproveEnabled = false
 	idp := newFakeIdP(t)
 	idp.clientID, idp.clientSecret = testDecideClientID, testDecideClientSecret
 	// ZITADEL's shape for a password plus a second factor; tests of the
@@ -490,14 +492,17 @@ func TestDevLoopDecide_FormActionAdmitsOnlyTheIssuer(t *testing.T) {
 	}
 }
 
-// A grant decided elsewhere (the API, MCP, another link) offers nothing.
+// A grant decided elsewhere (the break-glass API, another link) offers
+// nothing.
 func TestDevLoopDecide_ADecidedGrantOffersNoDecision(t *testing.T) {
 	d := newDecideEnv(t)
 	run := d.run("decided")
 	bind := map[string]any{"approval_ref": run.grant, "context_digest": run.link.Get("cd"), "content_digest": testContentDigest}
+	d.h.opts.DevLoopBearerApproveEnabled = true
 	if a := d.approveDevLoop(rootAdmin, run.workflowID, bindingJSON(bind)); a.code != http.StatusOK {
 		t.Fatalf("approve = %d %s", a.code, a.raw)
 	}
+	d.h.opts.DevLoopBearerApproveEnabled = false
 	ck, state := d.signIn(run)
 	rec, form := d.callback(ck, state)
 	if rec.Code != http.StatusConflict || form.Get("csrf") != "" {
@@ -642,5 +647,51 @@ func TestDevLoopApprovalRead_DecideURL(t *testing.T) {
 	decided := d.readDevLoopApproval(rootAdmin, run.workflowID)
 	if _, has := decided.body["decide_url"]; decided.code != http.StatusOK || has {
 		t.Fatalf("a decided grant got a link: %s", decided.raw)
+	}
+}
+
+// The ID token must be issued to the decide page's own client: go-oidc only
+// checks that aud contains it, and ZITADEL puts the project's other client
+// ids into aud too. azp is required with more than one audience and, when
+// present, must be this client (the release approval page's rule).
+func TestDevLoopDecide_IDTokenMustBeIssuedToThisClient(t *testing.T) {
+	const project = "369000000000000001"
+	for name, tc := range map[string]struct {
+		claims map[string]any
+		ok     bool
+	}{
+		"single audience, no azp":                 {map[string]any{}, true},
+		"zitadel shape for this client":           {map[string]any{"aud": []string{testDecideClientID, "mcp-client", project}, "azp": testDecideClientID}, true},
+		"several audiences without azp":           {map[string]any{"aud": []string{testDecideClientID, "mcp-client"}}, false},
+		"authorized party is another client":      {map[string]any{"azp": "mcp-client"}, false},
+		"zitadel shape minted for another client": {map[string]any{"aud": []string{"mcp-client", testDecideClientID, project}, "azp": "mcp-client"}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := newDecideEnv(t)
+			run := d.run("azp")
+			extra := map[string]any{"amr": []string{"pwd", "mfa", "user"}}
+			for k, v := range tc.claims {
+				extra[k] = v
+			}
+			d.idp.extra = extra
+			ck, state := d.signIn(run)
+			rec, form := d.callback(ck, state)
+			if tc.ok {
+				if rec.Code != http.StatusOK || form.Get("csrf") == "" {
+					t.Fatalf("callback = %d %s, want a decision offered", rec.Code, rec.Body.String())
+				}
+				return
+			}
+			body := html.UnescapeString(rec.Body.String())
+			if rec.Code != http.StatusBadRequest || form.Get("csrf") != "" || !strings.Contains(body, "not issued to the DevLoop decide page") {
+				t.Fatalf("callback = %d %s, want 400 with no decision offered", rec.Code, body)
+			}
+			if d.pageAudits("denied") != 1 {
+				t.Fatalf("refusal audited %d times, want 1", d.pageAudits("denied"))
+			}
+			if st := d.approvalState(run.grant)["state"]; st != workitems.ApprovalPending {
+				t.Fatalf("grant = %v, want pending", st)
+			}
+		})
 	}
 }

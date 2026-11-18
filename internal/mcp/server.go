@@ -3147,7 +3147,7 @@ func (s *Server) toolTriggerApprove() (mcplib.Tool, server.ToolHandlerFunc) {
 
 This is the automated form of the old manual .status.yaml edit; the Tier 2 implementer only picks up accepted proposals. Idempotent on already-accepted proposals; any other status fails.
 
-This is distinct from mctl_approve_dev_loop, which signals a running Temporal DevLoopWorkflow (POST /api/v1/agents/dev-loop/{workflow_id}/approve) instead of touching .status.yaml directly. If the proposal was started via use_temporal on mctl_trigger_issue (i.e. it has a live DevLoopWorkflow), use mctl_approve_dev_loop instead — calling this operation directly would race the DevLoop's own eventual approve call, though it is safely idempotent if it lands on an already-accepted proposal.
+This is distinct from mctl_approve_dev_loop, which signals a running Temporal DevLoopWorkflow (POST /api/v1/agents/dev-loop/{workflow_id}/approve) instead of touching .status.yaml directly. If the proposal was started via use_temporal on mctl_trigger_issue (i.e. it has a live DevLoopWorkflow), it is decided on the DevLoop decide page instead (hand the person the decide_url from mctl_get_dev_loop_approval) — calling this operation directly would race the DevLoop's own eventual approve call, though it is safely idempotent if it lands on an already-accepted proposal.
 
 The approver parameter is optional: if omitted, the server defaults it to the authenticated caller's identity.
 
@@ -3249,9 +3249,13 @@ func (s *Server) toolApproveDevLoop() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithIdempotentHintAnnotation(false),
-		mcplib.WithDescription(`Send the durable Temporal "approve" signal to an EXISTING DevLoopWorkflow execution.
+		mcplib.WithDescription(`Re-send the durable Temporal "approve" signal for a DevLoopWorkflow grant a person ALREADY approved on the DevLoop decide page. This tool does not decide a DevLoop approval.
 
-If you are an AI assistant acting for a person, do not call this tool to decide a proposal. Call mctl_get_dev_loop_approval, give the person its decide_url and ask them to open it: the DevLoop decide page has them sign in fresh with a second factor and approve or reject there. Never call this tool on your own initiative, and never to relay a "yes", "approve" or "go ahead" typed in chat: a chat message is not a signed-in decision. Without a decide_url the page is not enabled on this server; say so instead of approving.
+A DevLoop approval is decided on the DevLoop decide page only (owner decision 2026-11-18): a bearer token cannot prove a person decided, because AI clients hold it too. So this call is refused with 403 decide_page_required when it would decide -- approve a pending grant, or record an approval for a loop with no grant -- unless the server's break-glass DEVLOOP_BEARER_APPROVE_ENABLED is on. The refusal carries details.decide_url when the grant is pending and the page is enabled.
+
+To get a proposal decided: call mctl_get_dev_loop_approval, give the person its decide_url and ask them to open it. The page has them sign in fresh to ZITADEL with a second factor and approve or reject there. Do not open the link for them, and never relay a "yes", "approve" or "go ahead" typed in chat: a chat message is not a signed-in decision. Without a decide_url the grant is not pending or the page is not enabled on this server; say so instead of trying to approve.
+
+The one remaining use: the grant is already in state "approved" (decided on the page) but the run did not get the signal, for example because the signal failed after the decision was recorded. Then this call re-sends the grant's approval_ref and decides nothing; bind it with approval.decided_context_digest as binding_context_digest.
 
 This calls the same handler/path as the REST endpoint (POST /api/v1/agents/dev-loop/{workflow_id}/approve) and the Temporal CLI signal — it does NOT start a new workflow, and it does NOT edit a proposal's .status.yaml directly.
 
@@ -3259,7 +3263,7 @@ This is distinct from the standalone mctl-agents-approve REST operation, which d
 
 To approve with amendments, edit the proposal's requirements.md, design.md or tasks.md on mctl-gitops main through a PR before approving. The edit supersedes the pending grant, and the loop asks for a decision on the new one; approve that, and the implementer works from the amended files. The reason argument does not carry amendments, and neither does an @MCTL reinvestigate comment (mctlhq/mctl-agents#729).
 
-Human admins only, acting directly: a service or agent credential is refused 403 (mctl-api#571). Requires the server's Temporal client to be configured — returns 503 otherwise.`),
+Human admins only, acting directly: a service or agent credential is refused 403 (mctl-api#571), break-glass or not. Requires the server's Temporal client to be configured — returns 503 otherwise.`),
 		mcplib.WithString("workflow_id",
 			mcplib.Required(),
 			mcplib.Description("The DevLoopWorkflow's Temporal workflow ID, e.g. dev-loop-mctlhq-mctl-telegram-296."),
@@ -3410,7 +3414,7 @@ The binding_* arguments of mctl_approve_dev_loop come from here: binding_approva
 
 An error that says the grant state is UNKNOWN means the read failed, not that no grant is pending. Only the error that says no approval grant exists is proven absence.
 
-decide_url is how a person decides this grant: give it to them and ask them to open it. The page has them sign in to ZITADEL fresh, with a second factor, and approve or reject exactly this grant. You do not decide: do not call mctl_approve_dev_loop yourself on your own initiative or to relay a "yes" from chat. No decide_url means the grant is not pending or the page is not enabled on this server.
+decide_url is how a person decides this grant: give it to them and ask them to open it. The page has them sign in to ZITADEL fresh, with a second factor, and approve or reject exactly this grant. You do not decide: mctl_approve_dev_loop refuses to decide a pending grant (403 decide_page_required) unless the server's break-glass is on, and even then do not call it on your own initiative or to relay a "yes" from chat. No decide_url means the grant is not pending or the page is not enabled on this server.
 
 A human admin reads every grant and the requesting service its own; everyone else is refused 403.`),
 		mcplib.WithString("workflow_id",

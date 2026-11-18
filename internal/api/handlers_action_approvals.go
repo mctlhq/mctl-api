@@ -848,6 +848,23 @@ func (h *Handlers) DecideActionApproval(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 	}
+	// An mctl-agents-approve grant is approved on the DevLoop decide page
+	// only (owner decision 2026-11-18): the page approves through
+	// ApproveDevLoopWorkflow, never through this route, so a bearer approve
+	// here would be the way around it. A deny stays open, and is what the
+	// page's reject uses: refusing a DevLoop needs no proof of a person.
+	// Only a pending grant can be approved, so only that is refused here; a
+	// closed one keeps its typed state refusal, since the page has nothing
+	// to offer for it either.
+	if cur.ActionKind == devLoopApprovalKind && cur.State == workitems.ApprovalPending &&
+		body.Decision == workitems.DecisionApprove && !h.mayDecideDevLoop(r) {
+		h.auditActionApprovalRefusal(r, user, "action_approval.decision_refused", cur.ID, devLoopCodeDecidePageRequired)
+		writeErrorCode(w, http.StatusForbidden, devLoopCodeDecidePageRequired,
+			"an "+devLoopApprovalKind+" approval is approved on the DevLoop decide page only, by a person signing in there with a second factor; "+
+				"read decide_url with GET /api/v1/agents/dev-loop/{workflow_id}/approval and hand it to the person who decides",
+			map[string]interface{}{"approval_ref": cur.ID})
+		return
+	}
 	// A decision that is not an approve is never bound.
 	bind := body.Binding
 	if body.Decision != workitems.DecisionApprove {

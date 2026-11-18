@@ -4474,6 +4474,15 @@ paths:
         the legacy payload: a recorded "no" is not an absent gate. Two open
         executions for the same run are 409 `execution_ambiguous`; a store
         that cannot be read is 503, never the legacy payload.
+
+        **Decide page only** (owner decision 2026-11-18): a bearer-token
+        caller does not decide. Approving a pending grant, or signalling
+        the legacy payload, is 403 `decide_page_required` (audited as
+        denied; `details.decide_url` for a pending grant when the DevLoop
+        decide page is enabled) unless `DEVLOOP_BEARER_APPROVE_ENABLED` is
+        on. Only the decide page's in-process call, after a fresh ZITADEL
+        sign-in with a second factor, decides. Re-signalling an already
+        approved grant decides nothing and stays open.
       tags: [Agent Registry]
       parameters:
         - name: workflow_id

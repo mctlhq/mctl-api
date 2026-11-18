@@ -3,7 +3,8 @@
 `service:mctl-orchestrator-devloop` (mctl-api#963) lets the Codex orchestrator
 on the Mac mini start a DevLoop for an issue it has triaged, and read that loop
 back, without a human relaying the start. It cannot approve a proposal: that
-stays a human admin's decision (#571).
+stays a human admin's decision (#571), made on the DevLoop decide page
+(docs/principals.md, "Decide page only").
 
 ## Authentication
 
