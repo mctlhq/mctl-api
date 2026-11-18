@@ -335,7 +335,11 @@ func linkConsentPage(t *testing.T, h *upstreamHarness, clientID string) (token s
 		t.Fatalf("no consent form: %s", body)
 	}
 	token = body[i+len(marker):]
-	token = token[:strings.Index(token, `"`)]
+	end := strings.Index(token, `"`)
+	if end < 0 {
+		t.Fatalf("unterminated consent token: %s", body)
+	}
+	token = token[:end]
 	for _, c := range rec.Result().Cookies() {
 		if strings.HasPrefix(c.Name, consentCookie) {
 			cookie = c
@@ -388,8 +392,13 @@ func TestLinkFlowShowsConsentToEveryNonCIMDClientKind(t *testing.T) {
 			}
 			before := time.Now().Add(-time.Minute).Unix()
 			_, _, body := linkConsentPage(t, h, clientID)
-			if !strings.Contains(body, clientID) {
-				t.Fatalf("page does not name the client %q: %s", clientID, body)
+			// The page shows the client id on its own line whatever the kind,
+			// and the registered name where there is one.
+			if !strings.Contains(body, "Client ID: "+clientID) {
+				t.Fatalf("page does not show the client id %q: %s", clientID, body)
+			}
+			if want := map[string]string{"dcr": "Link Helper", "static": "Static Helper"}[kind]; want != "" && !strings.Contains(body, "Application: "+want) {
+				t.Fatalf("page does not name the %s client %q: %s", kind, want, body)
 			}
 			c := jwtClaims(t, linkConsentToken(t, h, clientID, kind))
 			if at, _ := c["auth_time"].(float64); int64(at) < before {
