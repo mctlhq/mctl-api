@@ -51,11 +51,16 @@ type Detection struct {
 	Tier string `json:"tier"`
 }
 
-// Runtime is the container runtime shape.
+// Runtime is the container runtime shape. Port is the port the container
+// listens on (service.containerPort); ServicePort, when set, is the port the
+// Service and Ingress expose (service.port). Zero means absent: the schema
+// refuses 0, and omitempty keeps the canonical JSON, so the digest, of an
+// intent without it unchanged (mctl-api#1118).
 type Runtime struct {
-	Port       int    `json:"port"`
-	HealthPath string `json:"healthPath"`
-	Replicas   int    `json:"replicas"`
+	Port        int    `json:"port"`
+	ServicePort int    `json:"servicePort,omitempty"`
+	HealthPath  string `json:"healthPath"`
+	Replicas    int    `json:"replicas"`
 }
 
 // Resources are Kubernetes requests and limits.

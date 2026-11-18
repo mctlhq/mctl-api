@@ -118,7 +118,16 @@ def apply_intent(v, intent):
     """The intent-derived changes, as tpl-git-commit assigns them."""
     spec, md = intent["spec"], intent["metadata"]
     rt = spec["runtime"]
-    v.setdefault("service", {})["port"] = rt["port"]
+    svc = v.setdefault("service", {})
+    # mctl-api#1118: servicePort -> service.port, else keep a set port, else
+    # runtime.port; runtime.port -> containerPort unless it was unset and
+    # equals the resulting service.port.
+    if rt.get("servicePort"):
+        svc["port"] = rt["servicePort"]
+    elif svc.get("port") is None:
+        svc["port"] = rt["port"]
+    if "containerPort" in svc or svc["port"] != rt["port"]:
+        svc["containerPort"] = rt["port"]
     v.setdefault("probes", {}).setdefault("liveness", {})["path"] = rt["healthPath"]
     v["probes"].setdefault("readiness", {})["path"] = rt["healthPath"]
     v["replicaCount"] = rt.get("replicas", 1)

@@ -56,4 +56,5 @@ resources:
     cpu: 100m
     memory: 128Mi
 service:
-  port: 8080
+  containerPort: 8080
+  port: 3000

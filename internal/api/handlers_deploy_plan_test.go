@@ -584,6 +584,31 @@ probes:
 			delete(spec(in), "secretRefs")
 			spec(in)["runtime"] = map[string]any{"port": 3000, "healthPath": "/healthz"}
 		}, true},
+		// mctl-api#1118: mctl-docs and mctl-web expose 80 and listen on 8080.
+		"mctl-docs: service.port 80, containerPort 8080": {planBaseValues + `
+service:
+  port: 80
+  containerPort: 8080
+probes:
+  liveness:
+    path: /healthz
+  readiness:
+    path: /healthz
+`, func(in map[string]any) { delete(spec(in), "env"); delete(spec(in), "secretRefs") }, false},
+		"mctl-docs with servicePort 80 spelled out": {planBaseValues + `
+service:
+  port: 80
+  containerPort: 8080
+probes:
+  liveness:
+    path: /healthz
+  readiness:
+    path: /healthz
+`, func(in map[string]any) {
+			delete(spec(in), "env")
+			delete(spec(in), "secretRefs")
+			spec(in)["runtime"] = map[string]any{"port": 8080, "servicePort": 80, "healthPath": "/healthz"}
+		}, false},
 		"env added": {planBaseValues + `
 probes:
   liveness:

@@ -244,3 +244,84 @@ func TestCompilePreview_EmptyBaseIsEmptyMapping(t *testing.T) {
 		}
 	}
 }
+
+// mctl-api#1118: the intent's two ports land on the chart's two keys, a
+// Service port the values already set is never changed as a side effect,
+// and containerPort is written only where it is not already the chart's
+// default (the same as service.port).
+func TestApplyPorts(t *testing.T) {
+	for name, tc := range map[string]struct {
+		svc  map[string]any
+		rt   Runtime
+		want map[string]any
+	}{
+		"mctl-docs: split ports reproduce": {
+			map[string]any{"port": 80, "containerPort": 8080}, Runtime{Port: 8080},
+			map[string]any{"port": 80, "containerPort": 8080}},
+		"servicePort sets the Service port": {
+			map[string]any{"port": 8080}, Runtime{Port: 9090, ServicePort: 80},
+			map[string]any{"port": 80, "containerPort": 9090}},
+		"container moves, the Service stays": {
+			map[string]any{"port": 80, "containerPort": 8080}, Runtime{Port: 9090},
+			map[string]any{"port": 80, "containerPort": 9090}},
+		"a set Service port is kept without servicePort": {
+			map[string]any{"port": 3000}, Runtime{Port: 8080},
+			map[string]any{"port": 3000, "containerPort": 8080}},
+		"no Service port: runtime.port, containerPort left to the chart": {
+			map[string]any{}, Runtime{Port: 8080},
+			map[string]any{"port": 8080}},
+		"same port: containerPort left to the chart": {
+			map[string]any{"port": 8080, "type": "ClusterIP"}, Runtime{Port: 8080},
+			map[string]any{"port": 8080, "type": "ClusterIP"}},
+		"an explicit containerPort is rewritten even when equal": {
+			map[string]any{"port": 8080, "containerPort": 9000}, Runtime{Port: 8080},
+			map[string]any{"port": 8080, "containerPort": 8080}},
+		"servicePort equal to runtime.port": {
+			map[string]any{}, Runtime{Port: 8080, ServicePort: 8080},
+			map[string]any{"port": 8080}},
+		"a non-integer Service port makes containerPort explicit": {
+			map[string]any{"port": "8080"}, Runtime{Port: 8080},
+			map[string]any{"port": "8080", "containerPort": 8080}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			applyPorts(tc.svc, tc.rt)
+			if !reflect.DeepEqual(tc.svc, tc.want) {
+				t.Fatalf("service = %v, want %v", tc.svc, tc.want)
+			}
+		})
+	}
+}
+
+// mctl-api#1118: a service like mctl-docs (service.port 80, containerPort
+// 8080) reproduces its values from an intent with runtime.port 8080, through
+// the same check the planner uses.
+func TestChangesRender_SplitPortsReproduce(t *testing.T) {
+	base := []byte("service:\n  port: 80\n  containerPort: 8080\nreplicaCount: 1\nprobes:\n  liveness:\n    path: /healthz\n  readiness:\n    path: /healthz\n")
+	chart := []byte("service:\n  type: ClusterIP\n  port: 8080\nreplicaCount: 1\n")
+	for name, tc := range map[string]struct {
+		runtime string
+		want    bool
+	}{
+		"runtime.port 8080":                 {`{"port":8080,"healthPath":"/healthz"}`, false},
+		"runtime.port 8080, servicePort 80": {`{"port":8080,"servicePort":80,"healthPath":"/healthz"}`, false},
+		"servicePort moved to 8080":         {`{"port":8080,"servicePort":8080,"healthPath":"/healthz"}`, true},
+		"container moved to 9090":           {`{"port":9090,"healthPath":"/healthz"}`, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw := strings.Replace(string(testIntentJSON("acme", "docs", "")),
+				`"runtime":{"port":8080,"healthPath":"/healthz"}`, `"runtime":`+tc.runtime, 1)
+			in, _ := mustParse(t, []byte(raw))
+			before, after, err := CompilePreview(base, in, "abc123", "docs-abc123.mctl.ai")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := ChangesRender(chart, before, after)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("ChangesRender = %v, want %v\nbefore: %v\nafter: %v", got, tc.want, before["service"], after["service"])
+			}
+		})
+	}
+}

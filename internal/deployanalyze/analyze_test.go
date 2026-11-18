@@ -94,6 +94,9 @@ func TestConvergedTier0(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := d["spec"].(map[string]any)
+	if _, ok := spec["runtime"].(map[string]any)["servicePort"]; ok {
+		t.Fatalf("the draft guesses a Service port: %v", spec["runtime"])
+	}
 	if spec["environment"] != "preview" || spec["exposure"].(map[string]any)["mode"] != "internal" ||
 		spec["runtime"].(map[string]any)["replicas"] != 1 {
 		t.Fatalf("%v", spec)

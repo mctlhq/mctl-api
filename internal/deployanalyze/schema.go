@@ -15,7 +15,7 @@ import (
 )
 
 // SchemaSHA256 pins the vendored DeployIntent schema.
-const SchemaSHA256 = "cd2e6f1d6dd07a47b878b54ebc47999aafb1890a77a140ccc74b400429e386c4"
+const SchemaSHA256 = "5c9c45a17c0134097fd9048a64ca22fdc06bb40722f94ffe8b0c9df07d3d6917"
 
 // SchemaSource is where the vendored schema is copied from.
 const SchemaSource = "mctlhq/mctl-gitops:platform-gitops/agent-platform/schemas/deploy-intent.schema.json"

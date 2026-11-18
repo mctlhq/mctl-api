@@ -30,9 +30,9 @@ var previewSetKeys = []string{
 
 // intentYQPaths are the yq assignment targets of tpl-git-commit that the
 // compiler reproduces for intent-derived changes. The remaining intent keys
-// (replicaCount, resources, service.port) have no yq assignment in
-// tpl-git-commit: service.port is a helm --set of the preview template
-// (above), the other two are set by this compiler alone.
+// (replicaCount, resources, service.port, service.containerPort) have no yq
+// assignment in tpl-git-commit: service.port is a helm --set of the preview
+// template (above), the others are set by this compiler alone.
 var intentYQPaths = []string{
 	".probes.liveness.path",
 	".probes.readiness.path",
@@ -155,7 +155,7 @@ func sub(m map[string]any, key string) map[string]any {
 
 func applyIntent(v map[string]any, in Intent) {
 	rt := in.Spec.Runtime
-	sub(v, "service")["port"] = rt.Port
+	applyPorts(sub(v, "service"), rt)
 	sub(sub(v, "probes"), "liveness")["path"] = rt.HealthPath
 	sub(sub(v, "probes"), "readiness")["path"] = rt.HealthPath
 	v["replicaCount"] = rt.Replicas
@@ -209,6 +209,43 @@ func applyIntent(v map[string]any, in Intent) {
 		}
 		v["envFrom"] = append(kept, map[string]any{"secretRef": map[string]any{"name": secretName}})
 	}
+}
+
+// applyPorts writes the intent's ports into the service mapping of the
+// values (mctl-api#1118). base-service keeps two ports apart: service.port is
+// what the Service and Ingress expose, service.containerPort is what the
+// container listens on, reached through the named targetPort `http`; an
+// unset containerPort means the same as port.
+//
+//   - service.port is runtime.servicePort when the intent sets it. When it
+//     does not, a port the values already set is kept: Service ports merge by
+//     number, so changing one on a live service fails to apply and leaves the
+//     Ingress on a port the Service lacks (mctl-gitops#1933). Only values
+//     without one get runtime.port, as every intent compiled before.
+//   - service.containerPort is runtime.port, except that it stays unset when
+//     the values never set it and runtime.port equals the resulting
+//     service.port: writing the chart's own default there would make an
+//     intent that reproduced its service before report a change it does not
+//     make.
+func applyPorts(svc map[string]any, rt Runtime) {
+	switch {
+	case rt.ServicePort != 0:
+		svc["port"] = rt.ServicePort
+	case svc["port"] == nil:
+		svc["port"] = rt.Port
+	}
+	if _, set := svc["containerPort"]; set || !samePort(svc["port"], rt.Port) {
+		svc["containerPort"] = rt.Port
+	}
+}
+
+// samePort reports whether a port read from the values is the number p. The
+// values come from YAML, so the port is an int; anything else (a string, a
+// float) is not taken to be the same port, which makes containerPort
+// explicit rather than leaving it to a value the chart may read differently.
+func samePort(v any, p int) bool {
+	n, ok := v.(int)
+	return ok && n == p
 }
 
 // ── wft-preview-deploy: the fixed helm --set overrides ─────────────────────

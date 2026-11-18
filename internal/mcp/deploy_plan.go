@@ -25,6 +25,8 @@ Planning changes nothing: it writes no gitops file and touches no cluster. The o
 
 Only environment=preview is planned. environment=production is refused (prod_requires_promote), and a service that does not exist yet in gitops is planned as an onboard: its preview values are compiled from the intent over a platform base (image built from source, registry pull secret), and applying it needs an owner's approval. Approval is a later step and is not granted by planning.
 
+Ports: runtime.port is the port the container listens on (service.containerPort, 1024 or above, since containers run as non-root). runtime.servicePort is the optional port the Service and Ingress expose (service.port, may be below 1024). Without servicePort, a service whose values already set service.port keeps it, so a service exposing 80 and listening on 8080 plans with runtime.port 8080 alone; a service without one gets runtime.port.
+
 Planning the same intent twice gives the same digest. Pass idempotency_key to get the stored plan back (replayed=true) on a retry.`),
 		mcplib.WithObject("intent", mcplib.Required(), mcplib.Description("The DeployIntent object")),
 		mcplib.WithString("idempotency_key", mcplib.Description("Optional key; repeating it with the same intent returns the stored plan")),
