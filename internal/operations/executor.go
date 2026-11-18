@@ -515,8 +515,9 @@ func buildArgoParams(params map[string]string) []interface{} {
 }
 
 // WorkflowOutcome is a workflow's phase and its workflow-level output
-// parameters (status.outputs.parameters), nothing else. Node outputs,
-// artifacts and messages are not read.
+// parameters: status.outputs.parameters, plus the outputs of the workflow's
+// own root node for any name status.outputs lacks (see workflowOutcome).
+// Other nodes' outputs, artifacts and messages are not read.
 type WorkflowOutcome struct {
 	Phase   string
 	Outputs map[string]string
@@ -537,19 +538,50 @@ func (e *Executor) GetWorkflowOutcome(ctx context.Context, namespace, name strin
 	return workflowOutcome(wf.Object), nil
 }
 
+// workflowOutcome reads what a finished workflow reported.
+//
+// The platform's templates declare their results as outputs of the
+// entrypoint template (health, image_digest, commit_sha, ...). Argo keeps
+// those on the root node, whose id and name are the workflow's own, and does
+// NOT copy them into status.outputs: that field holds only global outputs
+// (globalName). Observed on Argo 3.7.14, preview-deploy-76aa07ff, 2026-11-17:
+// status.outputs null, root node carrying image_digest, health and
+// health_url. Reading only status.outputs therefore recorded every run as
+// health "unknown" with no digest. status.outputs still wins when both name
+// a parameter; the root node fills the rest. No other node is read: a step's
+// own output is not a result of the workflow.
 func workflowOutcome(obj map[string]interface{}) *WorkflowOutcome {
 	out := &WorkflowOutcome{Outputs: map[string]string{}}
 	status, _ := obj["status"].(map[string]interface{})
 	out.Phase, _ = status["phase"].(string)
-	outputs, _ := status["outputs"].(map[string]interface{})
-	params, _ := outputs["parameters"].([]interface{})
+	collectOutputParams(out.Outputs, status["outputs"], false)
+	meta, _ := obj["metadata"].(map[string]interface{})
+	if name, _ := meta["name"].(string); name != "" {
+		nodes, _ := status["nodes"].(map[string]interface{})
+		if root, ok := nodes[name].(map[string]interface{}); ok {
+			if dn, _ := root["displayName"].(string); dn == "" || dn == name {
+				collectOutputParams(out.Outputs, root["outputs"], true)
+			}
+		}
+	}
+	return out
+}
+
+// collectOutputParams adds the string-valued parameters of an outputs
+// object to dst. keepExisting leaves a name already in dst alone.
+func collectOutputParams(dst map[string]string, outputs interface{}, keepExisting bool) {
+	o, _ := outputs.(map[string]interface{})
+	params, _ := o["parameters"].([]interface{})
 	for _, p := range params {
 		m, _ := p.(map[string]interface{})
 		name, _ := m["name"].(string)
 		value, ok := m["value"].(string)
-		if name != "" && ok {
-			out.Outputs[name] = value
+		if name == "" || !ok {
+			continue
 		}
+		if _, have := dst[name]; have && keepExisting {
+			continue
+		}
+		dst[name] = value
 	}
-	return out
 }

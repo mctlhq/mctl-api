@@ -316,3 +316,57 @@ func TestGetWorkflowOutcome(t *testing.T) {
 		t.Fatalf("missing workflow = %v, want NotFound", err)
 	}
 }
+
+// Argo keeps the entrypoint template's outputs on the root node and leaves
+// status.outputs empty (observed 2026-11-17, preview-deploy-76aa07ff). The
+// outcome must carry them, with status.outputs winning on a clash, and must
+// not read any other node.
+func TestWorkflowOutcome_RootNodeOutputs(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	param := func(n string, v interface{}) interface{} { return map[string]interface{}{"name": n, "value": v} }
+	node := func(name string, ps ...interface{}) map[string]interface{} {
+		return map[string]interface{}{"displayName": name, "outputs": map[string]interface{}{"parameters": ps}}
+	}
+	obj := func(status map[string]interface{}) map[string]interface{} {
+		return map[string]interface{}{"metadata": map[string]interface{}{"name": "wf-1"}, "status": status}
+	}
+	cases := []struct {
+		name   string
+		status map[string]interface{}
+		want   map[string]string
+	}{
+		{"root node outputs, status.outputs null", map[string]interface{}{
+			"phase": "Succeeded", "outputs": nil,
+			"nodes": map[string]interface{}{
+				"wf-1":   node("wf-1", param("image_digest", digest), param("health", "healthy"), param("health_url", "https://x.mctl.ai")),
+				"wf-1-2": node("build-image", param("digest", "sha256:step")),
+			}},
+			map[string]string{"image_digest": digest, "health": "healthy", "health_url": "https://x.mctl.ai"}},
+		{"status.outputs wins on a clash, root fills the rest", map[string]interface{}{
+			"phase":   "Succeeded",
+			"outputs": map[string]interface{}{"parameters": []interface{}{param("health", "unhealthy")}},
+			"nodes":   map[string]interface{}{"wf-1": node("wf-1", param("health", "healthy"), param("image_digest", digest))}},
+			map[string]string{"health": "unhealthy", "image_digest": digest}},
+		{"only the root node is read", map[string]interface{}{
+			"phase": "Succeeded",
+			"nodes": map[string]interface{}{"wf-1-2": node("build-image", param("digest", "sha256:step"))}},
+			map[string]string{}},
+		{"a root-keyed node with another display name is not the root", map[string]interface{}{
+			"phase": "Succeeded",
+			"nodes": map[string]interface{}{"wf-1": node("something-else", param("health", "healthy"))}},
+			map[string]string{}},
+		{"a non-string root output is left out", map[string]interface{}{
+			"phase": "Succeeded",
+			"nodes": map[string]interface{}{"wf-1": node("wf-1", param("n", int64(3)), param("health", "healthy"))}},
+			map[string]string{"health": "healthy"}},
+		{"no nodes, no outputs", map[string]interface{}{"phase": "Running"}, map[string]string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := workflowOutcome(obj(tc.status))
+			if !reflect.DeepEqual(got.Outputs, tc.want) {
+				t.Fatalf("outputs = %v, want %v", got.Outputs, tc.want)
+			}
+		})
+	}
+}

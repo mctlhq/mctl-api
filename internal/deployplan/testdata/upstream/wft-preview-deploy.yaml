@@ -130,6 +130,15 @@ spec:
           - name: image_digest
             valueFrom:
               parameter: "{{tasks.build-image.outputs.parameters.digest}}"
+          # What the platform observed of the running preview (preview-health-gate):
+          # "healthy" only when the gate saw it. mctl-api records it on the
+          # DeployRecord and refuses to promote a preview it never saw healthy.
+          - name: health
+            valueFrom:
+              parameter: "{{tasks.health-gate.outputs.parameters.health}}"
+          - name: health_url
+            valueFrom:
+              parameter: "{{tasks.health-gate.outputs.parameters.health_url}}"
       dag:
         tasks:
           # The component name is the image name: the build pushes
@@ -193,6 +202,22 @@ spec:
                   value: "{{workflow.parameters.compiled_values}}"
                 - name: values_sha256
                   value: "{{workflow.parameters.values_sha256}}"
+                - name: image_digest
+                  value: "{{tasks.build-image.outputs.parameters.digest}}"
+
+          - name: health-gate
+            template: preview-health-gate
+            dependencies: [deploy-preview]
+            arguments:
+              parameters:
+                - name: team_name
+                  value: "{{workflow.parameters.team_name}}"
+                - name: component_name
+                  value: "{{workflow.parameters.component_name}}"
+                - name: preview_id
+                  value: "{{tasks.deploy-preview.outputs.parameters.preview_id}}"
+                - name: preview_url
+                  value: "{{tasks.deploy-preview.outputs.parameters.preview_url}}"
                 - name: image_digest
                   value: "{{tasks.build-image.outputs.parameters.digest}}"
 
@@ -455,6 +480,141 @@ spec:
           requests:
             memory: 128Mi
             cpu: 50m
+
+    # ── Health gate: what the running preview shows, not that helm returned ─────
+    # `helm --wait` only says the pods became ready once. This asks again from
+    # outside the release: every pod runs the digest the build produced (the
+    # imageID kubelet recorded, not the tag), all are Running and Ready, none
+    # restarts through a short window, and the public URL answers 2xx on the
+    # readiness path the pod itself declares. Green writes health=healthy;
+    # anything else exits non-zero, so the workflow fails and the record is
+    # never promotable. An empty image_digest (existing-tag mode, which has no
+    # build) skips only the digest comparison.
+    - name: preview-health-gate
+      inputs:
+        parameters:
+          - name: team_name
+          - name: component_name
+          - name: preview_id
+          - name: preview_url
+          - name: image_digest
+            value: ""
+      outputs:
+        parameters:
+          - name: health
+            valueFrom:
+              path: /tmp/health-gate/health
+          - name: health_url
+            valueFrom:
+              path: /tmp/health-gate/health_url
+      # Own deadline is PHG_TIMEOUT (240s) plus the stability window; this is
+      # the backstop for a hung kubectl or curl.
+      activeDeadlineSeconds: 420
+      script:
+        image: alpine/k8s:1.33.12@sha256:7aa52956f4bfa7e95bd9a6ee59674748033e2f192df3ccf8487086b1c390974b # alpine/k8s:1.33.12
+        command: [sh]
+        env:
+          - name: PARAM_TEAM_NAME
+            value: "{{inputs.parameters.team_name}}"
+          - name: PARAM_COMPONENT_NAME
+            value: "{{inputs.parameters.component_name}}"
+          - name: PARAM_PREVIEW_ID
+            value: "{{inputs.parameters.preview_id}}"
+          - name: PARAM_PREVIEW_URL
+            value: "{{inputs.parameters.preview_url}}"
+          - name: PARAM_IMAGE_DIGEST
+            value: "{{inputs.parameters.image_digest}}"
+        source: |
+          set -eu
+
+          # Parameters arrive as env, never interpolated into this script's
+          # text (gitops#992), and are shape-checked again here.
+          OUT=/tmp/health-gate
+          mkdir -p "$OUT"
+          echo unknown > "$OUT/health"
+          : > "$OUT/health_url"
+
+          TEAM="$PARAM_TEAM_NAME"
+          COMPONENT="$PARAM_COMPONENT_NAME"
+          ID="$PARAM_PREVIEW_ID"
+          URL="$PARAM_PREVIEW_URL"
+          DIGEST="$PARAM_IMAGE_DIGEST"
+          TIMEOUT="${PHG_TIMEOUT:-240}"
+          WINDOW="${PHG_WINDOW:-20}"
+
+          die() { echo "unhealthy: $*" >&2; echo unhealthy > "$OUT/health"; exit 1; }
+
+          case "$ID" in ??????) case "$ID" in *[!a-z0-9]*) die "preview_id is not 6 characters [a-z0-9]" ;; esac ;; *) die "preview_id is not 6 characters [a-z0-9]" ;; esac
+          case "$TEAM$COMPONENT" in "" | *[!a-z0-9-]*) die "team or component name has unexpected characters" ;; esac
+          case "$URL" in https://*[!a-z0-9.-]* | https://) die "preview_url is not https://<host>" ;; https://*) ;; *) die "preview_url is not https://<host>" ;; esac
+          case "$DIGEST" in "") ;; sha256:*[!0-9a-f]*) die "image_digest is malformed" ;; sha256:????????????????????????????????????????????????????????????????) ;; *) die "image_digest is malformed" ;; esac
+
+          NS="${TEAM}-preview"
+          SEL="app.kubernetes.io/instance=preview-${COMPONENT}-${ID}"
+
+          # One snapshot of the release's pods: "ok" only when there is at
+          # least one, every one is Running and Ready, and each container's
+          # imageID names the digest. Prints a reason otherwise.
+          snapshot() {
+            kubectl get pods -n "$NS" -l "$SEL" -o json > /tmp/pods.json 2>/tmp/kubectl.err || { echo "kubectl failed: $(tail -1 /tmp/kubectl.err)"; return 1; }
+            jq -r --arg d "$DIGEST" '
+              if (.items | length) == 0 then "no pods"
+              elif ([.items[] | select(.metadata.deletionTimestamp != null)] | length) > 0 then "a pod is terminating"
+              elif ([.items[] | select(.status.phase != "Running")] | length) > 0 then "a pod is not Running"
+              elif ([.items[] | select(([.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length) == 0)] | length) > 0 then "a pod is not Ready"
+              elif ($d != "") and ([.items[].status.containerStatuses[]? | select((.imageID // "") | endswith("@" + $d) | not)] | length) > 0 then "a container does not run " + $d
+              else "ok" end' /tmp/pods.json
+          }
+          restarts() { jq -c '[.items[] | .metadata.name + "=" + ([.status.containerStatuses[]?.restartCount] | add | tostring)] | sort' /tmp/pods.json; }
+
+          start=$(date +%s)
+          why=""
+          while :; do
+            why=$(snapshot) || true
+            [ "$why" = ok ] && break
+            [ $(( $(date +%s) - start )) -ge "$TIMEOUT" ] && die "$why"
+            echo "waiting: $why"
+            sleep 5
+          done
+          before=$(restarts)
+
+          # Stability window: the same pods, still ready, no new restarts. A
+          # crash loop that happens to be Ready at the instant of the first
+          # snapshot shows here.
+          sleep "$WINDOW"
+          why=$(snapshot) || true
+          [ "$why" = ok ] || die "after ${WINDOW}s: $why"
+          [ "$(restarts)" = "$before" ] || die "a container restarted within ${WINDOW}s ($before -> $(restarts))"
+
+          # The path the pod's own readiness probe asks. A pod with no HTTP
+          # readiness probe has nothing to ask over HTTP: the verdict then
+          # rests on the checks above, and says so.
+          path=$(jq -r '[.items[0].spec.containers[]?.readinessProbe.httpGet.path // empty][0] // ""' /tmp/pods.json)
+          if [ -n "$path" ]; then
+            case "$path" in /*) case "$path" in *[!A-Za-z0-9/._~-]*) die "unexpected readiness path: ${path}" ;; esac ;; *) die "unexpected readiness path: ${path}" ;; esac
+            code=000
+            while :; do
+              code=$(curl -sS -o /dev/null --connect-timeout 5 --max-time 10 -w '%{http_code}' "${URL}${path}" 2>/tmp/curl.err) || true
+              case "$code" in 2??) break ;; esac
+              [ $(( $(date +%s) - start )) -ge "$TIMEOUT" ] && die "${URL}${path} answered ${code}: $(tail -1 /tmp/curl.err)"
+              echo "waiting: ${URL}${path} answered ${code}"
+              sleep 5
+            done
+            echo "HTTP ${code} from ${URL}${path}"
+          else
+            echo "no HTTP readiness probe: HTTP not verified"
+          fi
+
+          echo healthy > "$OUT/health"
+          echo "$URL" > "$OUT/health_url"
+          echo "preview ${ID} is healthy"
+        resources:
+          requests:
+            memory: 64Mi
+            cpu: 20m
+          limits:
+            memory: 128Mi
+            cpu: 100m
 
     # ── Deploy: Helm install/upgrade into {team}-preview ─────────────────────────
     - name: deploy
