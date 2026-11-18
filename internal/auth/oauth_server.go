@@ -177,6 +177,13 @@ type OAuthServer struct {
 	// Verification accepts it only as the single aud of a token and confines
 	// it to no route yet (see internal/api).
 	GlovoResource string
+	// GlovoLinkResource is the RFC 8707 resource of the Glovo account-link
+	// flow (GLOVO_LINK_RESOURCE). Empty disables it, and every other flow is
+	// then unchanged. It is admitted only while GlovoReady holds. A token
+	// minted for it carries auth_time, never has a refresh token, and is
+	// refused by this server's own verification: only the Glovo service,
+	// which checks the signature against the JWKS, accepts it.
+	GlovoLinkResource string
 	// DownstreamResources are the MCP servers that trust this server's
 	// tokens (OAUTH_MCP_RESOURCES, mctl-api#1062). A token for one of them
 	// is minted only for a principal and never accepted by this API.
@@ -1513,6 +1520,17 @@ func (s *OAuthServer) IssueCodeForTeamGrant(ctx context.Context, login, principa
 	return s.issueCodeForGrant(ctx, login, principalID, clientID, redirectURI, codeChallenge, groups, authMethod, resource, teamGrantID, selectedTenant, false)
 }
 
+// IssueCodeForLink is IssueCodeWithAuthMethod for the Glovo link resource: the
+// code carries authTime, the upstream's own report of when the human last
+// authenticated. A link code without one is refused, and so is a non-link
+// resource, so no other flow can mint an auth_time.
+func (s *OAuthServer) IssueCodeForLink(ctx context.Context, login, principalID, clientID, redirectURI, codeChallenge string, groups []string, authMethod, resource string, authTime int64) (string, error) {
+	if !s.isGlovoLinkFlow(resource) || authTime <= 0 {
+		return "", errors.New("a link code needs the link resource and an authentication time")
+	}
+	return s.issueCodeAt(ctx, login, principalID, clientID, redirectURI, codeChallenge, groups, authMethod, resource, "", "", false, authTime)
+}
+
 // IssueCodeForPersonalGrant is IssueCodeForTeamGrant for a code bound to a
 // pending personal grant, which names no team.
 func (s *OAuthServer) IssueCodeForPersonalGrant(ctx context.Context, login, principalID, clientID, redirectURI, codeChallenge string, groups []string, authMethod, resource, grantID string) (string, error) {
@@ -1520,6 +1538,22 @@ func (s *OAuthServer) IssueCodeForPersonalGrant(ctx context.Context, login, prin
 }
 
 func (s *OAuthServer) issueCodeForGrant(ctx context.Context, login, principalID, clientID, redirectURI, codeChallenge string, groups []string, authMethod, resource, teamGrantID, selectedTenant string, personal bool) (string, error) {
+	return s.issueCodeAt(ctx, login, principalID, clientID, redirectURI, codeChallenge, groups, authMethod, resource, teamGrantID, selectedTenant, personal, 0)
+}
+
+// issueCodeAt is issueCodeForGrant with the authentication time a link code
+// carries (0 for every other flow, which refuses a non-zero one).
+func (s *OAuthServer) issueCodeAt(ctx context.Context, login, principalID, clientID, redirectURI, codeChallenge string, groups []string, authMethod, resource, teamGrantID, selectedTenant string, personal bool, authTime int64) (string, error) {
+	if s.isGlovoLinkFlow(resource) {
+		if !s.GlovoReady() {
+			return "", ErrGlovoNotReady
+		}
+		if authTime <= 0 || teamGrantID != "" || personal {
+			return "", errors.New("a link code needs an authentication time and no grant")
+		}
+	} else if authTime != 0 {
+		return "", errors.New("an authentication time is only for the link resource")
+	}
 	if s.isGlovoFlow(resource) {
 		if !s.GlovoReady() {
 			return "", ErrGlovoNotReady
@@ -1560,6 +1594,7 @@ func (s *OAuthServer) issueCodeForGrant(ctx context.Context, login, principalID,
 		CreatedAt:     time.Now(),
 	}
 	entry.TeamGrantID, entry.SelectedTenant, entry.PersonalGrant = teamGrantID, selectedTenant, personal
+	entry.AuthTime = authTime
 	if s.IsCIMDClient(clientID) {
 		// Recorded so the code can only be redeemed with the authentication
 		// the client declared when it was issued, even if its document later
@@ -1691,6 +1726,9 @@ func (s *OAuthServer) ExchangeCodeForResource(ctx context.Context, code, codeVer
 	if s.isGlovoFlow(entry.Resource) {
 		return s.exchangeGlovoCode(ctx, entry, clientID, bound)
 	}
+	if s.isGlovoLinkFlow(entry.Resource) {
+		return s.exchangeLinkCode(entry, clientID)
+	}
 	aud, err := s.sessionAudience(entry.Resource)
 	if err != nil {
 		return "", "", err
@@ -1751,6 +1789,12 @@ func (s *OAuthServer) issueJWTFor(login, principalID string, groups []string, au
 // stn for a team grant, tgr and tgk "personal" for a personal grant. They are
 // set only for the Glovo audience, never for any other.
 func (s *OAuthServer) issueJWTWithGrant(login, principalID string, groups []string, aud, clientID, teamGrantID, selectedTenant string, personal bool) (string, error) {
+	return s.issueJWTAt(login, principalID, groups, aud, clientID, teamGrantID, selectedTenant, personal, 0)
+}
+
+// issueJWTAt is issueJWTWithGrant with the authentication time a link token
+// carries (0 for every other audience).
+func (s *OAuthServer) issueJWTAt(login, principalID string, groups []string, aud, clientID, teamGrantID, selectedTenant string, personal bool, authTime int64) (string, error) {
 	if aud == "" {
 		aud = s.accessAudience()
 	}
@@ -1800,6 +1844,14 @@ func (s *OAuthServer) issueJWTWithGrant(login, principalID string, groups []stri
 			payload.GrantKind = grantKindPersonal
 		}
 	}
+	if s.isGlovoLinkFlow(aud) {
+		// The upstream's own report of the last authentication, for the
+		// link audience only: no other token carries auth_time.
+		if authTime <= 0 {
+			return "", errors.New("issue token: a link token needs an authentication time")
+		}
+		payload.AuthTime = authTime
+	}
 	return s.signAccessToken(payload)
 }
 
@@ -1827,6 +1879,9 @@ func (s *OAuthServer) issueRefreshToken(login, principalID string, groups []stri
 	}
 	if s.isGlovoFlow(resource) {
 		return "", errors.New("a refresh token for the glovo resource is issued only by the bound code exchange")
+	}
+	if s.isGlovoLinkFlow(resource) {
+		return "", errors.New("a refresh token is never issued for the glovo link resource")
 	}
 	token, expiresAt, err := s.newRefreshTokenValue()
 	if err != nil {
@@ -2318,6 +2373,10 @@ type jwtPayload struct {
 	// has no stn; absent for a team grant. Dropped with tgr and stn on every
 	// audience but Glovo.
 	GrantKind string `json:"tgk,omitempty"`
+	// AuthTime (auth_time) is when the human last authenticated at the
+	// upstream. Minted only for the Glovo link audience; no verified token
+	// ever carries it, because verification refuses that audience.
+	AuthTime int64 `json:"auth_time,omitempty"`
 	// support is set by verification, never by the token: its aud names the
 	// support resource, so it may reach only the routes mctl-support relays.
 	support bool
@@ -2473,6 +2532,10 @@ func (s *OAuthServer) verifyAccessToken(token string) (*jwtPayload, error) {
 			// First, so a mixed [downstream, api] aud is refused as well: a
 			// token minted for a downstream MCP server is never an API token.
 			return fail("aud_mismatch", errors.New("JWT audience is a downstream resource, not this API"))
+		case s.GlovoLinkResource != "" && payload.Audience.contains(s.GlovoLinkResource):
+			// A link token is for the Glovo service alone: neither this API
+			// nor the MCP endpoint accepts it, alone or mixed with another aud.
+			return fail("aud_mismatch", errors.New("JWT audience is the glovo link resource, not this API"))
 		case s.GlovoResource != "" && payload.Audience.contains(s.GlovoResource):
 			// First, so a mixed [glovo, api] or [glovo, support] aud is
 			// refused outright instead of read as another audience.
@@ -2527,6 +2590,9 @@ type authCodeEntry struct {
 	// PersonalGrant marks TeamGrantID as a personal grant: SelectedTenant is
 	// then empty, and the code mints a token scoped to the principal alone.
 	PersonalGrant bool `json:",omitempty"`
+	// AuthTime is the upstream's report of the human's last authentication,
+	// set only for a link code.
+	AuthTime int64 `json:",omitempty"`
 }
 
 type pendingAuth struct {

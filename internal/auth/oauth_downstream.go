@@ -94,6 +94,8 @@ func (s *OAuthServer) ValidateDownstreamResources() error {
 			return fmt.Errorf("OAUTH_MCP_RESOURCES entry %q equals OAUTH_SUPPORT_RESOURCE", r)
 		case s.GlovoResource != "" && n == normalizeIssuer(s.GlovoResource):
 			return fmt.Errorf("OAUTH_MCP_RESOURCES entry %q equals GLOVO_MCP_RESOURCE", r)
+		case s.GlovoLinkResource != "" && n == normalizeIssuer(s.GlovoLinkResource):
+			return fmt.Errorf("OAUTH_MCP_RESOURCES entry %q equals GLOVO_LINK_RESOURCE", r)
 		case seen[n]:
 			return fmt.Errorf("OAUTH_MCP_RESOURCES lists %q twice", r)
 		}

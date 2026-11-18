@@ -89,6 +89,24 @@ func TestConfigureGlovoResource(t *testing.T) {
 	}
 }
 
+func TestConfigureGlovoLinkResource(t *testing.T) {
+	o := &auth.OAuthServer{BaseURL: "https://api.example", SupportResource: auth.DefaultSupportResource, GlovoResource: auth.GlovoResourceIntended}
+	look := func(v string, ok bool) func(string) (string, bool) {
+		return func(string) (string, bool) { return v, ok }
+	}
+	if err := configureGlovoLinkResource(o, look("", false)); err != nil || o.GlovoLinkResource != "" {
+		t.Fatalf("unset: %v %q", err, o.GlovoLinkResource)
+	}
+	if err := configureGlovoLinkResource(o, look(" https://glovo.mctl.ai/link ", true)); err != nil || o.GlovoLinkResource != "https://glovo.mctl.ai/link" {
+		t.Fatalf("valid: %v %q", err, o.GlovoLinkResource)
+	}
+	for _, bad := range []string{"http://glovo.mctl.ai/link", auth.DefaultSupportResource, auth.GlovoResourceIntended, "https://api.example/mcp"} {
+		if err := configureGlovoLinkResource(o, look(bad, true)); err == nil {
+			t.Fatalf("%q accepted", bad)
+		}
+	}
+}
+
 // mctl-api#1062: OAUTH_MCP_RESOURCES is parsed, validated and wired with
 // the admin predicate; unset changes nothing.
 func TestConfigureDownstreamResources(t *testing.T) {

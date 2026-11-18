@@ -126,6 +126,36 @@ func (s *OAuthServer) isGlovoFlow(resource string) bool {
 	return s != nil && s.GlovoResource != "" && resource == s.GlovoResource
 }
 
+// isGlovoLinkFlow reports whether a stored flow resource is the link resource.
+func (s *OAuthServer) isGlovoLinkFlow(resource string) bool {
+	return s != nil && s.GlovoLinkResource != "" && resource == s.GlovoLinkResource
+}
+
+// IsGlovoLinkFlow is isGlovoLinkFlow for the API package.
+func (s *OAuthServer) IsGlovoLinkFlow(resource string) bool { return s.isGlovoLinkFlow(resource) }
+
+// exchangeLinkCode mints the link token: no refresh token and no grant. The
+// audience is the link resource, re-resolved so a disabled feature mints
+// nothing.
+func (s *OAuthServer) exchangeLinkCode(entry authCodeEntry, clientID string) (string, string, error) {
+	if !s.GlovoReady() {
+		return "", "", ErrGlovoNotReady
+	}
+	if entry.AuthTime <= 0 || entry.TeamGrantID != "" {
+		return "", "", errors.New("invalid or expired authorization code")
+	}
+	aud, err := s.ResolveResource([]string{entry.Resource})
+	if err != nil {
+		return "", "", err
+	}
+	accessToken, err := s.issueJWTAt(entry.Login, entry.PrincipalID, entry.Groups, aud, clientID, "", "", false, entry.AuthTime)
+	if err != nil {
+		return "", "", err
+	}
+	s.touchClient(clientID)
+	return accessToken, "", nil
+}
+
 // IsGlovoFlow is isGlovoFlow for the API package.
 func (s *OAuthServer) IsGlovoFlow(resource string) bool { return s.isGlovoFlow(resource) }
 
