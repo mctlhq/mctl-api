@@ -1166,3 +1166,166 @@ func TestIngressExtraPathsRoutesReleaseApprovals(t *testing.T) {
 		t.Errorf("api.mctl.ai paths = %v, want the defaults plus /release", api)
 	}
 }
+
+// --- extension slots (extraContainers / extraVolumes / extraVolumeMounts /
+// podSecurityContext) -------------------------------------------------------
+
+type slotPodSpec struct {
+	SecurityContext map[string]any  `yaml:"securityContext"`
+	Containers      []slotContainer `yaml:"containers"`
+	Volumes         []volume        `yaml:"volumes"`
+}
+
+type slotContainer struct {
+	container       `yaml:",inline"`
+	SecurityContext map[string]any `yaml:"securityContext"`
+}
+
+type slotDeployment struct {
+	Spec struct {
+		Template struct {
+			Spec slotPodSpec `yaml:"spec"`
+		} `yaml:"template"`
+	} `yaml:"spec"`
+}
+
+func renderSlots(t *testing.T, setArgs ...string) slotDeployment {
+	t.Helper()
+	_, raw := renderDeployment(t, setArgs...)
+	var d slotDeployment
+	if err := yaml.Unmarshal(raw, &d); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return d
+}
+
+// TestDefaultDeploymentMatchesGolden pins the default render byte for byte.
+// The slots are empty by default and must render nothing; a stray blank
+// line, a "securityContext: {}" or a "containers" reordering all show up
+// here. Regenerate deliberately with UPDATE_GOLDEN=1 when the chart changes
+// on purpose, and read the diff.
+// goldenBody strips the helm-version-dependent envelope: surrounding
+// whitespace and a leading "---" document marker.
+func goldenBody(b []byte) []byte {
+	b = bytes.TrimSpace(b)
+	b = bytes.TrimPrefix(b, []byte("---"))
+	return bytes.TrimSpace(b)
+}
+
+func TestDefaultDeploymentMatchesGolden(t *testing.T) {
+	_, got := renderDeployment(t)
+	const golden = "testdata/default-deployment.golden.yaml"
+	if os.Getenv("UPDATE_GOLDEN") != "" {
+		if err := os.WriteFile(golden, got, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	// Helm 3 and 4 differ in the envelope of the output (leading document
+	// marker, trailing newlines), not in the manifest. Compare the manifest
+	// itself byte for byte: a stray blank line or key inside it still fails.
+	if !bytes.Equal(goldenBody(got), goldenBody(want)) {
+		t.Errorf("default render drifted from %s (UPDATE_GOLDEN=1 to regenerate after review)\n--- got ---\n%s", golden, got)
+	}
+}
+
+func TestDefaultRenderHasNoSlots(t *testing.T) {
+	d := renderSlots(t)
+	if d.Spec.Template.Spec.SecurityContext != nil {
+		t.Errorf("default render must not set a pod securityContext, got %v", d.Spec.Template.Spec.SecurityContext)
+	}
+	if n := len(d.Spec.Template.Spec.Containers); n != 1 {
+		t.Errorf("default render must have exactly one container, got %d", n)
+	}
+}
+
+func TestSlotsRender(t *testing.T) {
+	d := renderSlots(t,
+		"--set-json", `extraContainers=[{"name":"ctl-reader","image":"example/reader:1","securityContext":{"allowPrivilegeEscalation":false,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}},"volumeMounts":[{"name":"shared","mountPath":"/shared"}]}]`,
+		"--set-json", `extraVolumes=[{"name":"shared","emptyDir":{"medium":"Memory"}}]`,
+		"--set-json", `extraVolumeMounts=[{"name":"shared","mountPath":"/var/run/ctl","readOnly":true}]`,
+		"--set-json", `podSecurityContext={"fsGroup":1000,"runAsUser":1000,"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}`,
+		"--set-json", `containerSecurityContext={"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}`,
+	)
+	spec := d.Spec.Template.Spec
+
+	if len(spec.Containers) != 2 || spec.Containers[0].Name != "mctl-api" || spec.Containers[1].Name != "ctl-reader" {
+		t.Fatalf("want [mctl-api ctl-reader], got %+v", spec.Containers)
+	}
+	vm, ok := findVolumeMount(spec.Containers[0].container, "shared")
+	if !ok || vm.MountPath != "/var/run/ctl" || !vm.ReadOnly {
+		t.Errorf("extraVolumeMounts must land on the mctl-api container only: %+v ok=%v", vm, ok)
+	}
+	// The sidecar must not inherit the main container's mounts or env.
+	if len(spec.Containers[1].VolumeMounts) != 1 || len(spec.Containers[1].Env) != 0 || len(spec.Containers[1].EnvFrom) != 0 {
+		t.Errorf("sidecar must carry only what its own spec lists: %+v", spec.Containers[1])
+	}
+	var haveShared, haveCache bool
+	for _, v := range spec.Volumes {
+		haveShared = haveShared || v.Name == "shared"
+		haveCache = haveCache || v.Name == "gitops-cache"
+	}
+	if !haveShared || !haveCache {
+		t.Errorf("extraVolumes must append to, not replace, the chart volumes: %+v", spec.Volumes)
+	}
+	sc := spec.SecurityContext
+	if sc["fsGroup"] != 1000 || sc["runAsNonRoot"] != true {
+		t.Errorf("podSecurityContext not rendered: %v", sc)
+	}
+	if sc["runAsUser"] != 1000 {
+		t.Errorf("runAsUser lost: %v", sc)
+	}
+	if p, _ := sc["seccompProfile"].(map[string]any); p["type"] != "RuntimeDefault" {
+		t.Errorf("seccompProfile lost: %v", sc)
+	}
+	csc := spec.Containers[0].SecurityContext
+	if csc["allowPrivilegeEscalation"] != false {
+		t.Errorf("containerSecurityContext must land on the mctl-api container: %v", csc)
+	}
+	if spec.Containers[1].SecurityContext["allowPrivilegeEscalation"] != false || len(spec.Containers[1].SecurityContext) != 4 {
+		t.Errorf("sidecar securityContext must be its own spec only: %v", spec.Containers[1].SecurityContext)
+	}
+}
+
+// The documented restricted example must not rot: it needs a numeric runAsUser
+// equal to the uid the Dockerfile gives user app, otherwise "USER app:app"
+// cannot be verified as non-root and the container fails to start.
+func TestDocumentedPodSecurityExampleHasRunAsUser(t *testing.T) {
+	df, err := os.ReadFile("../Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(df), "adduser -D -u 1000 -G app app") || !strings.Contains(string(df), "USER app:app") {
+		t.Fatalf("Dockerfile user changed; update runAsUser in values.yaml and docs/helm-chart-slots.md")
+	}
+	for _, f := range []string{"values.yaml", "../docs/helm-chart-slots.md"} {
+		// #nosec G304 -- f ranges over the two fixed repo paths in this loop, not external input.
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), "runAsUser: 1000") {
+			t.Errorf("%s: documented podSecurityContext example lacks runAsUser: 1000", f)
+		}
+	}
+}
+
+// Each slot alone, so a template that wires one slot to another's value
+// (or drops one) fails on the slot it breaks.
+func TestSlotsRenderIndependently(t *testing.T) {
+	d := renderSlots(t, "--set-json", `extraVolumes=[{"name":"only","emptyDir":{}}]`)
+	if len(d.Spec.Template.Spec.Containers) != 1 || d.Spec.Template.Spec.SecurityContext != nil {
+		t.Errorf("extraVolumes alone must not add containers or a securityContext")
+	}
+	if _, ok := findVolumeMount(d.Spec.Template.Spec.Containers[0].container, "only"); ok {
+		t.Errorf("extraVolumes alone must not mount anything")
+	}
+	d = renderSlots(t, "--set-json", `podSecurityContext={"fsGroup":2000}`)
+	if d.Spec.Template.Spec.SecurityContext["fsGroup"] != 2000 || len(d.Spec.Template.Spec.Containers) != 1 {
+		t.Errorf("podSecurityContext alone: %+v", d.Spec.Template.Spec)
+	}
+}

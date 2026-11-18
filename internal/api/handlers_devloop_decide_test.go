@@ -65,6 +65,9 @@ func newDecideEnv(t *testing.T) *decideEnv {
 	e, fake := newDevLoopGrantEnv(t)
 	idp := newFakeIdP(t)
 	idp.clientID, idp.clientSecret = testDecideClientID, testDecideClientSecret
+	// ZITADEL's shape for a password plus a second factor; tests of the
+	// second-factor rule replace it.
+	idp.extra = map[string]any{"amr": []string{"pwd", "mfa", "user"}}
 	d := &decideEnv{workItemsEnv: e, fake: fake, idp: idp, clock: time.Now(),
 		prins: &fakeSignInPrincipals{ids: map[string]string{"z-sub": "prn_admin"}},
 		authz: &auth.PrincipalAuthz{Admins: map[string]bool{"prn_admin": true}, Members: noTenants{}},
@@ -309,10 +312,13 @@ func TestDevLoopDecide_AdminRemovedBeforeConfirmIsRefused(t *testing.T) {
 
 func TestDevLoopDecide_ABindingThatMovedOffersNoDecision(t *testing.T) {
 	d := newDecideEnv(t)
+	// Well-formed values that name something else: a malformed one never
+	// gets as far as the sign-in.
+	other := "sha256:" + strings.Repeat("0", 64)
 	for name, mutate := range map[string]func(url.Values){
-		"context": func(v url.Values) { v.Set("cd", "sha256:other") },
-		"content": func(v url.Values) { v.Set("xd", "sha256:other") },
-		"grant":   func(v url.Values) { v.Set("grant", "aar_other") },
+		"context": func(v url.Values) { v.Set("cd", other) },
+		"content": func(v url.Values) { v.Set("xd", other) },
+		"grant":   func(v url.Values) { v.Set("grant", "aar_"+strings.Repeat("0", 32)) },
 	} {
 		run := d.run("moved-" + name)
 		mutate(run.link)
@@ -409,6 +415,57 @@ func TestDevLoopDecide_MalformedLinkAndOffPage(t *testing.T) {
 	}
 }
 
+// A link whose binding is not exactly an aar_ id and two sha256 digests is
+// refused as malformed on the page and on the sign-in start, before any
+// state or ZITADEL redirect: a link cut short by a wrapping terminal used to
+// pass, and only fail after the second factor as "the proposal changed".
+func TestDevLoopDecide_BindingMustHaveItsExactShape(t *testing.T) {
+	d := newDecideEnv(t)
+	run := d.run("shape")
+	grant, cd, xd := run.link.Get("grant"), run.link.Get("cd"), run.link.Get("xd")
+	if !decideGrantRe.MatchString(grant) || !decideDigestRe.MatchString(cd) || !decideDigestRe.MatchString(xd) {
+		t.Fatalf("the real link does not have the shape the page requires: %v", run.link)
+	}
+	with := func(k, v string) url.Values {
+		l := url.Values{"grant": {grant}, "cd": {cd}, "xd": {xd}}
+		l.Set(k, v)
+		return l
+	}
+	cases := map[string]url.Values{
+		"truncated xd":           with("xd", xd[:len(xd)-5]),
+		"truncated cd":           with("cd", cd[:len(cd)-1]),
+		"grant wrong prefix":     with("grant", "aax_"+grant[len("aar_"):]),
+		"grant too short":        with("grant", grant[:len(grant)-1]),
+		"grant uppercase hex":    with("grant", "aar_"+strings.ToUpper(grant[len("aar_"):])),
+		"xd still percent-coded": with("xd", strings.Replace(xd, ":", "%3A", 1)),
+		"cd still percent-coded": with("cd", strings.Replace(cd, ":", "%3A", 1)),
+	}
+	for name, link := range cases {
+		page := d.do(http.MethodGet, decidePathPrefix+run.workflowID+"?"+link.Encode(), nil, nil)
+		if page.Code != http.StatusBadRequest || !strings.Contains(page.Body.String(), "incomplete or malformed") ||
+			strings.Contains(page.Body.String(), decideStartPath) {
+			t.Errorf("%s: page = %d %s", name, page.Code, page.Body.String())
+		}
+		form := url.Values{"workflow_id": {run.workflowID}}
+		for k, v := range link {
+			form[k] = v
+		}
+		start := d.do(http.MethodPost, decideStartPath, nil, form)
+		if start.Code != http.StatusBadRequest || !strings.Contains(start.Body.String(), "incomplete or malformed") ||
+			start.Header().Get("Location") != "" || len(start.Result().Cookies()) != 0 {
+			t.Errorf("%s: start = %d %v %s", name, start.Code, start.Header(), start.Body.String())
+		}
+	}
+	d.h.devLoopDecide.mu.Lock()
+	n := len(d.h.devLoopDecide.byID) + len(d.h.devLoopDecide.byState)
+	d.h.devLoopDecide.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("a malformed link created %d challenge entries", n)
+	}
+	// The intact link still signs in.
+	d.signIn(run)
+}
+
 func TestDevLoopDecide_CapsUnfinishedSignInsPerSource(t *testing.T) {
 	d := newDecideEnv(t)
 	run := d.run("cap")
@@ -480,5 +537,110 @@ func TestDevLoopDecide_EveryOptionIsRequired(t *testing.T) {
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Errorf("without %s: page = %d, want 503", name, rec.Code)
 		}
+	}
+}
+
+// The decide page requires a second factor: a fresh sign-in whose amr does
+// not name "mfa" is offered no decision, whoever signed in, and the refusal
+// says what ZITADEL reported.
+func TestDevLoopDecide_RequiresASecondFactor(t *testing.T) {
+	for name, tc := range map[string]struct {
+		amr  any
+		want string
+	}{
+		"no amr":           {nil, "amr: none"},
+		"empty amr":        {[]string{}, "amr: none"},
+		"password only":    {[]string{"pwd", "user"}, "amr: pwd, user"},
+		"mfa as substring": {[]string{"pwd", "nomfa"}, "amr: nomfa, pwd"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := newDecideEnv(t)
+			run := d.run("amr")
+			d.idp.extra = map[string]any{"amr": tc.amr}
+			ck, state := d.signIn(run)
+			rec, form := d.callback(ck, state)
+			body := html.UnescapeString(rec.Body.String())
+			if rec.Code != http.StatusForbidden || form.Get("csrf") != "" || form.Get("challenge") != "" {
+				t.Fatalf("callback = %d %s, want 403 with no decision offered", rec.Code, body)
+			}
+			if !strings.Contains(body, "did not report a second factor") || !strings.Contains(body, tc.want) {
+				t.Fatalf("refusal does not say why: %s", body)
+			}
+			if d.pageAudits("denied") != 1 {
+				t.Fatalf("refusal audited %d times, want 1", d.pageAudits("denied"))
+			}
+			if st := d.approvalState(run.grant)["state"]; st != workitems.ApprovalPending {
+				t.Fatalf("grant = %v, want pending", st)
+			}
+			if d.fake.lastApprovePayload != nil {
+				t.Fatalf("signalled %v", d.fake.lastApprovePayload)
+			}
+		})
+	}
+}
+
+// With a second factor the decision goes through, and the page's audit entry
+// for it records the amr the sign-in carried.
+func TestDevLoopDecide_SecondFactorIsRecordedWithTheDecision(t *testing.T) {
+	d := newDecideEnv(t)
+	run := d.run("mfa")
+	ck, form := d.signedIn(run)
+	if rec := d.confirm(ck, form, "approve"); rec.Code != http.StatusOK {
+		t.Fatalf("confirm = %d %s", rec.Code, rec.Body.String())
+	}
+	var got string
+	entries := d.audit.List(1000)
+	for i := range entries {
+		if entries[i].Operation == decideAuditOp && entries[i].Status == "succeeded" {
+			got = entries[i].Parameters["amr"]
+		}
+	}
+	if got != "mfa,pwd,user" {
+		t.Fatalf("audited amr = %q, want mfa,pwd,user", got)
+	}
+}
+
+// The approval read hands out a link to the decide page for exactly the
+// pending grant, and only when the page is enabled; the link it gives is one
+// the page accepts.
+func TestDevLoopApprovalRead_DecideURL(t *testing.T) {
+	d := newDecideEnv(t)
+	run := d.run("link")
+	read := d.readDevLoopApproval(rootAdmin, run.workflowID)
+	raw, _ := read.body["decide_url"].(string)
+	want := "https://api.example" + decidePathPrefix + run.workflowID + "?" + run.link.Encode()
+	if read.code != http.StatusOK || raw != want {
+		t.Fatalf("decide_url = %q, want %q", raw, want)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page := d.do(http.MethodGet, u.RequestURI(), nil, nil); page.Code != http.StatusOK ||
+		!strings.Contains(page.Body.String(), `action="`+decideStartPath+`"`) {
+		t.Fatalf("the page refuses its own link: %d %s", page.Code, page.Body.String())
+	}
+
+	// Page off: no link, the rest of the read unchanged.
+	on := d.h.devLoopDecide
+	d.h.devLoopDecide = nil
+	off := d.readDevLoopApproval(rootAdmin, run.workflowID)
+	if _, has := off.body["decide_url"]; off.code != http.StatusOK || has || off.body["approval"] == nil {
+		t.Fatalf("page off: %d %s", off.code, off.raw)
+	}
+	d.h.devLoopDecide = newDevLoopDecider(&DevLoopDecideOptions{})
+	if half := d.readDevLoopApproval(rootAdmin, run.workflowID); half.body["decide_url"] != nil {
+		t.Fatalf("an unconfigured page got a link: %s", half.raw)
+	}
+	d.h.devLoopDecide = on
+
+	// Decided: nothing left to decide, so no link.
+	ck, form := d.signedIn(run)
+	if rec := d.confirm(ck, form, "reject"); rec.Code != http.StatusOK {
+		t.Fatalf("reject = %d %s", rec.Code, rec.Body.String())
+	}
+	decided := d.readDevLoopApproval(rootAdmin, run.workflowID)
+	if _, has := decided.body["decide_url"]; decided.code != http.StatusOK || has {
+		t.Fatalf("a decided grant got a link: %s", decided.raw)
 	}
 }

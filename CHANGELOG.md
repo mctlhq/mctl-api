@@ -1,5 +1,37 @@
 # Changelog
 
+## [4.169.0](https://github.com/mctlhq/mctl-api/compare/4.168.0...4.169.0) (2026-11-18)
+
+
+### Features
+
+* **api:** --check-config validates the zitadel-iac Secret values without booting ([e12bd6c](https://github.com/mctlhq/mctl-api/commit/e12bd6c1213ec4bec38ddabeea77453139fc4f67))
+* **api:** link tag commit and release on the release approval page ([98bdd6b](https://github.com/mctlhq/mctl-api/commit/98bdd6b85f2b1f409b0ded17b310441bbba3abbf))
+* **api:** link tag commit and release on the release approval page ([8972d94](https://github.com/mctlhq/mctl-api/commit/8972d94c4779812a6a7ce7e36b41c6eaec8adc87))
+* **api:** require MFA on the DevLoop decide page, hand out decide_url ([57563a9](https://github.com/mctlhq/mctl-api/commit/57563a9384f53124572bdc3f5bec453886f56016))
+* **auth:** allow service_subjects with customers_org_id ([d1e3394](https://github.com/mctlhq/mctl-api/commit/d1e33943951c102270019a212093c71e0309ef7e))
+* **chart:** optional sidecar slots and pod securityContext ([7118647](https://github.com/mctlhq/mctl-api/commit/7118647f4fb5c7761d14e2fba8c5b3fa301023c1))
+
+
+### Bug Fixes
+
+* **check-config:** iterate OIDC entries by index (gocritic rangeValCopy) ([69dd8d3](https://github.com/mctlhq/mctl-api/commit/69dd8d31a9f4a63fdf02ddd75a86b9442f7c6528))
+
+## [4.168.0](https://github.com/mctlhq/mctl-api/compare/4.167.0...4.168.0) (2026-11-18)
+
+
+### Features
+
+* **api:** link commits and preview host on the deploy approval page ([a0306e1](https://github.com/mctlhq/mctl-api/commit/a0306e1433792bf8f20f23e3a81a4b9e1bb4f1f3))
+
+
+### Bug Fixes
+
+* **approval-page:** fit long hashes, say where a promotion goes, end with close-tab ([438007a](https://github.com/mctlhq/mctl-api/commit/438007acb35e194e4016b8c7b81f254275bfec22))
+* **approval-page:** fit long hashes, say where a promotion goes, end with close-tab ([ad889ab](https://github.com/mctlhq/mctl-api/commit/ad889ab9a68307d2c6ed1d87389ae7193df4afec))
+* **release:** say on the approval page that the ledger is enforced ([a101af2](https://github.com/mctlhq/mctl-api/commit/a101af2ee997a14eab81bedd39f45f8c5ff5c4b5))
+* **release:** say on the approval page that the ledger is enforced ([193abba](https://github.com/mctlhq/mctl-api/commit/193abba9ee9e8d38abda0450b0781fbca5898760)), closes [#1022](https://github.com/mctlhq/mctl-api/issues/1022)
+
 ## [4.167.0](https://github.com/mctlhq/mctl-api/compare/4.166.0...4.167.0) (2026-11-17)
 
 

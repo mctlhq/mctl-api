@@ -733,12 +733,25 @@ func (h *Handlers) GetDevLoopApproval(w http.ResponseWriter, r *http.Request) {
 		forbidden()
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	dc := h.decisionContext(newest)
+	out := map[string]any{
 		"schema_version":   workitems.ActionApprovalSchemaVersion,
 		"workflow_id":      workflowID,
 		"approval":         newest,
-		"decision_context": h.decisionContext(newest),
-	})
+		"decision_context": dc,
+	}
+	// decide_url is the DevLoop decide page for exactly this grant, offered
+	// only while it is pending and only when the page is enabled. It is for
+	// a person to open and sign in on with a second factor; an AI client
+	// hands it over and does not decide in its place (mctl-api#964).
+	if newest.State == workitems.ApprovalPending {
+		if u, ok := h.decideURL(workflowID, decisionBinding{
+			ApprovalRef: newest.ID, ContextDigest: dc.ContextDigest, ContentDigest: dc.ArtifactHash,
+		}); ok {
+			out["decide_url"] = u
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // decideDevLoopApproval resolves workflowID to the run's one open we_

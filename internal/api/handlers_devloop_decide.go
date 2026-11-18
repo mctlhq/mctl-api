@@ -26,6 +26,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,6 +50,12 @@ import (
 // the same handlers as the API routes, as that person, so every gate of
 // mctl-api#571 and #869 (human admin, binding, decision context, audit)
 // still decides. Neither the notifying bot nor the page attests anything.
+//
+// The sign-in must also report a second factor: the ID token's amr must
+// contain "mfa", the release approval page's default rule
+// (release_approval_page.go). A refusal names the amr ZITADEL did report,
+// and the amr of an accepted sign-in is recorded in the page's audit entry
+// for the decision.
 //
 // State is this process's memory, like identity linking: mctl-api runs one
 // replica, and a restart only means "open the link again".
@@ -94,8 +102,26 @@ const (
 	decideAuditOp       = "dev-loop-decide-page"
 )
 
+// decideRequiredAMR: the decide page's ID token must name one of these
+// methods in amr. A password alone does not decide a DevLoop.
+var decideRequiredAMR = []string{"mfa"}
+
 // decideWorkflowRe is a DevLoop workflow id, as the start handler forms it.
 var decideWorkflowRe = regexp.MustCompile(`^dev-loop-[A-Za-z0-9_.-]{1,200}$`)
+
+// The decide link's binding has exact shapes, unlike the bearer approve
+// route's looser missingFields check: an aar_ id is the prefix and a uuid's
+// 32 lowercase hex digits (workitems.ActionApprovalIDPrefix + uuid without
+// dashes); the context digest is governance.ContextDigest's
+// "sha256:<64 lowercase hex>"; and the content digest is the grant's
+// artifact_hash, which a DevLoop grant must hold in that same form to be
+// spent at all (contentDigestRE). A link cut short, say by a terminal
+// wrapping it, then fails here as malformed, before any sign-in, instead of
+// after the second factor as "the proposal changed".
+var (
+	decideGrantRe  = regexp.MustCompile(`^aar_[0-9a-f]{32}$`)
+	decideDigestRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+)
 
 type decidePhase int
 
@@ -121,6 +147,7 @@ type decideChallenge struct {
 	verifier string
 
 	identity auth.Identity
+	amr      []string
 	csrfHash [32]byte
 }
 
@@ -237,7 +264,25 @@ func setDecideCookie(w http.ResponseWriter, value string, maxAge int) {
 // link or a form names. False when any of them is absent or malformed.
 func decideBindingFrom(workflowID string, v url.Values) (decisionBinding, bool) {
 	b := decisionBinding{ApprovalRef: v.Get("grant"), ContextDigest: v.Get("cd"), ContentDigest: v.Get("xd")}
-	return b, decideWorkflowRe.MatchString(workflowID) && len(b.missingFields()) == 0
+	return b, decideWorkflowRe.MatchString(workflowID) && len(b.missingFields()) == 0 &&
+		decideGrantRe.MatchString(b.ApprovalRef) &&
+		decideDigestRe.MatchString(b.ContextDigest) && decideDigestRe.MatchString(b.ContentDigest)
+}
+
+// decideURL is the link to this page for a DevLoop and the binding of its
+// pending grant, as a notification carries it. False when the page is off or
+// the binding would not make a well-formed link: no link is better than one
+// the page answers "malformed".
+func (h *Handlers) decideURL(workflowID string, b decisionBinding) (string, bool) {
+	d := h.devLoopDecide
+	if d == nil || !d.opts.enabled() {
+		return "", false
+	}
+	v := url.Values{"grant": {b.ApprovalRef}, "cd": {b.ContextDigest}, "xd": {b.ContentDigest}}
+	if _, ok := decideBindingFrom(workflowID, v); !ok {
+		return "", false
+	}
+	return d.opts.BaseURL + decidePathPrefix + url.PathEscape(workflowID) + "?" + v.Encode(), true
 }
 
 var decidePage = shellPage("devloop-decide", `{{if .SignIn}}<form class="actions" method="post" action="{{.SignIn.Action}}">
@@ -440,9 +485,10 @@ func (h *Handlers) handleDevLoopDecideCallback(w http.ResponseWriter, r *http.Re
 		return
 	}
 	var claims struct {
-		Nonce             string `json:"nonce"`
-		AuthTime          int64  `json:"auth_time"`
-		PreferredUsername string `json:"preferred_username"`
+		Nonce             string   `json:"nonce"`
+		AuthTime          int64    `json:"auth_time"`
+		PreferredUsername string   `json:"preferred_username"`
+		AMR               []string `json:"amr"`
 	}
 	if err := idt.Claims(&claims); err != nil || subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(c.nonce)) != 1 {
 		d.failed(w, http.StatusBadRequest, "The ZITADEL sign-in does not belong to this decision.")
@@ -461,6 +507,17 @@ func (h *Handlers) handleDevLoopDecideCallback(w http.ResponseWriter, r *http.Re
 	if err != nil {
 		h.auditDecidePage(r, user, id, c, "denied", err.Error())
 		d.failed(w, http.StatusForbidden, "You signed in as "+display+", who may not decide a DevLoop: only a platform admin can.")
+		return
+	}
+	amr := workitems.NormalizeAMR(claims.AMR)
+	if !slices.ContainsFunc(decideRequiredAMR, func(m string) bool { return slices.Contains(amr, m) }) {
+		got := strings.Join(amr, ", ")
+		if got == "" {
+			got = "none"
+		}
+		h.auditDecidePage(r, user, id, c, "denied", "amr without a required method: "+got)
+		d.failed(w, http.StatusForbidden, "This sign-in did not report a second factor. ZITADEL reported amr: "+got+
+			"; required: one of "+strings.Join(decideRequiredAMR, ", ")+".")
 		return
 	}
 
@@ -507,7 +564,7 @@ func (h *Handlers) handleDevLoopDecideCallback(w http.ResponseWriter, r *http.Re
 	d.mu.Lock()
 	live := d.liveLocked(c, decideStarted, d.now())
 	if live {
-		c.identity, c.csrfHash, c.phase = id, sha256.Sum256([]byte(csrf)), decideSignedIn
+		c.identity, c.amr, c.csrfHash, c.phase = id, amr, sha256.Sum256([]byte(csrf)), decideSignedIn
 		advanced = true
 	}
 	d.mu.Unlock()
@@ -642,13 +699,24 @@ func (h *Handlers) auditDecidePage(r *http.Request, user *auth.User, id auth.Ide
 	if user != nil {
 		actor = user.ID
 	}
+	params := map[string]string{"approval_ref": c.bind.ApprovalRef, "provider": id.Provider, "subject": id.Subject}
+	if len(c.amr) > 0 {
+		params["amr"] = strings.Join(c.amr, ",")
+	}
 	h.logAudit(r, audit.Entry{
 		UserID:       actor,
 		Operation:    decideAuditOp,
 		WorkflowName: c.workflowID,
-		Parameters:   map[string]string{"approval_ref": c.bind.ApprovalRef, "provider": id.Provider, "subject": id.Subject},
+		Parameters:   params,
 		Status:       status,
 		RiskLevel:    string(operations.RiskMedium),
 		Message:      msg,
 	})
+	// The shared audit log line carries no message, so a refusal would show
+	// in the pod log without its reason. msg is the page's own reason text
+	// or a sign-in refusal; it never holds the nonce, state or a token.
+	if status != "succeeded" {
+		slog.Info("devloop decide: page outcome", "workflow", c.workflowID, "approval_ref", c.bind.ApprovalRef,
+			"status", status, "reason", msg)
+	}
 }

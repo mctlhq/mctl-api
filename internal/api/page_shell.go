@@ -3,6 +3,7 @@ package api
 import (
 	"html/template"
 	"net/http"
+	"strings"
 )
 
 // pageShell is the one frame for every HTML page mctl-api renders itself
@@ -28,6 +29,7 @@ var pageShell = template.Must(template.New("shell").Parse(`{{define "page"}}<!do
 *{box-sizing:border-box}
 body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1rem;background:var(--bg);color:var(--font);font:1rem/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 .card{width:100%;max-width:27rem;background:var(--card);border:1px solid var(--line);border-radius:.75rem;padding:2rem 1.75rem}
+.card.wide{max-width:44rem}
 .card.warn{border-top:.25rem solid var(--warn)}
 .logo{display:block;width:110px;height:32px}
 .logo path{stroke:var(--primary)}.logo circle{fill:var(--primary)}.logo text{fill:var(--font)}
@@ -41,9 +43,9 @@ p{margin:0 0 .75rem;overflow-wrap:anywhere}
 .legacy{margin:1.25rem 0 0;text-align:center;font-size:.875rem}.legacy a{color:var(--muted)}
 @media (max-width:30rem){body{align-items:flex-start;padding:1rem 1rem 2rem}.card{padding:1.5rem 1.25rem}}
 </style></head>
-<body><main class="card{{if .Warn}} warn{{end}}" data-shell="mctl">
+<body><main class="card{{if .Wide}} wide{{end}}{{if .Warn}} warn{{end}}" data-shell="mctl">
 <svg class="logo" role="img" aria-label="MCTL" xmlns="http://www.w3.org/2000/svg" width="110" height="32" viewBox="0 0 110 32" fill="none"><g transform="scale(0.0625)"><path d="M256 60L435.263 158V354L256 452L76.7372 354V158L256 60Z" stroke-width="48" stroke-linejoin="round"/><circle cx="256" cy="256" r="64"/></g><text x="40" y="22" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="700" letter-spacing="1.5">MCTL</text></svg>
-<h1>{{.Title}}</h1>{{range .Lines}}<p>{{.}}</p>{{end}}
+<h1>{{.Title}}</h1>{{range .Rows}}<p>{{.Before}}{{if .URL}}<a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Text}}</a>{{end}}{{.After}}</p>{{end}}
 {{template "actions" .Page}}
 </main></body></html>{{end}}`))
 
@@ -56,6 +58,12 @@ func shellPage(name, actions string) *template.Template {
 type shellData struct {
 	Title string
 	Lines []string
+	// Links turns a part of a line into a link: the first line that
+	// contains a link's Text shows that part as an anchor to URL. A page
+	// builds URLs itself, https only; html/template still filters the href.
+	Links []shellLink
+	// Wide gives a page that shows long hashes and a diff a wider card.
+	Wide bool
 	// Warn marks a refusal or failure, any status from 400 up.
 	Warn bool
 	Page any
@@ -71,4 +79,30 @@ func renderShellPage(w http.ResponseWriter, status int, csp string, page *templa
 	w.WriteHeader(status)
 	d.Warn = status >= http.StatusBadRequest
 	_ = page.ExecuteTemplate(w, "page", d)
+}
+
+// shellLink is a part of a line shown as a link.
+type shellLink struct{ Text, URL string }
+
+// shellRow is one line split around its link, if it has one.
+type shellRow struct{ Before, Text, URL, After string }
+
+// Rows is Lines with each link applied to the first line holding its text.
+func (d shellData) Rows() []shellRow {
+	rows := make([]shellRow, len(d.Lines))
+	used := make([]bool, len(d.Links))
+	for i, line := range d.Lines {
+		rows[i] = shellRow{Before: line}
+		for j, l := range d.Links {
+			if used[j] || l.Text == "" || l.URL == "" {
+				continue
+			}
+			if before, after, ok := strings.Cut(line, l.Text); ok {
+				rows[i] = shellRow{Before: before, Text: l.Text, URL: l.URL, After: after}
+				used[j] = true
+				break
+			}
+		}
+	}
+	return rows
 }
