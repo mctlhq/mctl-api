@@ -65,6 +65,9 @@ func newDecideEnv(t *testing.T) *decideEnv {
 	e, fake := newDevLoopGrantEnv(t)
 	idp := newFakeIdP(t)
 	idp.clientID, idp.clientSecret = testDecideClientID, testDecideClientSecret
+	// ZITADEL's shape for a password plus a second factor; tests of the
+	// second-factor rule replace it.
+	idp.extra = map[string]any{"amr": []string{"pwd", "mfa", "user"}}
 	d := &decideEnv{workItemsEnv: e, fake: fake, idp: idp, clock: time.Now(),
 		prins: &fakeSignInPrincipals{ids: map[string]string{"z-sub": "prn_admin"}},
 		authz: &auth.PrincipalAuthz{Admins: map[string]bool{"prn_admin": true}, Members: noTenants{}},
@@ -480,5 +483,110 @@ func TestDevLoopDecide_EveryOptionIsRequired(t *testing.T) {
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Errorf("without %s: page = %d, want 503", name, rec.Code)
 		}
+	}
+}
+
+// The decide page requires a second factor: a fresh sign-in whose amr does
+// not name "mfa" is offered no decision, whoever signed in, and the refusal
+// says what ZITADEL reported.
+func TestDevLoopDecide_RequiresASecondFactor(t *testing.T) {
+	for name, tc := range map[string]struct {
+		amr  any
+		want string
+	}{
+		"no amr":           {nil, "amr: none"},
+		"empty amr":        {[]string{}, "amr: none"},
+		"password only":    {[]string{"pwd", "user"}, "amr: pwd, user"},
+		"mfa as substring": {[]string{"pwd", "nomfa"}, "amr: nomfa, pwd"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := newDecideEnv(t)
+			run := d.run("amr")
+			d.idp.extra = map[string]any{"amr": tc.amr}
+			ck, state := d.signIn(run)
+			rec, form := d.callback(ck, state)
+			body := html.UnescapeString(rec.Body.String())
+			if rec.Code != http.StatusForbidden || form.Get("csrf") != "" || form.Get("challenge") != "" {
+				t.Fatalf("callback = %d %s, want 403 with no decision offered", rec.Code, body)
+			}
+			if !strings.Contains(body, "did not report a second factor") || !strings.Contains(body, tc.want) {
+				t.Fatalf("refusal does not say why: %s", body)
+			}
+			if d.pageAudits("denied") != 1 {
+				t.Fatalf("refusal audited %d times, want 1", d.pageAudits("denied"))
+			}
+			if st := d.approvalState(run.grant)["state"]; st != workitems.ApprovalPending {
+				t.Fatalf("grant = %v, want pending", st)
+			}
+			if d.fake.lastApprovePayload != nil {
+				t.Fatalf("signalled %v", d.fake.lastApprovePayload)
+			}
+		})
+	}
+}
+
+// With a second factor the decision goes through, and the page's audit entry
+// for it records the amr the sign-in carried.
+func TestDevLoopDecide_SecondFactorIsRecordedWithTheDecision(t *testing.T) {
+	d := newDecideEnv(t)
+	run := d.run("mfa")
+	ck, form := d.signedIn(run)
+	if rec := d.confirm(ck, form, "approve"); rec.Code != http.StatusOK {
+		t.Fatalf("confirm = %d %s", rec.Code, rec.Body.String())
+	}
+	var got string
+	entries := d.audit.List(1000)
+	for i := range entries {
+		if entries[i].Operation == decideAuditOp && entries[i].Status == "succeeded" {
+			got = entries[i].Parameters["amr"]
+		}
+	}
+	if got != "mfa,pwd,user" {
+		t.Fatalf("audited amr = %q, want mfa,pwd,user", got)
+	}
+}
+
+// The approval read hands out a link to the decide page for exactly the
+// pending grant, and only when the page is enabled; the link it gives is one
+// the page accepts.
+func TestDevLoopApprovalRead_DecideURL(t *testing.T) {
+	d := newDecideEnv(t)
+	run := d.run("link")
+	read := d.readDevLoopApproval(rootAdmin, run.workflowID)
+	raw, _ := read.body["decide_url"].(string)
+	want := "https://api.example" + decidePathPrefix + run.workflowID + "?" + run.link.Encode()
+	if read.code != http.StatusOK || raw != want {
+		t.Fatalf("decide_url = %q, want %q", raw, want)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page := d.do(http.MethodGet, u.RequestURI(), nil, nil); page.Code != http.StatusOK ||
+		!strings.Contains(page.Body.String(), `action="`+decideStartPath+`"`) {
+		t.Fatalf("the page refuses its own link: %d %s", page.Code, page.Body.String())
+	}
+
+	// Page off: no link, the rest of the read unchanged.
+	on := d.h.devLoopDecide
+	d.h.devLoopDecide = nil
+	off := d.readDevLoopApproval(rootAdmin, run.workflowID)
+	if _, has := off.body["decide_url"]; off.code != http.StatusOK || has || off.body["approval"] == nil {
+		t.Fatalf("page off: %d %s", off.code, off.raw)
+	}
+	d.h.devLoopDecide = newDevLoopDecider(&DevLoopDecideOptions{})
+	if half := d.readDevLoopApproval(rootAdmin, run.workflowID); half.body["decide_url"] != nil {
+		t.Fatalf("an unconfigured page got a link: %s", half.raw)
+	}
+	d.h.devLoopDecide = on
+
+	// Decided: nothing left to decide, so no link.
+	ck, form := d.signedIn(run)
+	if rec := d.confirm(ck, form, "reject"); rec.Code != http.StatusOK {
+		t.Fatalf("reject = %d %s", rec.Code, rec.Body.String())
+	}
+	decided := d.readDevLoopApproval(rootAdmin, run.workflowID)
+	if _, has := decided.body["decide_url"]; decided.code != http.StatusOK || has {
+		t.Fatalf("a decided grant got a link: %s", decided.raw)
 	}
 }

@@ -3251,6 +3251,8 @@ func (s *Server) toolApproveDevLoop() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithIdempotentHintAnnotation(false),
 		mcplib.WithDescription(`Send the durable Temporal "approve" signal to an EXISTING DevLoopWorkflow execution.
 
+If you are an AI assistant acting for a person, do not call this tool to decide a proposal. Call mctl_get_dev_loop_approval, give the person its decide_url and ask them to open it: the DevLoop decide page has them sign in fresh with a second factor and approve or reject there. Never call this tool on your own initiative, and never to relay a "yes", "approve" or "go ahead" typed in chat: a chat message is not a signed-in decision. Without a decide_url the page is not enabled on this server; say so instead of approving.
+
 This calls the same handler/path as the REST endpoint (POST /api/v1/agents/dev-loop/{workflow_id}/approve) and the Temporal CLI signal — it does NOT start a new workflow, and it does NOT edit a proposal's .status.yaml directly.
 
 This is distinct from the standalone mctl-agents-approve REST operation, which directly mutates a proposal's .status.yaml outside DevLoop's ownership (the gitops-file path used when a proposal was not started via use_temporal on mctl_trigger_issue). Use this tool only for workflow_ids returned by mctl_trigger_issue with use_temporal=true or by mctl_get_workflow_status for a dev-loop-* workflow.
@@ -3402,11 +3404,13 @@ func (s *Server) toolGetDevLoopApproval() (mcplib.Tool, server.ToolHandlerFunc) 
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithDescription(`Read-only: the approval grant a bound mctl_approve_dev_loop of this DevLoopWorkflow would decide, so a reviewer can verify what they are about to bind to. Wraps GET /api/v1/agents/dev-loop/{workflow_id}/approval (mctl-api#936). It decides nothing and sends no signal.
 
-Returns: workflow_id, approval (id, state, artifact_hash, expires_at and the rest of the grant) and decision_context (context_digest, context_complete, missing_fields). This is the newest grant of the run's one open execution, in any state; superseded grants are not returned because they cannot be decided.
+Returns: workflow_id, approval (id, state, artifact_hash, expires_at and the rest of the grant), decision_context (context_digest, context_complete, missing_fields) and, while the grant is pending and the DevLoop decide page is enabled, decide_url. This is the newest grant of the run's one open execution, in any state; superseded grants are not returned because they cannot be decided.
 
 The binding_* arguments of mctl_approve_dev_loop come from here: binding_approval_ref = approval.id, binding_context_digest = decision_context.context_digest, binding_content_digest = approval.artifact_hash. A parked loop can supersede its grant at any time, so read it right before deciding; only a grant in state "pending" with context_complete true can be newly approved. For a grant already in state "approved" (re-sending after a lost signal), the approve compares against the digest recorded at the decision, so use approval.decided_context_digest as binding_context_digest there.
 
 An error that says the grant state is UNKNOWN means the read failed, not that no grant is pending. Only the error that says no approval grant exists is proven absence.
+
+decide_url is how a person decides this grant: give it to them and ask them to open it. The page has them sign in to ZITADEL fresh, with a second factor, and approve or reject exactly this grant. You do not decide: do not call mctl_approve_dev_loop yourself on your own initiative or to relay a "yes" from chat. No decide_url means the grant is not pending or the page is not enabled on this server.
 
 A human admin reads every grant and the requesting service its own; everyone else is refused 403.`),
 		mcplib.WithString("workflow_id",
