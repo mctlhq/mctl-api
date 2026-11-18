@@ -181,7 +181,6 @@ func TestServiceSubjectsRefusedAtBoot(t *testing.T) {
 		"mutable claim":        `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_claim":"email","service_subjects":{"m":"p"}}]`,
 		"kind service entry":   `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"kind":"service","service_subjects":{"m":"p"}}]`,
 		"kind agent entry":     `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"kind":"agent","service_subjects":{"m":"p"}}]`,
-		"customers entry":      `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"customers_org_id":"123","service_subjects":{"m":"p"}}]`,
 		"unknown field":        `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"service_subject":{"m":"p"}}]`,
 		"unknown nested":       `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"service_subjects":{"m":"p"},"service_kind":"x"}]`,
 	} {
@@ -194,15 +193,5 @@ func TestServiceSubjectsRefusedAtBoot(t *testing.T) {
 	amb := `[{"name":"zitadel","issuer":"https://auth","audiences":["c"],"subject_audiences":{"m":["p"]},"service_subjects":{"m":"p"}}]`
 	if _, err := ParseOIDCProviders(amb); err == nil || !strings.Contains(err.Error(), "both") {
 		t.Errorf("subject in subject_audiences and service_subjects: want an ambiguity refusal, got %v", err)
-	}
-}
-
-func TestServiceSubjectNeverACustomer(t *testing.T) {
-	// A spec built in code (not through the parser) that combines a customers
-	// organization with a service subject still refuses the token.
-	spec := serviceSubjectSpec()
-	spec.CustomersOrgID = "123"
-	if v, err := serviceSubjectVerify(t, spec, ssMachine, []string{ssProject}, nil); err == nil {
-		t.Fatalf("service subject on a customers entry accepted: %+v", v.Identity)
 	}
 }

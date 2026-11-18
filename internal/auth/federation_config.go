@@ -203,6 +203,17 @@ func ParseOIDCProviders(raw string) ([]OIDCProviderConfigEntry, error) {
 		}
 		seenIssuers[iss] = e.Name
 	}
+	// One service subject, one entry: the same id listed on two entries would
+	// be two trust decisions about one machine user.
+	serviceOwner := map[string]string{}
+	for i := range out {
+		for subject := range out[i].ServiceSubjects {
+			if other, dup := serviceOwner[subject]; dup && other != out[i].Name {
+				return nil, fmt.Errorf("MCTL_OIDC_PROVIDERS: service subject %q is listed on both entry %q and entry %q", subject, other, out[i].Name)
+			}
+			serviceOwner[subject] = out[i].Name
+		}
+	}
 	return out, nil
 }
 
@@ -247,9 +258,12 @@ func validSubjectAudiences(e *OIDCProviderConfigEntry) error {
 
 // validServiceSubjects refuses a service_subjects map that is empty, names a
 // subject or audience that is empty, padded or a wildcard, sits on the dex
-// slot, a non-human entry (already something else), a customers entry, or an
-// entry with a mutable subject claim, or lists a subject that
-// subject_audiences also lists. A "null" value already failed decoding.
+// slot, a non-human entry (already something else) or an entry with a mutable
+// subject claim, or lists a subject that subject_audiences also lists. It
+// does NOT refuse customers_org_id on the same entry (owner decision
+// 2026-11-17): a listed service subject skips the customers checks, every
+// other subject keeps them (OIDCProviderSpec.ServiceSubjects). A "null"
+// value already failed decoding.
 func validServiceSubjects(e *OIDCProviderConfigEntry) error {
 	if e.ServiceSubjects == nil {
 		return nil
@@ -262,9 +276,6 @@ func validServiceSubjects(e *OIDCProviderConfigEntry) error {
 	}
 	if e.Kind != "" && e.Kind != KindHuman {
 		return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q has kind %q: service_subjects applies only to a human entry", e.Name, e.Kind)
-	}
-	if e.CustomersOrgID != "" {
-		return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q may not combine service_subjects with customers_org_id", e.Name)
 	}
 	if c := strings.TrimSpace(e.SubjectClaim); c != "" && c != "sub" {
 		return fmt.Errorf("MCTL_OIDC_PROVIDERS: entry %q may set service_subjects only with the default subject claim sub", e.Name)
