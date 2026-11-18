@@ -626,12 +626,14 @@ func (h *Handlers) handleReleaseApprovalConfirm(w http.ResponseWriter, r *http.R
 	h.auditActionApproval(r, user, "action_approval.decision", decided, operations.RiskHigh,
 		map[string]string{"surface": releasePageAuditOp, "amr": strings.Join(c.Evidence.AMR, ",")})
 	h.auditReleasePage(r, user, id, c.ApprovalRef, "succeeded", decision)
-	// The production release gate does not enforce ledger decisions yet
-	// (mctl-api#1022 S3 reads them in shadow mode only), so the page must
-	// not claim an effect it does not have. Reword when the gate enforces.
-	title, outcome := "Release approved", "Your approval of exactly this image is recorded in the release ledger. The release gate does not enforce ledger decisions yet, so this changes nothing on its own. Nothing was deployed."
+	// The mctl-api release gate enforces ledger decisions since 2026-11-18
+	// (mctl-gitops release-gates.yaml, ledger.mode enforce): release-deploy
+	// bumps an image only after it reads an approval of exactly its digest,
+	// and a rejection refuses it. The page itself deploys nothing, and an
+	// approval is not a deploy: the run still has to pick it up.
+	title, outcome := "Release approved", "Your approval of exactly this image is recorded in the release ledger. The release gate lets release-deploy bump this image, and only this image, once it reads your approval. This page deployed nothing."
 	if decision == "reject" {
-		title, outcome = "Release rejected", "Your rejection of exactly this image is recorded in the release ledger. The release gate does not enforce ledger decisions yet, so this does not block the release on its own. Nothing was deployed."
+		title, outcome = "Release rejected", "Your rejection of exactly this image is recorded in the release ledger. The release gate refuses to bump this image; a release needs a new build and a new approval. This page deployed nothing."
 	}
 	shown.approval = decided
 	d.renderPage(w, http.StatusOK, title, append(shown.lines(id.Display), outcome), releasePageData{})
