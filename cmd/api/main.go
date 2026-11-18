@@ -87,6 +87,11 @@ import (
 )
 
 func main() {
+	// `mctl-api --check-config`: validate the zitadel-iac Secret values and
+	// exit, before telemetry, signals or any store (check_config.go).
+	if len(os.Args) > 1 && os.Args[1] == checkConfigFlag {
+		os.Exit(runCheckConfig(os.Stdout, os.Stderr))
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
@@ -2400,7 +2405,11 @@ func (c config) validate() error {
 	if err := pgshared.ValidateEnv(); err != nil {
 		return err
 	}
-	if err := c.ZitadelHook.validate(); err != nil {
+	// Everything that reads the keys the zitadel-iac Job writes (the
+	// mctl-api-oidc-zitadel and identity-hook Secrets). One function, shared
+	// with `mctl-api --check-config` (check_config.go), so the gitops guard
+	// runs exactly what boot runs.
+	if err := c.validateZitadelSecretConfig(c.FederationDisabled); err != nil {
 		return err
 	}
 	// Only enforced when the OAuth server is actually constructed — the same
@@ -2431,9 +2440,6 @@ func (c config) validate() error {
 	if err := c.validateCIMD(); err != nil {
 		return err
 	}
-	if err := c.validateOAuthUpstream(); err != nil {
-		return err
-	}
 	oauthEnabled := c.oauthEnabled()
 	if oauthEnabled && c.OAuthTokenTTL > maxOAuthTokenTTL {
 		return fmt.Errorf("OAUTH_TOKEN_TTL must not exceed %v, got %v — clients renew "+
@@ -2460,39 +2466,6 @@ func (c config) validate() error {
 		}
 	}
 
-	// MCTL_OIDC_PROVIDERS (mctl-api#374): shape-validated here, in the same
-	// style as OAUTH_PREREGISTERED_CLIENTS above, so a malformed value or an
-	// entry missing audiences/naming a reserved provider refuses this boot
-	// rather than the one after a second variable is also set. The full
-	// registry (this plus the legacy Dex shim and the built-in providers) is
-	// built for real in main(), which is where a duplicate against the
-	// local-OAuth or Dex provider would also be caught. Skipped while
-	// MCTL_FEDERATION_DISABLED is on, so the kill switch can roll back a
-	// value that would otherwise refuse boot.
-	if c.FederationDisabled {
-		return nil
-	}
-	if _, err := auth.ParseOIDCProviders(c.OIDCProvidersRaw); err != nil {
-		return err
-	}
-	// customers_org_id on two entries, or one that disagrees with the
-	// identity hook, would resolve a customer differently per path.
-	customers, err := c.customersProvider()
-	if err != nil {
-		return err
-	}
-	// The customer sign-in entry puts the GitHub IdP id into a ZITADEL
-	// scope (mctl-web#158); a malformed one refuses boot like a malformed
-	// customers_org_id does. Only where that entry could be wired: elsewhere
-	// the id feeds the identity hook alone, which takes it as it is, and
-	// customersGitHubIdPID still refuses to offer a malformed one.
-	if id := c.ZitadelHook.GitHubIdPID; id != "" && customers != nil &&
-		c.oauthUpstreamMode() != mctlapi.OAuthUpstreamGitHub && !auth.ValidZitadelID(id) {
-		return fmt.Errorf("ZITADEL_HOOK_GITHUB_IDP_ID %q is not a ZITADEL resource id", id)
-	}
-	if _, err := auth.ParseGitHubActionsOIDC(c.GitHubActionsOIDCRaw); err != nil {
-		return err
-	}
 	return nil
 }
 

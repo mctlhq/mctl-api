@@ -1,0 +1,96 @@
+---
+# Source: mctl-api/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mctl-api
+  labels:
+    app.kubernetes.io/name: mctl-api
+    app.kubernetes.io/version: "latest"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mctl-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mctl-api
+    spec:
+      serviceAccountName: mctl-api
+      imagePullSecrets:
+        - name: ghcr-credentials
+      containers:
+        - name: mctl-api
+          image: "ghcr.io/mctlhq/mctl-api:latest"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          envFrom:
+          env:
+            - name: ACTION_APPROVAL_MAX_DECISION_AGE
+              value: ""
+            - name: ACTION_APPROVAL_REQUIRE_REGISTERED_POLICY
+              value: ""
+            - name: ADMIN_PRINCIPALS
+              value: ""
+            - name: ARGOCD_URL
+              value: "https://ops.mctl.me"
+            - name: ARGO_WORKFLOWS_NAMESPACE
+              value: "argo-workflows"
+            - name: COMMERCE_ACCEPT_DISABLED
+              value: ""
+            - name: GITOPS_BRANCH
+              value: "main"
+            - name: GITOPS_LOCAL_PATH
+              value: "/data/mctl-gitops"
+            - name: GITOPS_REPO_URL
+              value: "https://github.com/mctlhq/mctl-gitops.git"
+            - name: MCTL_AGENTS_APPROVE_LEGACY_APPROVER
+              value: ""
+            - name: MCTL_FEDERATION_DISABLED
+              value: ""
+            - name: MCTL_OIDC_PROVIDERS
+              value: ""
+            - name: ROADMAP_STATE_LOCAL_PATH
+              value: "/data/roadmap-state"
+            - name: TENANT_AUTHZ_MODE
+              value: ""
+            - name: PORT
+              value: "8080"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          volumeMounts:
+            - name: gitops-cache
+              mountPath: /data/mctl-gitops
+            - name: roadmap-state
+              mountPath: /data/roadmap-state
+      volumes:
+        - name: gitops-cache
+          emptyDir:
+            sizeLimit: 500Mi
+        # A --depth=1 checkout of a few JSON files; the limit bounds loose
+        # objects from repeated shallow fetches.
+        - name: roadmap-state
+          emptyDir:
+            sizeLimit: 64Mi

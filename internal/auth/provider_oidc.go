@@ -126,7 +126,10 @@ type OIDCProviderSpec struct {
 	// audience (the glovo consent gate needs a service identity on the one
 	// ZITADEL issuer). Exact subjects only, never a pattern and never read
 	// from token claims; the token must carry the pinned audience whatever
-	// the entry's enforcement says, and such an identity carries no groups.
+	// the entry's enforcement says, and such an identity carries no groups
+	// and is never a customer: with CustomersOrgID set on the same entry it
+	// skips the resourceowner requirement and the customers resolution
+	// entirely, while every other subject keeps both.
 	// Empty means every identity has the entry's Kind, as before.
 	ServiceSubjects map[string]string
 }
@@ -320,7 +323,13 @@ func (p *oidcProvider) Verify(ctx context.Context, raw string) (*Verified, error
 	}
 
 	var customer *CustomerProof
-	if p.spec.CustomersOrgID != "" {
+	// A service subject never takes the customers path: it is a machine user
+	// of the issuer, whose JWT-profile token carries no resourceowner claim
+	// unless one is requested, and whose identity must never become a
+	// customer (no customers-org principal, no GitHub id). It was already
+	// accepted above only on its pinned audience. Every other subject of the
+	// entry still goes through the customers checks below, unchanged.
+	if p.spec.CustomersOrgID != "" && !isServiceSubject {
 		customer, err = ReadCustomerProofWith(tok.Claims, p.spec.CustomersOrgID, p.spec.CustomersGoogle)
 		if err != nil {
 			return nil, fmt.Errorf("%s token refused: %w", p.spec.Name, err)

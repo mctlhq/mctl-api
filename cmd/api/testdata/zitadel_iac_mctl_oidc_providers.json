@@ -1,0 +1,1 @@
+[{"name":"zitadel","issuer":"https://auth.example.test","audiences":["100000000000000003"],"customers_org_id":"100000000000000001","service_subjects":{"100000000000000077":"100000000000000010"}}]

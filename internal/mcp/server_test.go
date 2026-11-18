@@ -1778,6 +1778,38 @@ func TestToolGetDevLoopApproval_ReadsTheGrantByIssueURL(t *testing.T) {
 	}
 }
 
+// decide_url reaches the model unchanged, and both DevLoop tools tell the
+// model to hand it to the person rather than decide (mctl-api#964).
+func TestToolGetDevLoopApproval_HandsOverTheDecideURL(t *testing.T) {
+	grant := `{"workflow_id":"w","approval":{"id":"aar_1","state":"pending"},"decide_url":"https://api.example/devloop/decide/w?cd=d&grant=aar_1&xd=c"}`
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(grant))
+	}))
+	defer backend.Close()
+	result := callToolGetDevLoopApproval(t, backend.URL, map[string]any{"workflow_id": "w"})
+	if result.IsError || toolResultText(t, result) != grant {
+		t.Fatalf("result = %+v", result.Content)
+	}
+
+	srv := NewServer(backend.URL, "test-token")
+	get, _ := srv.toolGetDevLoopApproval()
+	approve, _ := srv.toolApproveDevLoop()
+	for _, tc := range []struct {
+		tool  string
+		desc  string
+		needs []string
+	}{
+		{"mctl_get_dev_loop_approval", get.Description, []string{"decide_url", "give it to them", "second factor", "do not call mctl_approve_dev_loop", "relay"}},
+		{"mctl_approve_dev_loop", approve.Description, []string{"decide_url", "do not call this tool", "Never call this tool on your own initiative", "relay", "second factor"}},
+	} {
+		for _, n := range tc.needs {
+			if !strings.Contains(tc.desc, n) {
+				t.Errorf("%s description lacks %q", tc.tool, n)
+			}
+		}
+	}
+}
+
 func TestToolGetDevLoopApproval_NeedsExactlyOneTarget(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("unexpected request %s", r.URL.Path)

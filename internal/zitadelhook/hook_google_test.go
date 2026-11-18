@@ -15,10 +15,12 @@
 package zitadelhook
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -76,12 +78,27 @@ func newGoogleHook(t *testing.T, googleSubs []string) (*Hook, *atomic.Int32) {
 
 var errFakeTenants = &json.UnsupportedValueError{Str: "tenant reader must not be read for Google"}
 
-func googleRaw() map[string]any {
+// googleUserinfo is Google's OIDC userinfo as ZITADEL's oidc.User marshals
+// it: the flat claims.
+func googleUserinfo() map[string]any {
 	return map[string]any{
 		"sub": googleSub, "email": "carol@gmail.com", "email_verified": true,
 		"name": "Carol C", "given_name": "Carol", "family_name": "C",
 	}
 }
+
+// googleRawOf wraps a userinfo the way ZITADEL v4.19.2 delivers it for its
+// Google provider: rawInformation is json.Marshal(*google.User), and
+// google.User embeds the idp.User interface, which encoding/json names
+// "User" (internal/idp/providers/google/google.go,
+// internal/command/idp_intent.go SucceedIDPIntent,
+// internal/api/grpc/user/v2/intent.go idpIntentToIDPIntentPb; ZITADEL docs
+// apps/docs/content/guides/integrate/login-ui/external-login.mdx).
+func googleRawOf(userinfo map[string]any) map[string]any {
+	return map[string]any{"User": userinfo}
+}
+
+func googleRaw() map[string]any { return googleRawOf(googleUserinfo()) }
 
 func googleIntentBody(idp, sub, userID string, raw map[string]any) []byte {
 	resp := map[string]any{
@@ -208,9 +225,9 @@ func TestGoogleIntentRefusals(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			h, _ := newGoogleHook(t, []string{CreateAnyone})
-			raw := googleRaw()
-			tc.mutate(raw)
-			refusedWith(t, h.Intent(context.Background(), googleIntentBody(idpGoogle, tc.sub, "", raw)), tc.code)
+			u := googleUserinfo()
+			tc.mutate(u)
+			refusedWith(t, h.Intent(context.Background(), googleIntentBody(idpGoogle, tc.sub, "", googleRawOf(u))), tc.code)
 		})
 	}
 }
@@ -233,9 +250,9 @@ func TestGoogleIntentExistingUser(t *testing.T) {
 		t.Fatalf("email %v", e)
 	}
 	// Unverified now: the stored address is kept, not overwritten.
-	raw := googleRaw()
-	raw["email_verified"] = false
-	out = decodeResponse(t, h.Intent(context.Background(), googleIntentBody(idpGoogle, googleSub, "u-7", raw)))
+	u := googleUserinfo()
+	u["email_verified"] = false
+	out = decodeResponse(t, h.Intent(context.Background(), googleIntentBody(idpGoogle, googleSub, "u-7", googleRawOf(u))))
 	if _, ok := out["updateUser"].(map[string]any)["human"].(map[string]any)["email"]; ok {
 		t.Fatal("an unverified address must not replace the stored one")
 	}
@@ -485,5 +502,201 @@ func TestGoogleCreationWaitsForDeletion(t *testing.T) {
 				t.Fatalf("existing Google account: %s, probe asked %v", r.Reason, asked)
 			}
 		})
+	}
+}
+
+// zitadelDocsGoogleIntent is the idpInformation of a Google intent exactly
+// as ZITADEL documents it (apps/docs/content/guides/integrate/login-ui/
+// external-login.mdx at v4.19.2): the userinfo under "User". The 2026-11-17
+// production refusal (intent_google_sub_mismatch) came from reading "sub" at
+// the top level of this shape.
+const zitadelDocsGoogleIntent = `{
+	"oauth": {"accessToken": "ya29...", "idToken": "ey..."},
+	"idpId": "300000000000000006",
+	"userId": "111392805975715856637",
+	"userName": "minni@mouse.com",
+	"rawInformation": {
+		"User": {
+			"email": "minni@mouse.com",
+			"email_verified": true,
+			"family_name": "Mouse",
+			"given_name": "Minnie",
+			"hd": "mouse.com",
+			"locale": "de",
+			"name": "Minnie Mouse",
+			"picture": "https://lh3.googleusercontent.com/a/AAcKTtf973Q7NH8KzKTMEZELPU9lx45WpQ9FRBuxFdPb=s96-c",
+			"sub": "111392805975715856637"
+		}
+	}
+}`
+
+func TestGoogleIntentZitadelDocumentedShape(t *testing.T) {
+	h, _ := newGoogleHook(t, []string{CreateAnyone})
+	body, _ := json.Marshal(map[string]any{
+		"fullMethod": MethodIntentRetrieve,
+		"response":   map[string]any{"idpInformation": json.RawMessage(zitadelDocsGoogleIntent)},
+	})
+	r := h.Intent(context.Background(), body)
+	if r.Reason != "intent_create" {
+		t.Fatalf("reason %s %s", r.Reason, r.Body)
+	}
+	human := decodeResponse(t, r)["createUser"].(map[string]any)["human"].(map[string]any)
+	if e := human["email"].(map[string]any); e["email"] != "minni@mouse.com" || e["isVerified"] != true {
+		t.Fatalf("email %v", e)
+	}
+	if p := human["profile"].(map[string]any); p["displayName"] != "Minnie Mouse" {
+		t.Fatalf("profile %v", p)
+	}
+}
+
+// Every rawInformation that is not exactly {"User": {...}} is refused, and
+// a sub anywhere but inside "User" never satisfies the check.
+func TestGoogleIntentRawShapeRefusals(t *testing.T) {
+	flat := googleUserinfo()
+	for name, tc := range map[string]struct {
+		raw  map[string]any
+		want string
+	}{
+		"flat userinfo":                 {flat, "intent_google_raw_unreadable"},
+		"absent":                        {nil, "intent_google_raw_unreadable"},
+		"empty":                         {map[string]any{}, "intent_google_raw_unreadable"},
+		"User not an object":            {map[string]any{"User": googleSub}, "intent_google_raw_unreadable"},
+		"User is an array":              {map[string]any{"User": []any{googleUserinfo()}}, "intent_google_raw_unreadable"},
+		"other wrapper key":             {map[string]any{"user": googleUserinfo()}, "intent_google_raw_unreadable"},
+		"extra top-level key":           {map[string]any{"User": googleUserinfo(), "sub": googleSub}, "intent_google_raw_unreadable"},
+		"nested sub differs":            {googleRawOf(map[string]any{"sub": "1", "email": "carol@gmail.com", "email_verified": true}), "intent_google_sub_mismatch"},
+		"nested sub missing":            {googleRawOf(map[string]any{"email": "carol@gmail.com", "email_verified": true}), "intent_google_sub_mismatch"},
+		"nested sub numeric":            {googleRawOf(map[string]any{"sub": json.Number(googleSub), "email": "carol@gmail.com"}), "intent_google_sub_mismatch"},
+		"nested sub one level too deep": {googleRawOf(map[string]any{"User": googleUserinfo()}), "intent_google_sub_mismatch"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, existing := range []string{"", "u-7"} {
+				h, _ := newGoogleHook(t, []string{CreateAnyone})
+				r := h.Intent(context.Background(), googleIntentBody(idpGoogle, googleSub, existing, tc.raw))
+				if r.Reason != tc.want {
+					t.Fatalf("existing %q: reason %s, want %s", existing, r.Reason, tc.want)
+				}
+				refusedWith(t, r, http.StatusForbidden)
+			}
+		})
+	}
+}
+
+// A non-bool email_verified inside "User" is not a verified address: the
+// creation is refused, and an existing account keeps its stored email.
+func TestGoogleIntentNestedEmailVerifiedNotBool(t *testing.T) {
+	for _, v := range []any{"true", 1, nil} {
+		u := googleUserinfo()
+		u["email_verified"] = v
+		h, _ := newGoogleHook(t, []string{CreateAnyone})
+		r := h.Intent(context.Background(), googleIntentBody(idpGoogle, googleSub, "", googleRawOf(u)))
+		if r.Reason != "intent_no_verified_email" {
+			t.Fatalf("email_verified %#v: reason %s", v, r.Reason)
+		}
+		out := decodeResponse(t, h.Intent(context.Background(), googleIntentBody(idpGoogle, googleSub, "u-7", googleRawOf(u))))
+		if _, ok := out["updateUser"].(map[string]any)["human"].(map[string]any)["email"]; ok {
+			t.Fatalf("email_verified %#v: an unverified address must not replace the stored one", v)
+		}
+	}
+}
+
+// Every shape refusal logs the key names of rawInformation (top level and
+// one nested level) and nothing else: no subject, email, name or token.
+func TestGoogleIntentShapeDiagnosticsLogKeysOnly(t *testing.T) {
+	secretUserinfo := func() map[string]any {
+		return map[string]any{
+			"sub": "424242424242", "email": "secret-mail@example.org", "email_verified": true,
+			"name": "Secret Person", "given_name": "Secretgiven", "picture": "https://pics.example/secret-pic",
+		}
+	}
+	for name, tc := range map[string]struct {
+		userID   string
+		raw      map[string]any
+		reason   string
+		top      []string
+		nestedOf string
+		nested   []string
+	}{
+		"flat (sub missing at the expected place)": {
+			googleSub, secretUserinfo(), "intent_google_raw_unreadable",
+			[]string{"email", "email_verified", "given_name", "name", "picture", "sub"}, "", nil,
+		},
+		"nested sub mismatch": {
+			googleSub, map[string]any{"User": secretUserinfo()}, "intent_google_sub_mismatch",
+			[]string{"User"}, "User", []string{"email", "email_verified", "given_name", "name", "picture", "sub"},
+		},
+		"unknown wrapper": {
+			googleSub, map[string]any{"Info": secretUserinfo(), "token": "secret-token"}, "intent_google_raw_unreadable",
+			[]string{"Info", "token"}, "Info", []string{"email", "email_verified", "given_name", "name", "picture", "sub"},
+		},
+		"bad identity": {
+			"not-a-sub", map[string]any{"User": secretUserinfo()}, "intent_bad_google_identity",
+			[]string{"User"}, "User", []string{"email", "email_verified", "given_name", "name", "picture", "sub"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var buf bytes.Buffer
+			h, _ := newGoogleHook(t, []string{CreateAnyone})
+			h.cfg.Logger = slog.New(slog.NewJSONHandler(&buf, nil))
+			r := h.Intent(context.Background(), googleIntentBody(idpGoogle, tc.userID, "", tc.raw))
+			if r.Reason != tc.reason {
+				t.Fatalf("reason %s, want %s", r.Reason, tc.reason)
+			}
+			lines := bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n"))
+			if len(lines) != 1 || len(lines[0]) == 0 {
+				t.Fatalf("want exactly one diagnostic line, got %q", buf.String())
+			}
+			var rec struct {
+				Msg    string              `json:"msg"`
+				Reason string              `json:"reason"`
+				Top    []string            `json:"top_level_keys"`
+				Nested map[string][]string `json:"nested_keys"`
+			}
+			if err := json.Unmarshal(lines[0], &rec); err != nil {
+				t.Fatalf("log %q: %v", lines[0], err)
+			}
+			if rec.Reason != tc.reason || strings.Join(rec.Top, ",") != strings.Join(tc.top, ",") {
+				t.Fatalf("log %s: want reason %s, top keys %v", lines[0], tc.reason, tc.top)
+			}
+			if tc.nestedOf != "" && strings.Join(rec.Nested[tc.nestedOf], ",") != strings.Join(tc.nested, ",") {
+				t.Fatalf("log %s: want nested %s keys %v", lines[0], tc.nestedOf, tc.nested)
+			}
+			// The intent body also carries the access token, the ID token and
+			// the userName; none of them, nor any userinfo value, is logged.
+			for _, secret := range []string{"424242424242", "secret-mail", "example.org", "Secret Person", "Secretgiven", "secret-pic", "secret-token", "gtok", "x.y.z", "carol", tc.userID} {
+				if strings.Contains(buf.String(), secret) {
+					t.Fatalf("diagnostic leaks %q: %s", secret, buf.String())
+				}
+			}
+		})
+	}
+}
+
+// An accepted Google intent logs nothing of its own.
+func TestGoogleIntentAcceptedLogsNothing(t *testing.T) {
+	var buf bytes.Buffer
+	h, _ := newGoogleHook(t, []string{CreateAnyone})
+	h.cfg.Logger = slog.New(slog.NewJSONHandler(&buf, nil))
+	if r := h.Intent(context.Background(), googleIntentBody(idpGoogle, googleSub, "", googleRaw())); r.Reason != "intent_create" {
+		t.Fatalf("reason %s", r.Reason)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("unexpected log %s", buf.String())
+	}
+}
+
+func TestRawKeyNamesBounded(t *testing.T) {
+	m := map[string]any{}
+	for i := 0; i < rawShapeMaxKeys+5; i++ {
+		m[strings.Repeat("k", rawShapeMaxKeyLen+10)+string(rune('a'+i%26))+string(rune('a'+i/26))] = i
+	}
+	got := rawKeyNames(m)
+	if len(got) != rawShapeMaxKeys+1 || got[len(got)-1] != "..." {
+		t.Fatalf("len %d, last %q", len(got), got[len(got)-1])
+	}
+	for _, k := range got[:rawShapeMaxKeys] {
+		if len(k) > rawShapeMaxKeyLen+3 {
+			t.Fatalf("key %q not truncated", k)
+		}
 	}
 }
