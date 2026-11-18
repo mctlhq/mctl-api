@@ -38,7 +38,7 @@ const (
 	consentHumanURL    = "/api/v1/glovo/link-consent"
 	// mctlGlovoConsentVersion is mctl-glovo's linkflow.ConsentVersion, as a
 	// literal: the recorded version must equal it, not merely the constant.
-	mctlGlovoConsentVersion = "c2-link-v1"
+	mctlGlovoConsentVersion = "c2-link-v2"
 )
 
 func consentReadURL(pid string) string {

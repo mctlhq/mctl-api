@@ -7282,7 +7282,7 @@ paths:
     put:
       summary: Record your consent to link a real Glovo account
       description: |
-        Records consent to the current text version (`c2-link-v1`, fixed
+        Records consent to the current text version (`c2-link-v2`, fixed
         server-side). The request body is never read: a version or principal
         in it is ignored. A new consent claims one slot under the capacity
         cap (GLOVO_C2_CAPACITY), atomically; at the cap, or with the cap

@@ -106,7 +106,7 @@ func TestPGRecordSupersedesAnOlderVersion(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	if _, err := s.pool.Exec(ctx, `INSERT INTO glovo_link_consents (consent_id, principal_id, consent_version, recorded_at, recorded_by)
-		VALUES ('gcn_old', $1, 'c2-link-v0', now(), 'x')`, pidA); err != nil {
+		VALUES ('gcn_old', $1, 'c2-link-v1', now(), 'x')`, pidA); err != nil {
 		t.Fatal(err)
 	}
 	rec, created, err := s.Record(ctx, pidA, "github:alice", testCap)

@@ -34,7 +34,7 @@ import (
 // Version is the consent text version mctl-api records. It must equal
 // mctl-glovo's linkflow.ConsentVersion: a consent to another text is not a
 // consent to the one mctl-glovo shows, and mctl-glovo refuses it.
-const Version = "c2-link-v1"
+const Version = "c2-link-v2"
 
 // GrantC2 is the grant that lets a principal link a real Glovo account
 // (real-glovo-accounts.md 9.2). A principal holds it while it has an active
