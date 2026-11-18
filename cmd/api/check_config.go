@@ -175,7 +175,8 @@ func validateGlovoConsentReader(entries []auth.OIDCProviderConfigEntry, lookup f
 		// and keep the routes off while the flag says on. Refuse instead.
 		return errors.New("GLOVO_CONSENT_ENABLED=true requires GLOVO_CONSENT_SERVICE_PROVIDER and GLOVO_CONSENT_SERVICE_SUBJECT: the consent routes would silently stay off")
 	}
-	for _, e := range entries {
+	for i := range entries {
+		e := &entries[i]
 		if e.Name != provider {
 			continue
 		}
@@ -190,7 +191,7 @@ func validateGlovoConsentReader(entries []auth.OIDCProviderConfigEntry, lookup f
 	return fmt.Errorf("GLOVO_CONSENT_SERVICE_PROVIDER %q is not an MCTL_OIDC_PROVIDERS entry: the consent gate admits nobody", provider)
 }
 
-func entryKind(e auth.OIDCProviderConfigEntry) string {
+func entryKind(e *auth.OIDCProviderConfigEntry) string {
 	if e.Kind == "" {
 		return auth.KindHuman
 	}
