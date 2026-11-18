@@ -165,13 +165,41 @@ Only numeric subjects are accepted (`^[0-9]{1,64}$`); anything else is a
 refusal, never normalised.
 
 **Intent.** ZITADEL's Google provider is OIDC: it exchanges the code,
-validates the ID token, and reads Google's userinfo server-side, which
-becomes `rawInformation`. Unlike GitHub's, Google's `email_verified` is
-Google's own statement, so the hook makes **no outbound call** for Google.
+validates the ID token, and reads Google's userinfo server-side. Unlike
+GitHub's, Google's `email_verified` is Google's own statement, so the hook
+makes **no outbound call** for Google.
 
-- `rawInformation.sub` must be a string equal to the intent's user id.
-- A new account needs `email_verified` = `true` (a JSON boolean) and a
-  well-formed `email`; otherwise `412`.
+`rawInformation` is **not** the flat userinfo: ZITADEL (v4.19.2) stores the
+IdP user as `json.Marshal(*google.User)`, and `google.User` embeds the
+`idp.User` interface, which `encoding/json` names `User`. So the userinfo
+sits under `rawInformation.User`:
+
+```json
+"rawInformation": {"User": {"sub": "1113...", "email": "...", "email_verified": true, "name": "..."}}
+```
+
+Sources: `internal/idp/providers/google/google.go`,
+`internal/command/idp_intent.go` (`SucceedIDPIntent`),
+`internal/api/grpc/user/v2/intent.go` (`idpIntentToIDPIntentPb`), and
+ZITADEL's own `login-ui/external-login.mdx` example. The first real Google
+sign-in (2026-11-17) was refused because the hook read `sub` at the top
+level (mctl-api#1114).
+
+- `rawInformation` must be exactly `{"User": {...}}`: one key, an object.
+  Anything else (flat, empty, absent, another wrapper, an extra key) →
+  `403` (`intent_google_raw_unreadable`), never an empty userinfo.
+- `rawInformation.User.sub` must be a string equal to the intent's user
+  id; missing or different → `403` (`intent_google_sub_mismatch`). A
+  non-numeric user id → `403` (`intent_bad_google_identity`).
+- `email`, `email_verified` and `name` are read from `rawInformation.User`
+  too. A new account needs `email_verified` = `true` (a JSON boolean) and
+  a well-formed `email`; otherwise `412`.
+- **Diagnostics.** On each of the three refusals above the hook logs
+  `zitadel hook: google rawInformation refused` with the `reason`, the
+  sorted `top_level_keys` and, for each top-level object, its sorted
+  `nested_keys`. Key names only, never values (bounded to 32 keys of 64
+  chars), so a future shape change shows up in the pod log without
+  personal data.
 - **New user, subject not on the Google creation allowlist** → `403`
   (`intent_customer_create_not_allowed:google:<sub>`). The reason carries
   the subject, never the email.
