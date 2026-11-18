@@ -312,10 +312,13 @@ func TestDevLoopDecide_AdminRemovedBeforeConfirmIsRefused(t *testing.T) {
 
 func TestDevLoopDecide_ABindingThatMovedOffersNoDecision(t *testing.T) {
 	d := newDecideEnv(t)
+	// Well-formed values that name something else: a malformed one never
+	// gets as far as the sign-in.
+	other := "sha256:" + strings.Repeat("0", 64)
 	for name, mutate := range map[string]func(url.Values){
-		"context": func(v url.Values) { v.Set("cd", "sha256:other") },
-		"content": func(v url.Values) { v.Set("xd", "sha256:other") },
-		"grant":   func(v url.Values) { v.Set("grant", "aar_other") },
+		"context": func(v url.Values) { v.Set("cd", other) },
+		"content": func(v url.Values) { v.Set("xd", other) },
+		"grant":   func(v url.Values) { v.Set("grant", "aar_"+strings.Repeat("0", 32)) },
 	} {
 		run := d.run("moved-" + name)
 		mutate(run.link)
@@ -410,6 +413,57 @@ func TestDevLoopDecide_MalformedLinkAndOffPage(t *testing.T) {
 	if rec := d.do(http.MethodGet, decidePathPrefix+run.workflowID+"?"+run.link.Encode(), nil, nil); rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("off page = %d, want 503", rec.Code)
 	}
+}
+
+// A link whose binding is not exactly an aar_ id and two sha256 digests is
+// refused as malformed on the page and on the sign-in start, before any
+// state or ZITADEL redirect: a link cut short by a wrapping terminal used to
+// pass, and only fail after the second factor as "the proposal changed".
+func TestDevLoopDecide_BindingMustHaveItsExactShape(t *testing.T) {
+	d := newDecideEnv(t)
+	run := d.run("shape")
+	grant, cd, xd := run.link.Get("grant"), run.link.Get("cd"), run.link.Get("xd")
+	if !decideGrantRe.MatchString(grant) || !decideDigestRe.MatchString(cd) || !decideDigestRe.MatchString(xd) {
+		t.Fatalf("the real link does not have the shape the page requires: %v", run.link)
+	}
+	with := func(k, v string) url.Values {
+		l := url.Values{"grant": {grant}, "cd": {cd}, "xd": {xd}}
+		l.Set(k, v)
+		return l
+	}
+	cases := map[string]url.Values{
+		"truncated xd":           with("xd", xd[:len(xd)-5]),
+		"truncated cd":           with("cd", cd[:len(cd)-1]),
+		"grant wrong prefix":     with("grant", "aax_"+grant[len("aar_"):]),
+		"grant too short":        with("grant", grant[:len(grant)-1]),
+		"grant uppercase hex":    with("grant", "aar_"+strings.ToUpper(grant[len("aar_"):])),
+		"xd still percent-coded": with("xd", strings.Replace(xd, ":", "%3A", 1)),
+		"cd still percent-coded": with("cd", strings.Replace(cd, ":", "%3A", 1)),
+	}
+	for name, link := range cases {
+		page := d.do(http.MethodGet, decidePathPrefix+run.workflowID+"?"+link.Encode(), nil, nil)
+		if page.Code != http.StatusBadRequest || !strings.Contains(page.Body.String(), "incomplete or malformed") ||
+			strings.Contains(page.Body.String(), decideStartPath) {
+			t.Errorf("%s: page = %d %s", name, page.Code, page.Body.String())
+		}
+		form := url.Values{"workflow_id": {run.workflowID}}
+		for k, v := range link {
+			form[k] = v
+		}
+		start := d.do(http.MethodPost, decideStartPath, nil, form)
+		if start.Code != http.StatusBadRequest || !strings.Contains(start.Body.String(), "incomplete or malformed") ||
+			start.Header().Get("Location") != "" || len(start.Result().Cookies()) != 0 {
+			t.Errorf("%s: start = %d %v %s", name, start.Code, start.Header(), start.Body.String())
+		}
+	}
+	d.h.devLoopDecide.mu.Lock()
+	n := len(d.h.devLoopDecide.byID) + len(d.h.devLoopDecide.byState)
+	d.h.devLoopDecide.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("a malformed link created %d challenge entries", n)
+	}
+	// The intact link still signs in.
+	d.signIn(run)
 }
 
 func TestDevLoopDecide_CapsUnfinishedSignInsPerSource(t *testing.T) {

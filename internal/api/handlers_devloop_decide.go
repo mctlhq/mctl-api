@@ -109,6 +109,20 @@ var decideRequiredAMR = []string{"mfa"}
 // decideWorkflowRe is a DevLoop workflow id, as the start handler forms it.
 var decideWorkflowRe = regexp.MustCompile(`^dev-loop-[A-Za-z0-9_.-]{1,200}$`)
 
+// The decide link's binding has exact shapes, unlike the bearer approve
+// route's looser missingFields check: an aar_ id is the prefix and a uuid's
+// 32 lowercase hex digits (workitems.ActionApprovalIDPrefix + uuid without
+// dashes); the context digest is governance.ContextDigest's
+// "sha256:<64 lowercase hex>"; and the content digest is the grant's
+// artifact_hash, which a DevLoop grant must hold in that same form to be
+// spent at all (contentDigestRE). A link cut short, say by a terminal
+// wrapping it, then fails here as malformed, before any sign-in, instead of
+// after the second factor as "the proposal changed".
+var (
+	decideGrantRe  = regexp.MustCompile(`^aar_[0-9a-f]{32}$`)
+	decideDigestRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+)
+
 type decidePhase int
 
 const (
@@ -250,7 +264,9 @@ func setDecideCookie(w http.ResponseWriter, value string, maxAge int) {
 // link or a form names. False when any of them is absent or malformed.
 func decideBindingFrom(workflowID string, v url.Values) (decisionBinding, bool) {
 	b := decisionBinding{ApprovalRef: v.Get("grant"), ContextDigest: v.Get("cd"), ContentDigest: v.Get("xd")}
-	return b, decideWorkflowRe.MatchString(workflowID) && len(b.missingFields()) == 0
+	return b, decideWorkflowRe.MatchString(workflowID) && len(b.missingFields()) == 0 &&
+		decideGrantRe.MatchString(b.ApprovalRef) &&
+		decideDigestRe.MatchString(b.ContextDigest) && decideDigestRe.MatchString(b.ContentDigest)
 }
 
 // decideURL is the link to this page for a DevLoop and the binding of its
@@ -696,4 +712,11 @@ func (h *Handlers) auditDecidePage(r *http.Request, user *auth.User, id auth.Ide
 		RiskLevel:    string(operations.RiskMedium),
 		Message:      msg,
 	})
+	// The shared audit log line carries no message, so a refusal would show
+	// in the pod log without its reason. msg is the page's own reason text
+	// or a sign-in refusal; it never holds the nonce, state or a token.
+	if status != "succeeded" {
+		slog.Info("devloop decide: page outcome", "workflow", c.workflowID, "approval_ref", c.bind.ApprovalRef,
+			"status", status, "reason", msg)
+	}
 }
