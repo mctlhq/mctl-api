@@ -234,7 +234,7 @@ func TestDeployApprovalPage_OwnerApprovesWhatWasShown(t *testing.T) {
 	cd := e.h.decisionContext(e.approval(id)).ContextDigest
 	for _, want := range []string{"Team: " + e.tenant + ", service: web, environment: preview", "Source revision: ", deployRev,
 		"https://web-abc123.mctl.ai", p.ID, p.Digest, deployGitopsSHA, id, cd, "(agent claude-code)",
-		deployDiffMarker, "Approve this deploy"} {
+		deployDiffMarker, "Approve this deploy", "to the preview above. It deploys nothing by itself.", `class="card wide"`} {
 		if !strings.Contains(html.UnescapeString(body), want) {
 			t.Errorf("the page does not show %q", want)
 		}
@@ -247,7 +247,8 @@ func TestDeployApprovalPage_OwnerApprovesWhatWasShown(t *testing.T) {
 	}
 
 	res := e.confirm(ck, form, "approve")
-	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "Deploy approved") || !strings.Contains(res.Body.String(), "can now apply this plan once") {
+	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "Deploy approved") || !strings.Contains(res.Body.String(), "can now apply this plan once") ||
+		!strings.Contains(res.Body.String(), "You can close this tab.") {
 		t.Fatalf("confirm = %d %s", res.Code, res.Body.String())
 	}
 	a := e.approval(id)
@@ -280,7 +281,8 @@ func TestDeployApprovalPage_OwnerRejects(t *testing.T) {
 	_, ck, form := e.signIn(id, "z-owner")
 	res := e.confirm(ck, form, "reject")
 	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "Deploy rejected") ||
-		!strings.Contains(res.Body.String(), "cannot apply this plan") || strings.Contains(res.Body.String(), "can now apply") {
+		!strings.Contains(res.Body.String(), "cannot apply this plan") || strings.Contains(res.Body.String(), "can now apply") ||
+		!strings.Contains(res.Body.String(), "You can close this tab.") {
 		t.Fatalf("confirm = %d %s", res.Code, res.Body.String())
 	}
 	if a := e.approval(id); a.State != workitems.ApprovalDenied || a.DecidedByPrincipalID != glovoOwnerPRN {
@@ -538,5 +540,37 @@ func TestShellData_RowsOnlyLinkWhatMatches(t *testing.T) {
 	rows := d.Rows()
 	if rows[0].URL != "https://x/abc" || rows[0].Before != "Rev: " || rows[0].After != " <b>" || rows[1].URL != "" {
 		t.Fatalf("rows = %+v", rows)
+	}
+}
+
+// A promotion or a rollback changes production: the page must not call it a
+// preview, and a preview plan must not claim production.
+func TestApprovalTarget(t *testing.T) {
+	for _, tc := range []struct {
+		env  string
+		want string
+	}{
+		{deployplan.EnvironmentProduction, "production, as shown above"},
+		{deployplan.EnvironmentPreview, "the preview above"},
+	} {
+		if got := approvalTarget(&deployplan.Plan{Environment: tc.env}); got != tc.want {
+			t.Errorf("approvalTarget(%s) = %q, want %q", tc.env, got, tc.want)
+		}
+	}
+}
+
+// Pages that show long hashes ask for the wide card; the other shell pages
+// keep the narrow one.
+func TestShellWideCard(t *testing.T) {
+	render := func(wide bool) string {
+		rec := httptest.NewRecorder()
+		renderShellPage(rec, http.StatusOK, "default-src 'none'", deployPage, shellData{Title: "t", Wide: wide, Page: deployPageData{}})
+		return rec.Body.String()
+	}
+	if !strings.Contains(render(true), `class="card wide"`) {
+		t.Error("a wide page does not get the wide card")
+	}
+	if strings.Contains(render(false), "card wide") {
+		t.Error("a narrow page got the wide card")
 	}
 }
