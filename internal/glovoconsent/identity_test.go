@@ -16,6 +16,7 @@ package glovoconsent
 
 import (
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -78,5 +79,32 @@ func TestMaskIdentityRefusesWhenNothingIsReadable(t *testing.T) {
 		if got, err := MaskIdentity(f); !errors.Is(err, ErrNoIdentityLabel) || got != "" {
 			t.Errorf("%s: got %q, %v; want ErrNoIdentityLabel and no label", name, got, err)
 		}
+	}
+}
+
+// mctlGlovoMaskedPattern is, as a literal, the only label shape mctl-glovo's
+// link preview shows (internal/linkflow consent_client.go maskedPattern). A
+// label that does not match makes the preview refuse, so every label this
+// package builds must match it, whatever script the name starts in.
+var mctlGlovoMaskedPattern = regexp.MustCompile(`^(?:github|google|mctl):[\p{L}\p{N}]\*\*\*$`)
+
+func TestMaskIdentityMatchesMctlGlovoPreviewPattern(t *testing.T) {
+	for _, name := range []string{"alice", "Alice", "7eleven", "Ärger", "Иван", "李雷", "علي", "\u0663abc", "\u00bdhalf", "\U0001D7D8x", "*x", "-dash", "\U0001F600x", " \u0301x"} {
+		for _, f := range []IdentityFacts{
+			{Identities: []IdentityFact{{Provider: "github", Display: name}}},
+			{DisplayName: name, Identities: []IdentityFact{{Provider: "google"}}},
+			{DisplayName: name},
+		} {
+			got, err := MaskIdentity(f)
+			if err != nil {
+				continue // refused: the preview refuses too, which is the safe side
+			}
+			if !mctlGlovoMaskedPattern.MatchString(got) {
+				t.Errorf("label %q for %q does not match mctl-glovo's preview pattern", got, name)
+			}
+		}
+	}
+	if got, err := MaskIdentity(IdentityFacts{DisplayName: "alice"}); err != nil || !mctlGlovoMaskedPattern.MatchString(got) {
+		t.Fatalf("plain label = %q, %v", got, err)
 	}
 }
