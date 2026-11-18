@@ -14,7 +14,7 @@ repository's migration convention):
 |---|---|
 | `consent_id` | `gcn_` + 32 hex characters |
 | `principal_id` | the `prn_` principal (CHECKed) |
-| `consent_version` | the consent text version; always `c2-link-v1` today |
+| `consent_version` | the consent text version; always `c2-link-v2` today |
 | `recorded_at`, `recorded_by` | when, and the caller's principal string |
 | `revoked_at`, `revoked_by`, `revoke_reason` | `withdrawn` by the human, or `superseded` by a consent to a newer version |
 
