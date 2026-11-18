@@ -16,6 +16,10 @@ package api
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -24,6 +28,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/auth/cimd"
 	"github.com/mctlhq/mctl-api/internal/auth/refreshstore/refreshstoretest"
 )
 
@@ -153,14 +158,15 @@ func TestLinkCallbackChecksAuthTime(t *testing.T) {
 			state, _ := h.zitadelAuthorizeParams(linkTestRes)
 			rec := h.callback(state)
 			loc, _ := url.Parse(rec.Header().Get("Location"))
-			if rec.Code != http.StatusFound {
-				t.Fatalf("callback = %d: %s", rec.Code, rec.Body.String())
-			}
 			if tc.accept {
-				if loc.Query().Get("code") == "" || loc.Query().Get("error") != "" {
-					t.Fatalf("fresh sign-in refused: %s", loc)
+				// A fresh sign-in reaches the consent page; no code yet.
+				if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Authorize this application?") {
+					t.Fatalf("fresh sign-in = %d, want the consent page: %s", rec.Code, rec.Body.String())
 				}
 				return
+			}
+			if rec.Code != http.StatusFound {
+				t.Fatalf("callback = %d: %s", rec.Code, rec.Body.String())
 			}
 			if loc.Query().Get("code") != "" || loc.Query().Get("error") != "access_denied" {
 				t.Fatalf("sign-in without a fresh auth_time: %s, want access_denied and no code", loc)
@@ -180,15 +186,23 @@ func TestNonLinkCallbackIgnoresAuthTime(t *testing.T) {
 	}
 }
 
-// The full path: authorize, fresh sign-in, code, token.
+// linkCode drives authorize, fresh sign-in and the consent approval for
+// clientID and returns the authorization code.
+func linkCode(t *testing.T, h *upstreamHarness, clientID string) string {
+	t.Helper()
+	token, cookie, _ := linkConsentPage(t, h, clientID)
+	rec := h.decideLinkConsent(token, "approve", cookie)
+	loc, _ := url.Parse(rec.Header().Get("Location"))
+	if rec.Code != http.StatusFound || loc == nil || loc.Query().Get("code") == "" {
+		t.Fatalf("approve = %d Location=%q", rec.Code, rec.Header().Get("Location"))
+	}
+	return loc.Query().Get("code")
+}
+
+// The full path: authorize, fresh sign-in, consent, code, token.
 func linkToken(t *testing.T, h *upstreamHarness) (access, refresh string) {
 	t.Helper()
-	state, _ := h.zitadelAuthorizeParams(linkTestRes)
-	loc, _ := url.Parse(h.callback(state).Header().Get("Location"))
-	code := loc.Query().Get("code")
-	if code == "" {
-		t.Fatalf("no code: %s", loc)
-	}
+	code := linkCode(t, h, "client")
 	access, refresh, err := h.oauth.ExchangeCodeForResource(context.Background(), code, testVerifier, "client", testClientRedirect, auth.ClientAssertion{}, []string{linkTestRes})
 	if err != nil {
 		t.Fatal(err)
@@ -228,9 +242,7 @@ func TestLinkEndToEndTokenShape(t *testing.T) {
 
 func TestLinkTokenEndpointOmitsRefreshAndRefuseRefreshGrant(t *testing.T) {
 	h := newLinkOAuthHarness(t, linkTestRes)
-	state, _ := h.zitadelAuthorizeParams(linkTestRes)
-	loc, _ := url.Parse(h.callback(state).Header().Get("Location"))
-	form := url.Values{"grant_type": {"authorization_code"}, "code": {loc.Query().Get("code")}, "code_verifier": {testVerifier},
+	form := url.Values{"grant_type": {"authorization_code"}, "code": {linkCode(t, h, "client")}, "code_verifier": {testVerifier},
 		"client_id": {"client"}, "redirect_uri": {testClientRedirect}, "resource": {linkTestRes}}
 	post := func(f url.Values) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(f.Encode()))
@@ -286,5 +298,166 @@ func TestLinkTokenIsRefusedByAPIAndMCP(t *testing.T) {
 	}
 	if code := call("POST", "/mcp", def); code != http.StatusOK {
 		t.Errorf("default token on /mcp = %d, want 200", code)
+	}
+}
+
+// linkConsentPage drives a link authorization for clientID to the consent
+// page and returns the consent token, the flow cookie and the page body. It
+// fails the test if a code was issued without the page.
+func linkConsentPage(t *testing.T, h *upstreamHarness, clientID string) (token string, cookie *http.Cookie, body string) {
+	t.Helper()
+	q := url.Values{}
+	q.Set("client_id", clientID)
+	q.Set("redirect_uri", testClientRedirect)
+	q.Set("response_type", "code")
+	q.Set("state", "client-state")
+	q.Set("code_challenge", testChallenge())
+	q.Set("code_challenge_method", "S256")
+	q.Set("resource", linkTestRes)
+	rec0 := h.get("/oauth/authorize?" + q.Encode())
+	loc0 := rec0.Header().Get("Location")
+	if rec0.Code != http.StatusFound || !strings.HasPrefix(loc0, h.idp.srv.URL+"/authorize") {
+		t.Fatalf("authorize = %d Location=%q: %s", rec0.Code, loc0, rec0.Body.String())
+	}
+	u0, _ := url.Parse(loc0)
+	h.idp.mu.Lock()
+	h.idp.challenge, h.idp.nonce = u0.Query().Get("code_challenge"), u0.Query().Get("nonce")
+	h.idp.mu.Unlock()
+	state := u0.Query().Get("state")
+	rec := h.callback(state)
+	if rec.Code != http.StatusOK || strings.Contains(rec.Header().Get("Location"), "code=") {
+		t.Fatalf("link flow for %q = %d Location=%q: a code must not be issued before the consent page", clientID, rec.Code, rec.Header().Get("Location"))
+	}
+	body = rec.Body.String()
+	const marker = `name="token" value="`
+	i := strings.Index(body, marker)
+	if i < 0 {
+		t.Fatalf("no consent form: %s", body)
+	}
+	token = body[i+len(marker):]
+	end := strings.Index(token, `"`)
+	if end < 0 {
+		t.Fatalf("unterminated consent token: %s", body)
+	}
+	token = token[:end]
+	for _, c := range rec.Result().Cookies() {
+		if strings.HasPrefix(c.Name, consentCookie) {
+			cookie = c
+		}
+	}
+	if cookie == nil {
+		t.Fatal("no consent cookie")
+	}
+	return token, cookie, body
+}
+
+func (h *upstreamHarness) decideLinkConsent(token, decision string, cookie *http.Cookie) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/oauth/consent", strings.NewReader(url.Values{"token": {token}, "decision": {decision}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, req)
+	return rec
+}
+
+// linkConsentToken approves the consent page and exchanges the code for the
+// link token of clientID.
+func linkConsentToken(t *testing.T, h *upstreamHarness, clientID, kind string) string {
+	t.Helper()
+	access, refresh, err := h.oauth.ExchangeCodeForResource(context.Background(), linkCode(t, h, clientID), testVerifier, clientID, testClientRedirect, auth.ClientAssertion{}, []string{linkTestRes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refresh != "" {
+		t.Fatalf("refresh token for the link audience via %s client", kind)
+	}
+	return access
+}
+
+// A DCR, static or allowlisted client on the link resource is shown the
+// consent page before any code exists, and the code carries the fresh login.
+func TestLinkFlowShowsConsentToEveryNonCIMDClientKind(t *testing.T) {
+	for _, kind := range []string{"allowlisted", "dcr", "static"} {
+		t.Run(kind, func(t *testing.T) {
+			h := newLinkOAuthHarness(t, linkTestRes)
+			clientID := "client"
+			switch kind {
+			case "dcr":
+				clientID = h.oauth.RegisterClient("Link Helper", []string{testClientRedirect}).ClientID
+			case "static":
+				clientID = "static-link-helper"
+				if err := h.oauth.AddPreregisteredClient(clientID, "Static Helper", []string{testClientRedirect}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := time.Now().Add(-time.Minute).Unix()
+			_, _, body := linkConsentPage(t, h, clientID)
+			// The page shows the client id on its own line whatever the kind,
+			// and the registered name where there is one.
+			if !strings.Contains(body, "Client ID: "+clientID) {
+				t.Fatalf("page does not show the client id %q: %s", clientID, body)
+			}
+			if want := map[string]string{"dcr": "Link Helper", "static": "Static Helper"}[kind]; want != "" && !strings.Contains(body, "Application: "+want) {
+				t.Fatalf("page does not name the %s client %q: %s", kind, want, body)
+			}
+			c := jwtClaims(t, linkConsentToken(t, h, clientID, kind))
+			if at, _ := c["auth_time"].(float64); int64(at) < before {
+				t.Fatalf("auth_time = %v after consent", c["auth_time"])
+			}
+		})
+	}
+}
+
+func TestLinkConsentDenyIssuesNoCode(t *testing.T) {
+	h := newLinkOAuthHarness(t, linkTestRes)
+	token, cookie, _ := linkConsentPage(t, h, "client")
+	rec := h.decideLinkConsent(token, "deny", cookie)
+	loc := rec.Header().Get("Location")
+	if rec.Code != http.StatusFound || !strings.Contains(loc, "error=access_denied") || strings.Contains(loc, "code=") {
+		t.Fatalf("deny = %d Location=%q", rec.Code, loc)
+	}
+}
+
+// A CIMD client in the link flow: requestConsent stores the fresh login time
+// in the ConsentEntry, takeConsentDecision hands it to issueGrant, and the
+// token carries it. Dropping the threading must fail this test.
+func TestLinkFlowCIMDConsentRoundTripKeepsAuthTime(t *testing.T) {
+	const id = "https://app.example.com/client.json"
+	doc, _ := json.Marshal(map[string]any{
+		"client_id": id, "client_name": "CIMD Helper",
+		"redirect_uris": []string{testClientRedirect}, "token_endpoint_auth_method": "none",
+	})
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(doc)
+	}))
+	t.Cleanup(srv.Close)
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	cl := &http.Client{
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: pool},
+			DialContext: func(ctx context.Context, n, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, n, srv.Listener.Addr().String())
+			},
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	h := newLinkOAuthHarness(t, linkTestRes)
+	h.oauth.CIMD = cimd.NewResolver(cimd.Options{AllowedHosts: []string{"app.example.com"}, HTTPClient: cl})
+
+	before := time.Now().Add(-time.Minute).Unix()
+	_, _, body := linkConsentPage(t, h, id)
+	if !strings.Contains(body, "CIMD Helper") {
+		t.Fatalf("page does not name the CIMD client: %s", body)
+	}
+	c := jwtClaims(t, linkConsentToken(t, h, id, "cimd"))
+	if at, _ := c["auth_time"].(float64); int64(at) < before {
+		t.Fatalf("auth_time = %v after the CIMD consent round trip", c["auth_time"])
+	}
+	if c["aud"] != linkTestRes {
+		t.Fatalf("aud = %v", c["aud"])
 	}
 }
