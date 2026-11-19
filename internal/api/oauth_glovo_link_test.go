@@ -306,9 +306,15 @@ func TestLinkTokenIsRefusedByAPIAndMCP(t *testing.T) {
 // fails the test if a code was issued without the page.
 func linkConsentPage(t *testing.T, h *upstreamHarness, clientID string) (token string, cookie *http.Cookie, body string) {
 	t.Helper()
+	return linkConsentPageAt(t, h, clientID, testClientRedirect)
+}
+
+// linkConsentPageAt is linkConsentPage for a client returning to redirectURI.
+func linkConsentPageAt(t *testing.T, h *upstreamHarness, clientID, redirectURI string) (token string, cookie *http.Cookie, body string) {
+	t.Helper()
 	q := url.Values{}
 	q.Set("client_id", clientID)
-	q.Set("redirect_uri", testClientRedirect)
+	q.Set("redirect_uri", redirectURI)
 	q.Set("response_type", "code")
 	q.Set("state", "client-state")
 	q.Set("code_challenge", testChallenge())
@@ -459,5 +465,73 @@ func TestLinkFlowCIMDConsentRoundTripKeepsAuthTime(t *testing.T) {
 	}
 	if c["aud"] != linkTestRes {
 		t.Fatalf("aud = %v", c["aud"])
+	}
+}
+
+// The glovo-link helper is a native app: it binds an ephemeral loopback port
+// and uses a caller-chosen client id that nothing registered. The link flow
+// must accept that shape (RFC 8252 loopback, port-agnostic), still show the
+// consent page, and refuse the same client id on a non-loopback redirect it
+// never registered. A pre-registered client keeps matching exactly.
+func TestLinkFlowAcceptsAnUnregisteredClientOnAnEphemeralLoopbackPort(t *testing.T) {
+	const clientID = "glovo-link"
+	for _, redirect := range []string{"http://127.0.0.1:53111/callback", "http://127.0.0.1:61942/callback"} {
+		h := newLinkOAuthHarness(t, linkTestRes)
+		token, cookie, body := linkConsentPageAt(t, h, clientID, redirect)
+		if !strings.Contains(body, "Client ID: "+clientID) {
+			t.Fatalf("consent page does not show the client id: %s", body)
+		}
+		rec := h.decideLinkConsent(token, "approve", cookie)
+		loc, _ := url.Parse(rec.Header().Get("Location"))
+		if rec.Code != http.StatusFound || loc == nil || loc.Host != strings.TrimPrefix(strings.SplitN(redirect, "/callback", 2)[0], "http://") || loc.Query().Get("code") == "" {
+			t.Fatalf("approve = %d Location=%q, want the code on %s", rec.Code, rec.Header().Get("Location"), redirect)
+		}
+		access, refresh, err := h.oauth.ExchangeCodeForResource(context.Background(), loc.Query().Get("code"), testVerifier, clientID, redirect, auth.ClientAssertion{}, []string{linkTestRes})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if refresh != "" {
+			t.Fatal("refresh token for the link audience")
+		}
+		if c := jwtClaims(t, access); c["aud"] != linkTestRes {
+			t.Fatalf("aud = %v", c["aud"])
+		}
+	}
+}
+
+func TestLinkFlowRefusesAnUnregisteredClientOnANonLoopbackRedirect(t *testing.T) {
+	h := newLinkOAuthHarness(t, linkTestRes)
+	q := url.Values{}
+	q.Set("client_id", "glovo-link")
+	q.Set("redirect_uri", "https://evil.example/callback")
+	q.Set("response_type", "code")
+	q.Set("state", "s")
+	q.Set("code_challenge", testChallenge())
+	q.Set("code_challenge_method", "S256")
+	q.Set("resource", linkTestRes)
+	rec := h.get("/oauth/authorize?" + q.Encode())
+	if loc := rec.Header().Get("Location"); strings.HasPrefix(loc, h.idp.srv.URL) || rec.Code < 400 {
+		t.Fatalf("authorize = %d Location=%q, want a refusal", rec.Code, loc)
+	}
+}
+
+// A static client trusts the exact callbacks it lists, port included, so an
+// ephemeral loopback port cannot reuse its client id.
+func TestLinkFlowStaticClientRefusesAnotherLoopbackPort(t *testing.T) {
+	h := newLinkOAuthHarness(t, linkTestRes)
+	if err := h.oauth.AddPreregisteredClient("glovo-link-static", "Static", []string{"http://127.0.0.1:53111/callback"}); err != nil {
+		t.Fatal(err)
+	}
+	q := url.Values{}
+	q.Set("client_id", "glovo-link-static")
+	q.Set("redirect_uri", "http://127.0.0.1:61942/callback")
+	q.Set("response_type", "code")
+	q.Set("state", "s")
+	q.Set("code_challenge", testChallenge())
+	q.Set("code_challenge_method", "S256")
+	q.Set("resource", linkTestRes)
+	rec := h.get("/oauth/authorize?" + q.Encode())
+	if loc := rec.Header().Get("Location"); strings.HasPrefix(loc, h.idp.srv.URL) || rec.Code < 400 {
+		t.Fatalf("authorize = %d Location=%q, want a refusal", rec.Code, loc)
 	}
 }
