@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.170.1](https://github.com/mctlhq/mctl-api/compare/4.170.0...4.170.1) (2026-11-19)
+
+
+### Bug Fixes
+
+* **oauth:** consent page for every client kind on the link resource ([7c98d0c](https://github.com/mctlhq/mctl-api/commit/7c98d0ceadf729d19b251a20b289708cf935cb7c))
+* **oauth:** show the consent page to every client kind on the link resource ([58c219f](https://github.com/mctlhq/mctl-api/commit/58c219fa760298bc6dfa44cb3af9cc8b9150b18b))
+
 ## [4.170.0](https://github.com/mctlhq/mctl-api/compare/4.169.1...4.170.0) (2026-11-18)
 
 
