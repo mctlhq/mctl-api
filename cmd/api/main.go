@@ -1032,10 +1032,9 @@ func main() {
 	// Stores opened after this point (command bridge, glovo link consent) must
 	// not reuse initCtx: it is released above, so an init on it fails with
 	// "context canceled" before its first attempt and no retry can help (the
-	// consent store was dark-broken this way when its switch was first lit).
-	// They get their own bounded budget instead.
-	lateInitCtx, cancelLateInit := context.WithTimeout(rootCtx, storeInitBudget)
-	defer cancelLateInit()
+	// consent store was broken this way when its switch was first lit). Each
+	// gets its own bounded context, created right before its init, so one
+	// store's ladder cannot spend another's budget.
 
 	// A signal delivered while a store was retrying has already cancelled
 	// rootCtx. Booting on regardless would mean a pod that was told to stop
@@ -1102,10 +1101,12 @@ func main() {
 			// The mode is decided once: the runtime-role store on the shared
 			// GLOVO_DB_URL pool when bridge_schema_version exists, the legacy
 			// store otherwise (mctl-api#985 task 4).
-			bs, bsErr := initStore(lateInitCtx, storeFailures, "command bridge", func(ctx context.Context) (*bridge.Store, error) {
+			bridgeInitCtx, cancelBridgeInit := context.WithTimeout(rootCtx, storeInitBudget)
+			bs, bsErr := initStore(bridgeInitCtx, storeFailures, "command bridge", func(ctx context.Context) (*bridge.Store, error) {
 				st, _, err := openBridgeStore(ctx, bridgeOpenDeps{GlovoPool: glovoPoolOf(glovoStore), LegacyDSN: bridgeDBURL})
 				return st, err
 			})
+			cancelBridgeInit()
 			if bsErr != nil {
 				slog.Error("command bridge store init failed; /api/v1/bridge routes will return 503", "error", bsErr)
 			} else {
@@ -1478,8 +1479,9 @@ func main() {
 	}
 	// Glovo link consent (mctl-glovo epic #11, C2-1c): dark unless
 	// GLOVO_CONSENT_ENABLED and every dependency is there.
-	glovoConsentRoutes, gcErr := configureGlovoConsent(lateInitCtx, os.LookupEnv, func(_ context.Context, dbURL string) (glovoconsent.Store, error) {
-		st, err := initStore(lateInitCtx, storeFailures, "glovo link consent", func(ctx context.Context) (*glovoconsent.PostgresStore, error) {
+	consentInitCtx, cancelConsentInit := context.WithTimeout(rootCtx, storeInitBudget)
+	glovoConsentRoutes, gcErr := configureGlovoConsent(consentInitCtx, os.LookupEnv, func(_ context.Context, dbURL string) (glovoconsent.Store, error) {
+		st, err := initStore(consentInitCtx, storeFailures, "glovo link consent", func(ctx context.Context) (*glovoconsent.PostgresStore, error) {
 			return glovoconsent.NewStore(ctx, dbURL)
 		})
 		if err != nil {
@@ -1487,6 +1489,7 @@ func main() {
 		}
 		return st, nil
 	})
+	cancelConsentInit()
 	if gcErr != nil {
 		slog.Error("glovo link consent disabled", "error", gcErr)
 	} else if glovoConsentRoutes != nil {

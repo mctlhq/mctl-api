@@ -619,7 +619,7 @@ func TestMainWiresEveryStoreIntoReadiness(t *testing.T) {
 		t.Fatalf("found %d initStore calls in main.go, expected every store (>= 14)", len(calls))
 	}
 	for _, c := range calls {
-		if (c[1] != "initCtx" && c[1] != "lateInitCtx") || c[2] != "storeFailures" {
+		if (c[1] != "initCtx" && c[1] != "bridgeInitCtx" && c[1] != "consentInitCtx") || c[2] != "storeFailures" {
 			t.Errorf("initStore(%s, %s, ...) in main.go: every store must report into storeFailures", c[1], c[2])
 		}
 	}
@@ -631,7 +631,7 @@ func TestMainWiresEveryStoreIntoReadiness(t *testing.T) {
 // initCtx is released by cancelInit() once the early stores are built. A store
 // initialised on it afterwards fails with "context canceled" before its first
 // attempt, whatever the database is doing (glovo link consent, 4.170.1: the
-// pod never became Ready). Everything after that point uses lateInitCtx.
+// pod never became Ready). Each store after that point creates its own context.
 func TestMainNoStoreInitOnReleasedInitCtx(t *testing.T) {
 	b, err := os.ReadFile("main.go")
 	if err != nil {
@@ -645,11 +645,11 @@ func TestMainNoStoreInitOnReleasedInitCtx(t *testing.T) {
 	after := src[cut:]
 	for _, re := range []string{`initStore\(initCtx\b`, `configureGlovoConsent\(initCtx\b`, `\(initCtx,`} {
 		if loc := regexp.MustCompile(re).FindStringIndex(after); loc != nil {
-			t.Errorf("main.go uses the released initCtx after cancelInit(): %q; use lateInitCtx", after[loc[0]:loc[0]+40])
+			t.Errorf("main.go uses the released initCtx after cancelInit(): %q; use the store's own context", after[loc[0]:loc[0]+40])
 		}
 	}
-	if !strings.Contains(after, "lateInitCtx") {
-		t.Error("lateInitCtx is not used after cancelInit(): the late stores have no live context")
+	if !strings.Contains(after, "bridgeInitCtx") || !strings.Contains(after, "consentInitCtx") {
+		t.Error("bridgeInitCtx / consentInitCtx are not used after cancelInit(): the late stores have no live context")
 	}
 }
 
