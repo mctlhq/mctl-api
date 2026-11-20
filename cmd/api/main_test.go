@@ -619,12 +619,37 @@ func TestMainWiresEveryStoreIntoReadiness(t *testing.T) {
 		t.Fatalf("found %d initStore calls in main.go, expected every store (>= 14)", len(calls))
 	}
 	for _, c := range calls {
-		if c[1] != "initCtx" || c[2] != "storeFailures" {
+		if (c[1] != "initCtx" && c[1] != "lateInitCtx") || c[2] != "storeFailures" {
 			t.Errorf("initStore(%s, %s, ...) in main.go: every store must report into storeFailures", c[1], c[2])
 		}
 	}
 	if !regexp.MustCompile(`StoreInitFailures:\s+storeFailures\.List,`).Match(src) {
 		t.Error("main.go does not pass storeFailures.List to the router: /readyz would never see a failed store")
+	}
+}
+
+// initCtx is released by cancelInit() once the early stores are built. A store
+// initialised on it afterwards fails with "context canceled" before its first
+// attempt, whatever the database is doing (glovo link consent, 4.170.1: the
+// pod never became Ready). Everything after that point uses lateInitCtx.
+func TestMainNoStoreInitOnReleasedInitCtx(t *testing.T) {
+	b, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	cut := strings.Index(src, "\n\tcancelInit()\n")
+	if cut < 0 {
+		t.Fatal("cancelInit() call not found in main.go: update this pin with the refactor")
+	}
+	after := src[cut:]
+	for _, re := range []string{`initStore\(initCtx\b`, `configureGlovoConsent\(initCtx\b`, `\(initCtx,`} {
+		if loc := regexp.MustCompile(re).FindStringIndex(after); loc != nil {
+			t.Errorf("main.go uses the released initCtx after cancelInit(): %q; use lateInitCtx", after[loc[0]:loc[0]+40])
+		}
+	}
+	if !strings.Contains(after, "lateInitCtx") {
+		t.Error("lateInitCtx is not used after cancelInit(): the late stores have no live context")
 	}
 }
 
