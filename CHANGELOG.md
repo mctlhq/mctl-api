@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.170.2](https://github.com/mctlhq/mctl-api/compare/4.170.1...4.170.2) (2026-11-20)
+
+
+### Bug Fixes
+
+* **boot:** one init context per late store ([c94a2ae](https://github.com/mctlhq/mctl-api/commit/c94a2ae48cb5d9b697eb1ee0f8759f07a95fdea5))
+* **boot:** open late stores on a live context, not the released initCtx ([f9a125f](https://github.com/mctlhq/mctl-api/commit/f9a125f92c68fb825517c7e1058b716ddbf59c7a))
+* **boot:** open late stores on a live context, not the released initCtx ([84af8ca](https://github.com/mctlhq/mctl-api/commit/84af8caf70e9f1dd36f2a2144586c813d9535f6f))
+
 ## [4.170.1](https://github.com/mctlhq/mctl-api/compare/4.170.0...4.170.1) (2026-11-19)
 
 
