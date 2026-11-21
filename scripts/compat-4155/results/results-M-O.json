@@ -1,0 +1,137 @@
+[
+ {
+  "id": "M1",
+  "title": "legacy path with 4.154.0 and 4.155.0 serving the worker alternately (round-robin)",
+  "verdict": "PASS",
+  "evidence": {
+   "items": [
+    {
+     "created_on": "4.154.0",
+     "create_status": 201,
+     "final_state": "fulfilled",
+     "execution_id": "we_1537e233-4c81-48e2-846b-ed8400712770"
+    },
+    {
+     "created_on": "4.155.0",
+     "create_status": 201,
+     "final_state": "fulfilled",
+     "execution_id": "we_e203339f-fa0d-488b-897a-caeec3a090dc"
+    },
+    {
+     "created_on": "4.154.0",
+     "create_status": 201,
+     "final_state": "fulfilled",
+     "execution_id": "we_150af688-dfc6-459b-a012-0cd5d0b1aba8"
+    },
+    {
+     "created_on": "4.155.0",
+     "create_status": 201,
+     "final_state": "fulfilled",
+     "execution_id": "we_3fe05085-e169-4092-8ee3-a47ea97e9cee"
+    }
+   ],
+   "execution_request_calls_per_replica": {
+    "127.0.0.1:18301": 7,
+    "127.0.0.1:18302": 12
+   },
+   "edge_5xx": 0
+  },
+  "notes": ""
+ },
+ {
+  "id": "M2",
+  "title": "grant-pinned run whose worker calls and token exchange are all served by 4.154.0",
+  "verdict": "INFO-FAIL",
+  "evidence": {
+   "submit": [
+    {
+     "method": "POST",
+     "path": "/api/v1/operations/mctl-agents-implement/execute",
+     "status": 202,
+     "replica": "127.0.0.1:18302",
+     "req": "{\"service\":\"mctl-web\",\"slug\":\"issue-133919-compat\"}",
+     "resp": "{\"message\":\"Operation submitted. Track progress: GET /api/v1/workflows/mctl-agents-implement-5abba2ee\",\"operation\":\"mctl-agents-implement\",\"trace_id\":\"e6f1190ac2f8dfc8bf628a3ed281fa62\",\"workflow\":{\"workflowName\":\"mctl-agents-implement-5abba2ee\",\"namespace\":\"ar"
+    }
+   ],
+   "no_grant": "run token exchange refused: HTTP 403 agent_run_exchange_refused",
+   "create": {
+    "status": "pending",
+    "reason": "",
+    "id": "aar_f797cf97c3bf496da308aeb5e303ec24",
+    "state": "pending",
+    "intent_hash_matches": true,
+    "digest": "sha256:d0ad7875cd72f9332d0419615de5195aede7afa72787b2411b876030e67cf2d4"
+   },
+   "decide": 200,
+   "spend": {
+    "workflow": "mctl-agents-approve-fafbfff9"
+   },
+   "exchange": {
+    "mode": "enforce",
+    "exchange": "refused",
+    "error": "run token exchange refused: HTTP 403 agent_run_exchange_refused"
+   },
+   "replicas_seen": [
+    "127.0.0.1:18302"
+   ]
+  },
+  "notes": "informational: shows what a worker call does if the old replica serves it during a rolling update; expected-FAIL means the old replica cannot mint implement-grant"
+ },
+ {
+  "id": "M3",
+  "title": "grant-pinned run, calls alternating between replicas (round-robin)",
+  "verdict": "INFO",
+  "evidence": {
+   "submit": [
+    {
+     "method": "POST",
+     "path": "/api/v1/operations/mctl-agents-implement/execute",
+     "status": 202,
+     "replica": "127.0.0.1:18301",
+     "req": "{\"service\":\"mctl-web\",\"slug\":\"issue-133921-compat\"}",
+     "resp": "{\"message\":\"Operation submitted. Track progress: GET /api/v1/workflows/mctl-agents-implement-c410b8ad\",\"operation\":\"mctl-agents-implement\",\"trace_id\":\"f09fd073a8947c3532686891221b63ae\",\"workflow\":{\"workflowName\":\"mctl-agents-implement-c410b8ad\",\"namespace\":\"ar"
+    }
+   ],
+   "no_grant": "run token exchange refused: HTTP 403 agent_run_exchange_refused",
+   "create": {
+    "status": "pending",
+    "reason": "",
+    "id": "aar_fc04b60abe7643e2974374eb0a5725d9",
+    "state": "pending",
+    "intent_hash_matches": true,
+    "digest": "sha256:d0ad7875cd72f9332d0419615de5195aede7afa72787b2411b876030e67cf2d4"
+   },
+   "decide": 200,
+   "spend": {
+    "workflow": "mctl-agents-approve-c2f49467"
+   },
+   "exchange": {
+    "mode": "enforce",
+    "exchange": "ok",
+    "scope": "implement-grant",
+    "execution_id": "",
+    "token_id": "art_cf599cb6-d23a-469d-9be1-592bc80ae295",
+    "expires_at": "2026-11-11T04:25:49.411213Z",
+    "probe_enforced": true,
+    "revoked": true
+   },
+   "replicas_seen": [
+    "127.0.0.1:18301",
+    "127.0.0.1:18302"
+   ]
+  },
+  "notes": ""
+ },
+ {
+  "id": "O1",
+  "title": "4.154.0 only (worker 1.117.0) against the database already migrated by 4.155.0: legacy path",
+  "verdict": "PASS",
+  "evidence": {
+   "create_status": 201,
+   "final": "fulfilled",
+   "recent_error_lines_4154": [],
+   "migrations_note": ""
+  },
+  "notes": ""
+ }
+]
