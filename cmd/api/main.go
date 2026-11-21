@@ -1035,6 +1035,8 @@ func main() {
 	// consent store was broken this way when its switch was first lit). Each
 	// gets its own bounded context, created right before its init, so one
 	// store's ladder cannot spend another's budget.
+	// Sweep 2026-11-21: no other use of initCtx follows cancelInit(); the source
+	// pin in main_test.go fails if one is added.
 
 	// A signal delivered while a store was retrying has already cancelled
 	// rootCtx. Booting on regardless would mean a pod that was told to stop
