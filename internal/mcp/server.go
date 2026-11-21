@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"regexp"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -902,9 +903,10 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 		mcplib.WithString("quota_pods",
 			mcplib.Description("Maximum pods (default: 10)"),
 		),
-		// String, not boolean: extractStringParams drops non-string arguments
-		// and ValidateInput matches against the registry's string enum, so a
-		// boolean here would be silently discarded and the default applied.
+		// String, not boolean: ValidateInput matches against the registry's
+		// string enum, and the advertised contract is "true" or "false".
+		// extractStringParams coerces a JSON boolean to the same text, so a
+		// client that sends one still gets the value it asked for.
 		mcplib.WithString("allow_internet_egress",
 			mcplib.Enum("true", "false"),
 			mcplib.Description(`Allow outbound internet egress from this workspace's pods: "true" or "false" (default: "true")`),
@@ -2821,11 +2823,32 @@ func (s *Server) doRequest(req *http.Request, token string) ([]byte, error) {
 	return body, nil
 }
 
+// extractStringParams flattens tool arguments into the string map the REST
+// layer takes. Every numeric and boolean parameter on this surface is
+// advertised as a string, but clients that honour the intent of the
+// parameter (limit, dry_run, ttl_hours) send a JSON number or boolean.
+// Dropping those silently turned `dry_run: true` into "flag absent" and
+// `limit: 5` into "no limit", so scalars are coerced to the text a string
+// client would have sent. Values that are not scalars (objects, arrays,
+// null) are still dropped: they have no faithful single-string form.
 func extractStringParams(args map[string]any) map[string]string {
 	result := make(map[string]string, len(args))
 	for k, v := range args {
-		if s, ok := v.(string); ok {
-			result[k] = s
+		switch t := v.(type) {
+		case string:
+			result[k] = t
+		case bool:
+			result[k] = strconv.FormatBool(t)
+		case float64:
+			result[k] = strconv.FormatFloat(t, 'f', -1, 64)
+		case float32:
+			result[k] = strconv.FormatFloat(float64(t), 'f', -1, 32)
+		case int:
+			result[k] = strconv.Itoa(t)
+		case int64:
+			result[k] = strconv.FormatInt(t, 10)
+		case json.Number:
+			result[k] = t.String()
 		}
 	}
 	return result
