@@ -33,3 +33,23 @@ func TestPreflightToolForwardsSelectors(t *testing.T) {
 		t.Errorf("query = %q, want %q", raw, want)
 	}
 }
+
+func TestSyncWindowsToolCallsItsRoute(t *testing.T) {
+	var raw string
+	ts := queryBackend(t, &raw)
+	r := callRoadmapTool(t, (*Server).toolGetSyncWindows, ts, map[string]any{"project": "admins", "application": "admins-mctl-api"})
+	if r.IsError {
+		t.Fatal(resultText(t, r))
+	}
+	if want := "application=admins-mctl-api&project=admins"; raw != want {
+		t.Errorf("query = %q, want %q", raw, want)
+	}
+	raw = ""
+	r = callRoadmapTool(t, (*Server).toolGetSyncWindows, ts, map[string]any{"project": "admins"})
+	if r.IsError {
+		t.Fatal(resultText(t, r))
+	}
+	if want := "project=admins"; raw != want {
+		t.Errorf("project-only query = %q, want %q", raw, want)
+	}
+}

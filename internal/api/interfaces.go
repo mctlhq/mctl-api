@@ -91,6 +91,15 @@ type ArgoStatusClient interface {
 	ListWorkloads() ([]argocd.Workload, error)
 }
 
+// ArgoSyncWindowsReader reads Argo CD sync windows. It is asserted on
+// Options.ArgoCD rather than added to ArgoStatusClient, so the many test
+// doubles of that interface keep compiling and a client without it answers
+// 503 instead of a silent empty list.
+type ArgoSyncWindowsReader interface {
+	GetProjectSyncWindows(project string) (*argocd.ProjectSyncWindows, error)
+	GetAppSyncWindows(project, app string) (*argocd.AppSyncWindows, error)
+}
+
 // ErpactDeployer is the subset of erpactsites.Client the erpact site
 // handlers use (mctl-api#486). A stopgap for tenant `erpact` only — see
 // internal/erpactsites's package comment.

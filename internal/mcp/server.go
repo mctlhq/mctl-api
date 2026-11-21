@@ -380,6 +380,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolListAgentVersions())
 	srv.AddTool(s.toolResolveAgent())
 	srv.AddTool(s.toolListAgentAssets())
+	srv.AddTool(s.toolGetSyncWindows())
 	srv.AddTool(s.toolGetAgentPreflight())
 	srv.AddTool(s.toolPromoteAgent())
 	srv.AddTool(s.toolRollbackAgent())
@@ -3649,6 +3650,34 @@ func (s *Server) toolListAgentAssets() (mcplib.Tool, server.ToolHandlerFunc) {
 		body, err := s.apiGet(ctx, "/api/v1/agent-assets")
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to list agent assets: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(string(body)), nil
+	}
+	return tool, handler
+}
+
+func (s *Server) toolGetSyncWindows() (mcplib.Tool, server.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mctl_get_sync_windows",
+		mcplib.WithTitleAnnotation("Get Sync Windows"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithDescription(`Read-only Argo CD sync windows of one AppProject (kind allow or deny, schedule, duration, time zone, applications, namespaces, clusters, manualSync) and, when application is given, whether that application may sync right now (canSync) with its active and assigned windows. A project with no windows returns an empty list; a read Argo CD refused or could not answer is an error, never an empty list. Admin-only. Windows are changed only by a gitops pull request on the AppProject (spec.syncWindows); this tool cannot change them.`),
+		mcplib.WithString("project",
+			mcplib.Required(),
+			mcplib.Description("Argo CD AppProject name, e.g. default, admins, labs"),
+		),
+		mcplib.WithString("application",
+			mcplib.Description("Optional Argo CD Application name in that project, e.g. admins-mctl-api, to also get its canSync state"),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		query := url.Values{"project": {stringArg(req, "project")}}
+		if app := stringArg(req, "application"); app != "" {
+			query.Set("application", app)
+		}
+		body, err := s.apiGet(ctx, "/api/v1/sync-windows?"+query.Encode())
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("Failed to get sync windows: %v", err)), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}

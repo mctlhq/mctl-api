@@ -300,6 +300,11 @@
       "reason": "Admin-only read-only index of agent registry, gitops profiles, release intents, policy catalogs and skills with reverse references. Exposes agent platform internals; not enabled on the shared portal."
     },
     {
+      "name": "mctl_get_sync_windows",
+      "enabled": false,
+      "reason": "Admin-only read of Argo CD sync windows of one AppProject, and one application's canSync state. Read-only; exposes platform deploy scheduling; not enabled on the shared portal, an owner decision."
+    },
+    {
       "name": "mctl_list_agent_versions",
       "enabled": true,
       "reason": "Published versions of an mctl-agents agent with manifest, git SHA, image reference and prompt hash; release metadata, no tenant data."
