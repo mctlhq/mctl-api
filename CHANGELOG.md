@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.171.0](https://github.com/mctlhq/mctl-api/compare/4.170.3...4.171.0) (2026-11-21)
+
+
+### Features
+
+* **agents:** issue-229-p1-the-gitops-token-is-passed-to-git-in ([f0f4644](https://github.com/mctlhq/mctl-api/commit/f0f46446339e6509b62ee45e5ac4fc3e18585c7a))
+
+
+### Bug Fixes
+
+* **agents:** issue-229-p1-the-gitops-token-is-passed-to-git-in ([15dc18c](https://github.com/mctlhq/mctl-api/commit/15dc18c7eb8651beb8a730606e1a008fac3f68b3))
+* **ci:** fix failing required checks on issue-229-p1-the-gitops-token-is-passed-to-git-in ([430dc3a](https://github.com/mctlhq/mctl-api/commit/430dc3a2587d174cc8879ae8ae2a2cf450401b64))
+
 ## [4.170.3](https://github.com/mctlhq/mctl-api/compare/4.170.2...4.170.3) (2026-11-21)
 
 
