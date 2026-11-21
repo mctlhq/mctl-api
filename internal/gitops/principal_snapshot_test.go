@@ -15,6 +15,7 @@
 package gitops
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -148,7 +149,7 @@ func TestRefreshBuildsThePrincipalSnapshot(t *testing.T) {
 	runGit(t, work, "push", "origin", "main")
 
 	r := &Reader{repoURL: remote, branch: "main", localPath: filepath.Join(root, "cache")}
-	if err := r.refresh(); err != nil {
+	if err := r.refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -246,7 +247,7 @@ func TestRefreshDoesNotKeepAnIOError(t *testing.T) {
 	runGit(t, work, "push", "origin", "main")
 
 	r := &Reader{repoURL: remote, branch: "main", localPath: filepath.Join(root, "cache")}
-	if err := r.refresh(); err != nil {
+	if err := r.refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	good := r.principals.Load()
@@ -265,7 +266,7 @@ func TestRefreshDoesNotKeepAnIOError(t *testing.T) {
 	}
 	commitAll(t, work, "broken")
 	runGit(t, work, "push", "origin", "main")
-	if err := r.refresh(); err != nil {
+	if err := r.refresh(context.Background()); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 	if got := r.principals.Load(); got != good {
