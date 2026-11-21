@@ -87,15 +87,18 @@ func (c *Client) GetProjectSyncWindows(project string) (*ProjectSyncWindows, err
 
 // GetAppSyncWindows returns the windows that apply to one application and
 // whether a sync is allowed right now. The project scopes the lookup so an
-// unknown application is a 404 (ErrNotFound), not a 403; see
-// GetProjectAppStatus.
+// unknown application is a 404 (ErrNotFound), not a 403. The query field is
+// the singular `project` (ApplicationSyncWindowsQuery, field 3 in Argo CD
+// 3.6.2's application.proto); the plural `projects` of ApplicationQuery,
+// which GetProjectAppStatus sends, is an unknown field here and is dropped
+// by grpc-gateway without an error.
 func (c *Client) GetAppSyncWindows(project, app string) (*AppSyncWindows, error) {
 	if app == "" {
 		return nil, fmt.Errorf("application name is required")
 	}
 	u := fmt.Sprintf("%s/api/v1/applications/%s/syncwindows", c.baseURL, neturl.PathEscape(app))
 	if project != "" {
-		u += "?" + neturl.Values{"projects": {project}}.Encode()
+		u += "?" + neturl.Values{"project": {project}}.Encode()
 	}
 	body, err := c.doGet(u)
 	if err != nil {

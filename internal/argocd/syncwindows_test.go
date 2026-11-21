@@ -99,7 +99,7 @@ func TestGetAppSyncWindowsReadsState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAppSyncWindows: %v", err)
 	}
-	if path != "/api/v1/applications/admins-mctl-api/syncwindows" || query != "projects=admins" {
+	if path != "/api/v1/applications/admins-mctl-api/syncwindows" || query != "project=admins" {
 		t.Errorf("path=%q query=%q", path, query)
 	}
 	if got.CanSync || len(got.ActiveWindows) != 1 || len(got.AssignedWindows) != 1 {
