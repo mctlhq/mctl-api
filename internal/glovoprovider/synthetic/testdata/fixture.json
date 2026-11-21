@@ -1,0 +1,117 @@
+{
+  "location": {"country_code": "ZZ", "city_code": "SYN-CITY-1", "currency": "EUR"},
+  "stores": [
+    {"store_id": "st_synth_burger_01", "name": "Synthetic Burger Bar", "kind": "restaurant", "currency": "EUR", "open": true},
+    {"store_id": "st_synth_express_01", "name": "Synthetic Express Market", "kind": "express", "currency": "EUR", "open": true},
+    {"store_id": "st_synth_pizza_01", "name": "Synthetic Pizza Corner", "kind": "restaurant", "currency": "EUR", "open": false}
+  ],
+  "catalogs": [
+    {
+      "store_id": "st_synth_burger_01", "store_name": "Synthetic Burger Bar", "kind": "restaurant", "currency": "EUR", "open": true,
+      "categories": [
+        {"category_id": "cat_burgers", "name": "Burgers"},
+        {"category_id": "cat_sides", "name": "Sides"},
+        {"category_id": "cat_wraps", "name": "Wraps"},
+        {"category_id": "cat_drinks", "name": "Drinks", "tags": ["drinks"]}
+      ],
+      "products": [
+        {"product_id": "prd_burger_classic", "store_id": "st_synth_burger_01", "category_id": "cat_burgers", "name": "Classic Burger", "price_minor": 950, "available": true,
+         "option_groups": [
+           {"group_id": "grp_doneness", "name": "Doneness", "required": true, "min": 1, "max": 1, "options": [
+             {"option_id": "opt_medium", "name": "Medium", "price_delta_minor": 0, "available": true},
+             {"option_id": "opt_well_done", "name": "Well done", "price_delta_minor": 0, "available": true}
+           ]},
+           {"group_id": "grp_extras", "name": "Extras", "required": false, "min": 0, "max": 3, "options": [
+             {"option_id": "opt_cheese", "name": "Cheese", "price_delta_minor": 80, "available": true},
+             {"option_id": "opt_bacon", "name": "Bacon", "price_delta_minor": 120, "available": true}
+           ]}
+         ]},
+        {"product_id": "prd_burger_veggie_v2", "store_id": "st_synth_burger_01", "category_id": "cat_burgers", "name": "Veggie Burger", "price_minor": 890, "available": true},
+        {"product_id": "prd_fries", "store_id": "st_synth_burger_01", "category_id": "cat_sides", "name": "Fries", "price_minor": 350, "available": true},
+        {"product_id": "prd_onion_rings", "store_id": "st_synth_burger_01", "category_id": "cat_sides", "name": "Onion Rings", "price_minor": 390, "available": false},
+        {"product_id": "prd_wrap_classic", "store_id": "st_synth_burger_01", "category_id": "cat_wraps", "name": "Chicken Wrap Classic", "price_minor": 720, "available": true},
+        {"product_id": "prd_wrap_spicy", "store_id": "st_synth_burger_01", "category_id": "cat_wraps", "name": "Chicken Wrap Spicy", "price_minor": 720, "available": true},
+        {"product_id": "prd_cola_330", "store_id": "st_synth_burger_01", "category_id": "cat_drinks", "name": "Cola 330 ml", "price_minor": 250, "available": true},
+        {"product_id": "prd_lemonade", "store_id": "st_synth_burger_01", "category_id": "cat_drinks", "name": "Lemonade", "price_minor": 280, "available": true}
+      ]
+    },
+    {
+      "store_id": "st_synth_express_01", "store_name": "Synthetic Express Market", "kind": "express", "currency": "EUR", "open": true,
+      "categories": [
+        {"category_id": "cat_dairy", "name": "Dairy"},
+        {"category_id": "cat_bakery", "name": "Bakery"},
+        {"category_id": "cat_produce", "name": "Fruit and vegetables"},
+        {"category_id": "cat_beverages", "name": "Beverages", "tags": ["drinks"]}
+      ],
+      "products": [
+        {"product_id": "prd_milk_whole_1l", "store_id": "st_synth_express_01", "category_id": "cat_dairy", "name": "Whole Milk 1 l", "price_minor": 129, "available": true},
+        {"product_id": "prd_milk_oat_1l", "store_id": "st_synth_express_01", "category_id": "cat_dairy", "name": "Oat Milk 1 l", "price_minor": 199, "available": true},
+        {"product_id": "prd_bread_sourdough", "store_id": "st_synth_express_01", "category_id": "cat_bakery", "name": "Sourdough Bread", "price_minor": 320, "available": true},
+        {"product_id": "prd_bananas_1kg", "store_id": "st_synth_express_01", "category_id": "cat_produce", "name": "Bananas 1 kg", "price_minor": 189, "available": true},
+        {"product_id": "prd_water_still_6x15", "store_id": "st_synth_express_01", "category_id": "cat_beverages", "name": "Still Water 6 x 1.5 l", "price_minor": 399, "available": true},
+        {"product_id": "prd_juice_orange_1l", "store_id": "st_synth_express_01", "category_id": "cat_beverages", "name": "Orange Juice 1 l", "price_minor": 289, "available": false}
+      ]
+    },
+    {
+      "store_id": "st_synth_pizza_01", "store_name": "Synthetic Pizza Corner", "kind": "restaurant", "currency": "EUR", "open": false,
+      "categories": [
+        {"category_id": "cat_pizza", "name": "Pizza"},
+        {"category_id": "cat_pizza_drinks", "name": "Drinks", "tags": ["drinks"]}
+      ],
+      "products": [
+        {"product_id": "prd_pizza_margherita", "store_id": "st_synth_pizza_01", "category_id": "cat_pizza", "name": "Margherita", "price_minor": 800, "available": true,
+         "option_groups": [
+           {"group_id": "grp_size_m", "name": "Size", "required": true, "min": 1, "max": 1, "options": [
+             {"option_id": "opt_size_m_medium", "name": "Medium", "price_delta_minor": 0, "available": true},
+             {"option_id": "opt_size_m_large", "name": "Large", "price_delta_minor": 300, "available": true}
+           ]},
+           {"group_id": "grp_toppings_m", "name": "Toppings", "required": false, "min": 0, "max": 4, "options": [
+             {"option_id": "opt_olives", "name": "Olives", "price_delta_minor": 90, "available": true},
+             {"option_id": "opt_mushrooms", "name": "Mushrooms", "price_delta_minor": 110, "available": false}
+           ]}
+         ]},
+        {"product_id": "prd_pizza_diavola", "store_id": "st_synth_pizza_01", "category_id": "cat_pizza", "name": "Diavola", "price_minor": 950, "available": true,
+         "option_groups": [
+           {"group_id": "grp_size_d", "name": "Size", "required": true, "min": 1, "max": 1, "options": [
+             {"option_id": "opt_size_d_medium", "name": "Medium", "price_delta_minor": 0, "available": true},
+             {"option_id": "opt_size_d_large", "name": "Large", "price_delta_minor": 300, "available": true}
+           ]}
+         ]},
+        {"product_id": "prd_pizza_sparkling", "store_id": "st_synth_pizza_01", "category_id": "cat_pizza_drinks", "name": "Sparkling Water 0.5 l", "price_minor": 180, "available": true}
+      ]
+    }
+  ],
+  "orders": [
+    {
+      "summary": {"order_id": "ord_synth_0001", "store_id": "st_synth_burger_01", "store_name": "Synthetic Burger Bar", "placed_at": "2026-10-01T18:30:00Z", "item_count": 8, "total_minor": 5680, "currency": "EUR", "native_reorder_allowed": true},
+      "items": [
+        {"product_id": "prd_burger_classic", "name": "Classic Burger", "quantity": 2, "unit_price_minor": 1000,
+         "options": [{"group_id": "grp_doneness", "option_id": "opt_medium", "name": "Medium"}, {"group_id": "grp_extras", "option_id": "opt_cheese", "name": "Cheese"}]},
+        {"product_id": "prd_fries", "name": "Fries", "quantity": 1, "unit_price_minor": 350},
+        {"product_id": "prd_cola_330", "name": "Cola 330 ml", "category_tags": ["drinks"], "quantity": 2, "unit_price_minor": 250},
+        {"product_id": "prd_burger_veggie_old", "name": "Veggie Burger", "quantity": 1, "unit_price_minor": 870},
+        {"product_id": "prd_wrap_chicken_old", "name": "Chicken Wrap", "quantity": 1, "unit_price_minor": 720},
+        {"product_id": "prd_onion_rings", "name": "Onion Rings", "quantity": 1, "unit_price_minor": 390}
+      ]
+    },
+    {
+      "summary": {"order_id": "ord_synth_0002", "store_id": "st_synth_express_01", "store_name": "Synthetic Express Market", "placed_at": "2026-10-20T09:15:00Z", "item_count": 6, "total_minor": 1485, "currency": "EUR", "native_reorder_allowed": true},
+      "items": [
+        {"product_id": "prd_milk_whole_1l", "name": "Whole Milk 1 l", "quantity": 2, "unit_price_minor": 119},
+        {"product_id": "prd_bread_sourdough", "name": "Sourdough Bread", "quantity": 1, "unit_price_minor": 320},
+        {"product_id": "prd_water_still_6x15", "name": "Still Water 6 x 1.5 l", "category_tags": ["drinks"], "quantity": 1, "unit_price_minor": 399},
+        {"product_id": "prd_juice_orange_1l", "name": "Orange Juice 1 l", "category_tags": ["drinks"], "quantity": 1, "unit_price_minor": 279},
+        {"product_id": "prd_yogurt_greek_old", "name": "Greek Yogurt 500 g", "quantity": 1, "unit_price_minor": 249}
+      ]
+    },
+    {
+      "summary": {"order_id": "ord_synth_0003", "store_id": "st_synth_pizza_01", "store_name": "Synthetic Pizza Corner", "placed_at": "2026-09-12T19:45:00Z", "item_count": 2, "total_minor": 2050, "currency": "EUR", "native_reorder_allowed": false},
+      "items": [
+        {"product_id": "prd_pizza_margherita", "name": "Margherita", "quantity": 1, "unit_price_minor": 800},
+        {"product_id": "prd_pizza_diavola", "name": "Diavola", "quantity": 1, "unit_price_minor": 1250,
+         "options": [{"group_id": "grp_size_d", "option_id": "opt_size_d_large", "name": "Large"}]}
+      ]
+    }
+  ],
+  "cart": {"store_id": "st_synth_express_01", "currency": "EUR", "lines": [{"product_id": "prd_bananas_1kg", "quantity": 1, "unit_price_minor": 189}], "fingerprint": ""}
+}
