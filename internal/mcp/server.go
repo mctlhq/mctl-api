@@ -903,9 +903,10 @@ Returns workflow_name. Poll mctl_get_workflow_status(workflow_name) to track pro
 		mcplib.WithString("quota_pods",
 			mcplib.Description("Maximum pods (default: 10)"),
 		),
-		// String, not boolean: extractStringParams drops non-string arguments
-		// and ValidateInput matches against the registry's string enum, so a
-		// boolean here would be silently discarded and the default applied.
+		// String, not boolean: ValidateInput matches against the registry's
+		// string enum, and the advertised contract is "true" or "false".
+		// extractStringParams coerces a JSON boolean to the same text, so a
+		// client that sends one still gets the value it asked for.
 		mcplib.WithString("allow_internet_egress",
 			mcplib.Enum("true", "false"),
 			mcplib.Description(`Allow outbound internet egress from this workspace's pods: "true" or "false" (default: "true")`),
