@@ -898,6 +898,9 @@ func NewRouter(opts Options) http.Handler {
 			// Read-only asset index and CI-equivalent preflight (mctl-api#748).
 			// Static segments win over {name}; no eligibility semantics.
 			r.Get("/agent-assets", h.ListAgentAssets)
+			// Argo CD sync windows, read-only and admin-only. Windows are
+			// written only through a gitops PR (AppProject spec.syncWindows).
+			r.Get("/sync-windows", h.GetSyncWindows)
 			r.Get("/agents/{name}/preflight", h.PreflightAgent)
 			r.Post("/agents/{name}/bindings/rollback", h.RollbackBinding)
 			r.Get("/agents/{name}/bindings/{revision}", h.GetBinding)
