@@ -30,29 +30,35 @@ import (
 
 func TestExtractStringParams(t *testing.T) {
 	args := map[string]any{
-		"team":   "billing",
-		"count":  42,
-		"flag":   true,
-		"empty":  "",
-		"action": "deploy",
+		"team":    "billing",
+		"empty":   "",
+		"count":   42,
+		"limit":   float64(5),
+		"ratio":   0.25,
+		"big":     float64(1000000),
+		"flag":    true,
+		"off":     false,
+		"ttl":     json.Number("48"),
+		"nothing": nil,
+		"obj":     map[string]any{"a": 1},
+		"list":    []any{"a"},
 	}
 	result := extractStringParams(args)
 
-	if result["team"] != "billing" {
-		t.Errorf("team: got %q, want billing", result["team"])
+	want := map[string]string{
+		"team": "billing", "empty": "", "count": "42", "limit": "5",
+		"ratio": "0.25", "big": "1000000", "flag": "true", "off": "false", "ttl": "48",
 	}
-	if result["action"] != "deploy" {
-		t.Errorf("action: got %q, want deploy", result["action"])
+	for k, w := range want {
+		if got, ok := result[k]; !ok || got != w {
+			t.Errorf("%s: got %q (present=%v), want %q", k, got, ok, w)
+		}
 	}
-	if result["empty"] != "" {
-		t.Errorf("empty: got %q, want empty string", result["empty"])
-	}
-	// Non-string values should be dropped.
-	if _, ok := result["count"]; ok {
-		t.Error("non-string int value should be dropped")
-	}
-	if _, ok := result["flag"]; ok {
-		t.Error("non-string bool value should be dropped")
+	// Non-scalars have no faithful single-string form and stay dropped.
+	for _, k := range []string{"nothing", "obj", "list"} {
+		if _, ok := result[k]; ok {
+			t.Errorf("%s: non-scalar value should be dropped", k)
+		}
 	}
 }
 
