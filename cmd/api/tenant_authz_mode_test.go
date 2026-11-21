@@ -137,8 +137,17 @@ func TestPrincipalTenantsAdapter(t *testing.T) {
 	}
 	reader := gitops.NewReader(src, "main", filepath.Join(t.TempDir(), "checkout"), nil, "", "")
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		reader.RefreshLoop(ctx, time.Hour)
+	}()
+	deadline := time.Now().Add(30 * time.Second)
+	for reader.LastSync().IsZero() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	cancel()
-	reader.RefreshLoop(ctx, time.Hour)
+	<-done
 	if reader.LastSync().IsZero() {
 		t.Fatal("the local clone did not sync")
 	}
