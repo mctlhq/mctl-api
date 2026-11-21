@@ -2,6 +2,7 @@ package gitops
 
 import (
 	"bytes"
+	"context"
 	"os/exec"
 	"strings"
 	"testing"
@@ -52,7 +53,7 @@ func TestGitOutputRedactsTheReturnedSliceNotJustTheError(t *testing.T) {
 
 	// git echoes the path it was asked for back into stderr, so the token
 	// reaches CombinedOutput without needing a network or a real remote.
-	out, err := r.gitOutput(nil, "ls-remote", "/no/such/repository-"+token)
+	out, err := r.gitOutput(context.Background(), nil, "ls-remote", "/no/such/repository-"+token)
 	if err == nil {
 		t.Fatal("expected git to fail on a nonexistent repository")
 	}

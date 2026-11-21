@@ -47,6 +47,35 @@ const gitCommandTimeout = 2 * time.Minute
 // pipe open, and without WaitDelay, Wait would block on it past the deadline.
 const gitWaitDelay = 5 * time.Second
 
+// gitCleanupTimeout bounds the deferred head lookup and credential scrub, which
+// run detached from the refresh context so they still happen after cancellation.
+const gitCleanupTimeout = 10 * time.Second
+
+// gitTokenEnv names the child-process environment variable the credential
+// helper reads. It is a variable name, not a credential.
+const gitTokenEnv = "MCTL_GITOPS_TOKEN" //nolint:gosec // G101: name, not a secret
+
+// gitCredentialArgs returns the -c arguments that make git obtain HTTPS
+// credentials from the environment variable gitTokenEnv, and the env entries to
+// put on the child process. The token itself never appears in the returned args.
+func gitCredentialArgs(repoURL, token string) (args []string, env []string, err error) {
+	u, err := url.Parse(repoURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parsing gitops repo URL: %w", err)
+	}
+	if u.Scheme == "" {
+		return nil, nil, fmt.Errorf("gitops repo URL %q has no scheme", repoURL)
+	}
+	helper := `!f() { test "$1" = get || exit 0; echo username=x-access-token; echo "password=$` + gitTokenEnv + `"; }; f`
+	args = []string{
+		"-c", "credential.helper=",
+		"-c", "credential." + u.Scheme + "://" + u.Host + ".helper=" + helper,
+		"-c", "credential.useHttpPath=false",
+	}
+	env = []string{gitTokenEnv + "=" + token, "GIT_TERMINAL_PROMPT=0"}
+	return args, env, nil
+}
+
 // Reader provides read access to the GitOps mono-repo state.
 // It clones the repo locally and refreshes periodically.
 type Reader struct {
@@ -318,8 +347,14 @@ func NewReader(repoURL, branch, localPath string, token ghtoken.Source, sshKeyPa
 
 // RefreshLoop periodically refreshes the local repo clone.
 func (r *Reader) RefreshLoop(ctx context.Context, interval time.Duration) {
+	if ctx.Err() != nil {
+		return
+	}
 	// Initial sync.
-	if err := r.refresh(); err != nil {
+	if err := r.refresh(ctx); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		slog.Error("initial gitops sync failed", "error", err)
 	} else {
 		r.afterRefresh()
@@ -333,7 +368,13 @@ func (r *Reader) RefreshLoop(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := r.refresh(); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if err := r.refresh(ctx); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				slog.Error("gitops refresh failed", "error", err)
 			} else {
 				r.afterRefresh()
@@ -356,7 +397,7 @@ func (r *Reader) afterRefresh() {
 	}
 }
 
-func (r *Reader) refresh() error {
+func (r *Reader) refresh(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	// Whatever happens below, head ends up naming what is on disk: a failed
@@ -369,13 +410,15 @@ func (r *Reader) refresh() error {
 		if _, err := os.Stat(filepath.Join(r.localPath, ".git")); err != nil {
 			return
 		}
-		if out, err := r.gitOutput(nil, "rev-parse", "HEAD"); err == nil {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), gitCleanupTimeout)
+		defer cancel()
+		if out, err := r.gitOutput(cctx, nil, "rev-parse", "HEAD"); err == nil {
 			r.head = strings.TrimSpace(string(out))
 		}
 	}()
 
 	// Resolve the credential once, here, and store it for the duration of this
-	// refresh. Everything downstream — the clone URL below and redactTokenLocked,
+	// refresh. Everything downstream — the credential env below and redactTokenLocked,
 	// which strips the token out of git's own output — then reads the same
 	// r.token. Threading a source through both instead would let them
 	// disagree across a rotation, and the way that failure shows up is a live
@@ -392,29 +435,28 @@ func (r *Reader) refresh() error {
 		r.token = token
 	}
 
-	var cloneURL string
+	cloneURL := r.repoURL
 	var sshEnv []string
+	var credArgs, credEnv []string
 
 	switch {
 	case r.sshKeyPath != "":
 		// SSH auth: use key file, verify the host key against a pinned
 		// known_hosts file (fail closed — no trust-on-first-use).
-		cloneURL = r.repoURL
 		knownHostsPath, err := r.resolveKnownHostsPathLocked()
 		if err != nil {
 			return fmt.Errorf("resolving known_hosts path: %w", err)
 		}
 		sshEnv = []string{"GIT_SSH_COMMAND=" + buildSSHCommand(r.sshKeyPath, knownHostsPath)}
 	case r.token != "":
-		// HTTPS auth: inject token into URL
-		if u, err := url.Parse(r.repoURL); err == nil {
-			u.User = url.UserPassword("x-access-token", r.token)
-			cloneURL = u.String()
-		} else {
-			cloneURL = r.repoURL
+		// HTTPS auth: the token reaches git through a scoped credential
+		// helper reading the child's environment, never through argv.
+		// Fail closed if the URL cannot be scoped.
+		var err error
+		credArgs, credEnv, err = gitCredentialArgs(r.repoURL, r.token)
+		if err != nil {
+			return fmt.Errorf("building gitops credential helper: %w", err)
 		}
-	default:
-		cloneURL = r.repoURL
 	}
 
 	// Scrub the credential out of remote.origin.url. Registered as a defer,
@@ -449,7 +491,9 @@ func (r *Reader) refresh() error {
 			if _, err := os.Stat(filepath.Join(r.localPath, ".git")); err != nil {
 				return
 			}
-			if err := r.runGit(sshEnv, "remote", "set-url", "origin", r.repoURL); err != nil {
+			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), gitCleanupTimeout)
+			defer cancel()
+			if err := r.runGit(cctx, sshEnv, "remote", "set-url", "origin", r.repoURL); err != nil {
 				slog.Error("could not strip the credential from remote.origin.url; a plaintext token may remain in .git/config on the cache volume",
 					"path", filepath.Join(r.localPath, ".git", "config"), "error", err)
 			}
@@ -459,26 +503,27 @@ func (r *Reader) refresh() error {
 	gitDir := filepath.Join(r.localPath, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
 		slog.Info("cloning gitops repo", "url", r.repoURL, "branch", r.branch, "path", r.localPath)
-		ctx, cancel := context.WithTimeout(context.Background(), gitCommandTimeout)
+		cloneCtx, cancel := context.WithTimeout(ctx, gitCommandTimeout)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "git", "clone", "--depth=1", "--branch="+r.branch, "--single-branch", cloneURL, r.localPath) //nolint:gosec // args are from trusted config
+		cloneArgs := append(append([]string{}, credArgs...), "clone", "--depth=1", "--branch="+r.branch, "--single-branch", cloneURL, r.localPath)
+		cmd := exec.CommandContext(cloneCtx, "git", cloneArgs...) //nolint:gosec // args are from trusted config
 		cmd.WaitDelay = gitWaitDelay
-		cmd.Env = append(os.Environ(), sshEnv...)
+		cmd.Env = append(append(os.Environ(), sshEnv...), credEnv...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("git clone failed: %w\n%s", err, r.redactTokenLocked(bytes.TrimSpace(out)))
 		}
 		slog.Info("gitops repo cloned successfully")
 	} else {
-		if err := r.runGit(sshEnv, "fetch", "--depth=1", cloneURL, r.branch); err != nil {
+		if _, err := r.gitOutputWith(ctx, credArgs, append(append([]string{}, sshEnv...), credEnv...), "fetch", "--depth=1", cloneURL, r.branch); err != nil {
 			return fmt.Errorf("git fetch failed: %w", err)
 		}
-		if err := r.runGit(sshEnv, "reset", "--hard", "FETCH_HEAD"); err != nil {
+		if err := r.runGit(ctx, sshEnv, "reset", "--hard", "FETCH_HEAD"); err != nil {
 			return fmt.Errorf("git reset failed: %w", err)
 		}
-		if err := r.runGit(sshEnv, "checkout", "-B", r.branch, "FETCH_HEAD"); err != nil {
+		if err := r.runGit(ctx, sshEnv, "checkout", "-B", r.branch, "FETCH_HEAD"); err != nil {
 			return fmt.Errorf("git checkout failed: %w", err)
 		}
-		if err := r.runGit(sshEnv, "clean", "-fd"); err != nil {
+		if err := r.runGit(ctx, sshEnv, "clean", "-fd"); err != nil {
 			return fmt.Errorf("git clean failed: %w", err)
 		}
 	}
@@ -491,7 +536,7 @@ func (r *Reader) refresh() error {
 	if s := r.snapshotPrincipalsLocked(); s.cacheable() {
 		r.principals.Store(s)
 	}
-	if head, err := r.gitOutput(sshEnv, "rev-parse", "--short", "HEAD"); err == nil {
+	if head, err := r.gitOutput(ctx, sshEnv, "rev-parse", "--short", "HEAD"); err == nil {
 		slog.Info("gitops refreshed",
 			"branch", r.branch,
 			"path", r.localPath,
@@ -607,14 +652,21 @@ func writeAndClose(f *os.File, b []byte) error {
 	return errors.Join(writeErr, closeErr)
 }
 
-func (r *Reader) runGit(extraEnv []string, args ...string) error {
-	_, err := r.gitOutput(extraEnv, args...)
+func (r *Reader) runGit(ctx context.Context, extraEnv []string, args ...string) error {
+	_, err := r.gitOutput(ctx, extraEnv, args...)
 	return err
 }
 
-func (r *Reader) gitOutput(extraEnv []string, args ...string) ([]byte, error) {
-	fullArgs := append([]string{"-C", r.localPath}, args...)
-	ctx, cancel := context.WithTimeout(context.Background(), gitCommandTimeout)
+func (r *Reader) gitOutput(ctx context.Context, extraEnv []string, args ...string) ([]byte, error) {
+	return r.gitOutputWith(ctx, nil, extraEnv, args...)
+}
+
+// gitOutputWith is gitOutput with preArgs (git -c options) placed before the
+// subcommand. Only network commands pass the credential through it.
+func (r *Reader) gitOutputWith(ctx context.Context, preArgs, extraEnv []string, args ...string) ([]byte, error) {
+	fullArgs := append([]string{"-C", r.localPath}, preArgs...)
+	fullArgs = append(fullArgs, args...)
+	ctx, cancel := context.WithTimeout(ctx, gitCommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", fullArgs...) //nolint:gosec // args are from trusted config
 	cmd.WaitDelay = gitWaitDelay

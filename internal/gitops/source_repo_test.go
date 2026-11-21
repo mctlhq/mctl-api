@@ -15,6 +15,7 @@
 package gitops
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -69,7 +70,7 @@ func TestComponentSourceRepo(t *testing.T) {
 	}
 
 	r := &Reader{repoURL: remote, branch: "main", localPath: cache}
-	if err := r.refresh(); err != nil {
+	if err := r.refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := r.ComponentSourceRepo("labs", "tg"); err != nil || got != "mctlhq/mctl-telegram" {

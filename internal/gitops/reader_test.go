@@ -16,6 +16,7 @@ package gitops
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
@@ -114,7 +115,7 @@ func TestRefreshResetsDivergedCache(t *testing.T) {
 		branch:    "main",
 		localPath: cache,
 	}
-	if err := r.refresh(); err != nil {
+	if err := r.refresh(context.Background()); err != nil {
 		t.Fatalf("initial refresh: %v", err)
 	}
 
@@ -134,7 +135,7 @@ tenant:
 	remoteHead := commitAll(t, work, "add nfc tenant")
 	runGit(t, work, "push", "origin", "main")
 
-	if err := r.refresh(); err != nil {
+	if err := r.refresh(context.Background()); err != nil {
 		t.Fatalf("refresh after divergence: %v", err)
 	}
 
@@ -1010,7 +1011,7 @@ func TestRefresh_SSHHostKeyMismatch_FailsClosed(t *testing.T) {
 		knownHostsPath: knownHosts,
 	}
 
-	err := r.refresh()
+	err := r.refresh(context.Background())
 	if err == nil {
 		t.Fatal("expected refresh to fail closed on a mismatched host key, got nil error")
 	}
@@ -1043,7 +1044,7 @@ func TestRefresh_SSHHostKeyMatch_PassesHostKeyVerification(t *testing.T) {
 		knownHostsPath: knownHosts,
 	}
 
-	err := r.refresh()
+	err := r.refresh(context.Background())
 	if err == nil {
 		// An even stronger pass: host-key checking was clearly not the
 		// blocker. Full git-upload-pack faking is out of scope for this
@@ -1076,7 +1077,7 @@ func TestRefresh_ResolvesTheCredentialPerCall(t *testing.T) {
 
 	// The clone itself fails — the host does not resolve — which is fine:
 	// what is under test is what happened before git ran.
-	_ = r.refresh()
+	_ = r.refresh(context.Background())
 	if calls != 1 {
 		t.Fatalf("first refresh consulted the source %d times, want 1", calls)
 	}
@@ -1084,7 +1085,7 @@ func TestRefresh_ResolvesTheCredentialPerCall(t *testing.T) {
 		t.Fatalf("token is %q after the first refresh, want rotated-1", r.token)
 	}
 
-	_ = r.refresh()
+	_ = r.refresh(context.Background())
 	if calls != 2 {
 		t.Fatalf("second refresh consulted the source %d times total, want 2 — the value was captured", calls)
 	}
@@ -1107,7 +1108,7 @@ func TestRefresh_UnreadableCredentialFailsBeforeGit(t *testing.T) {
 	r := NewReader("https://github.invalid/mctlhq/does-not-exist.git", "main", dir,
 		func() (string, error) { return "", boom }, "", "")
 
-	err := r.refresh()
+	err := r.refresh(context.Background())
 	if !errors.Is(err, boom) {
 		t.Fatalf("want the source error wrapped, got %v", err)
 	}
@@ -1124,7 +1125,7 @@ func TestRefresh_SSHModeIgnoresTheCredentialSource(t *testing.T) {
 		func() (string, error) { calls++; return "", errors.New("must not be called") },
 		"/some/deploy-key", "")
 
-	_ = r.refresh()
+	_ = r.refresh(context.Background())
 	if calls != 0 {
 		t.Fatalf("SSH mode consulted the token source %d times, want 0", calls)
 	}
@@ -1167,7 +1168,7 @@ func TestRefresh_CloneDoesNotPersistTheCredential(t *testing.T) {
 	r := NewReader("file://"+origin, "main", filepath.Join(t.TempDir(), "cache"),
 		func() (string, error) { return token, nil }, "", "")
 
-	if err := r.refresh(); err != nil {
+	if err := r.refresh(context.Background()); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 
@@ -1189,7 +1190,7 @@ func TestRefresh_CloneDoesNotPersistTheCredential(t *testing.T) {
 	// A second refresh must still work — it takes the fetch branch, which
 	// passes the credential explicitly rather than reading it back from the
 	// stripped config.
-	if err := r.refresh(); err != nil {
+	if err := r.refresh(context.Background()); err != nil {
 		t.Fatalf("second refresh after stripping the credential: %v", err)
 	}
 
@@ -1286,7 +1287,7 @@ func TestRefresh_StripsACredentialLeftByAnEarlierCrash(t *testing.T) {
 	// branch — and must still scrub it.
 	r := NewReader("file://"+origin, "main", cache,
 		func() (string, error) { return token, nil }, "", "")
-	if err := r.refresh(); err != nil {
+	if err := r.refresh(context.Background()); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 
@@ -1347,7 +1348,7 @@ func TestRefresh_ScrubsEvenWhenTheFetchFails(t *testing.T) {
 
 	r := NewReader("file://"+origin, "main", cache,
 		func() (string, error) { return token, nil }, "", "")
-	if err := r.refresh(); err == nil {
+	if err := r.refresh(context.Background()); err == nil {
 		t.Fatal("expected the refresh to fail with the origin gone; the test would prove nothing otherwise")
 	}
 
@@ -1442,7 +1443,7 @@ func TestReadFilesReturnsOneCheckoutAndRefusesPaths(t *testing.T) {
 	want := strings.TrimSpace(runGit(t, work, "rev-parse", "HEAD"))
 
 	r := &Reader{repoURL: remote, branch: "roadmap-state", localPath: cache}
-	if err := r.refresh(); err != nil {
+	if err := r.refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	files, rev, err := r.ReadFiles("publication.json")
@@ -1484,7 +1485,7 @@ func TestReadFilesReturnsOneCheckoutAndRefusesPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	nested := &Reader{repoURL: filepath.Join(root, "missing.git"), branch: "roadmap-state", localPath: nestedPath}
-	if err := nested.refresh(); err == nil {
+	if err := nested.refresh(context.Background()); err == nil {
 		t.Fatal("clone of a missing repository succeeded")
 	}
 	if got, err := nested.Revision(); err == nil {
@@ -1496,7 +1497,7 @@ func TestReadFilesReturnsOneCheckoutAndRefusesPaths(t *testing.T) {
 	}
 	commitAll(t, work, "publish again")
 	runGit(t, work, "push", "origin", "roadmap-state")
-	if err := r.refresh(); err != nil {
+	if err := r.refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	next := strings.TrimSpace(runGit(t, work, "rev-parse", "HEAD"))
