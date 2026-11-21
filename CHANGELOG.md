@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.172.0](https://github.com/mctlhq/mctl-api/compare/4.171.0...4.172.0) (2026-11-21)
+
+
+### Features
+
+* **mcp:** admin-only read of Argo CD sync windows ([761edde](https://github.com/mctlhq/mctl-api/commit/761edde2eacce8d247426b63cac38c013b754f12))
+* **mcp:** admin-only read of Argo CD sync windows ([483f726](https://github.com/mctlhq/mctl-api/commit/483f726b242af72c9feca1e58577139a98bfa401))
+
+
+### Bug Fixes
+
+* **argocd:** send the singular project to the syncwindows endpoint ([adefccf](https://github.com/mctlhq/mctl-api/commit/adefccfe4980fc3c127107728be1a724b20a5b93))
+* **mcp:** coerce scalar tool arguments instead of dropping them ([2213a67](https://github.com/mctlhq/mctl-api/commit/2213a67b0018a9e7bb6c6fd86c36b839b6742b56))
+* **mcp:** coerce scalar tool arguments instead of dropping them ([c95acdc](https://github.com/mctlhq/mctl-api/commit/c95acdc7b89a3d3b883a8a07b8bd0a345a29c6e9))
+
 ## [4.171.0](https://github.com/mctlhq/mctl-api/compare/4.170.3...4.171.0) (2026-11-21)
 
 
