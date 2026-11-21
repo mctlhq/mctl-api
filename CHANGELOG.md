@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.170.3](https://github.com/mctlhq/mctl-api/compare/4.170.2...4.170.3) (2026-11-21)
+
+
+### Miscellaneous Chores
+
+* **boot:** record the initCtx sweep next to the late-store contexts ([fba0bcf](https://github.com/mctlhq/mctl-api/commit/fba0bcf8bc08cd5d2d92e7cfc222c161749dbd53))
+
 ## [4.170.2](https://github.com/mctlhq/mctl-api/compare/4.170.1...4.170.2) (2026-11-20)
 
 
