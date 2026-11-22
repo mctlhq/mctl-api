@@ -260,3 +260,24 @@ func TestExpiredInFlightClaimReportsExpiredNotInFlight(t *testing.T) {
 		t.Fatalf("expired in-flight claim: %v, want ErrApprovalExpired", err)
 	}
 }
+
+// Past its expiry, a window that was already executed still says executed: the
+// expiry answer is only for a claim that is stuck in flight.
+func TestExpiredExecutedWindowStillReportsExecuted(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	a := approvedWindow(t, s, rwBase)
+	claim, err := s.ClaimReleaseWindowApproval(ctx, a.ID, rwRequester, a.IntentHash, ReleaseWindowReclaimAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SettleReleaseWindowApproval(ctx, claim, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE action_approval_requests SET expires_at = now() - interval '1 minute' WHERE id = $1`, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimReleaseWindowApproval(ctx, a.ID, rwRequester, a.IntentHash, ReleaseWindowReclaimAfter); !errors.Is(err, ErrApprovalConsumed) {
+		t.Fatalf("expired executed window: %v, want ErrApprovalConsumed", err)
+	}
+}

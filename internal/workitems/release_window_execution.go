@@ -77,13 +77,14 @@ func (s *Store) ClaimReleaseWindowApproval(ctx context.Context, id, caller, inte
 	if cur.ActionKind != ActionKindReleaseWindow {
 		return nil, fmt.Errorf("%w: %s", ErrApprovalKindNotSpendable, id)
 	}
-	// An expired request can never be claimed again, whatever state it is in:
-	// say so, instead of telling the caller to retry an in-flight claim that
-	// the expiry guard in the UPDATE will refuse for good.
-	if !cur.ExpiresAt.After(now) {
-		return nil, fmt.Errorf("%w: %s", ErrApprovalExpired, id)
-	}
+	// An in-flight claim past its request's expiry can never be claimed again
+	// (the UPDATE refuses an expired request): say "expired, ask again", not
+	// "in flight, retry later". Any other state keeps its own, more specific
+	// answer (an executed window replayed after expiry still says executed).
 	if cur.State == ApprovalInFlight {
+		if !cur.ExpiresAt.After(now) {
+			return nil, fmt.Errorf("%w: %s", ErrApprovalExpired, id)
+		}
 		return nil, fmt.Errorf("%w: %s", ErrApprovalInFlight, id)
 	}
 	if err := ConsumeStateRefusal(cur); err != nil {

@@ -361,18 +361,6 @@ func TestExecuteReleaseWindowRouteIsDarkByDefault(t *testing.T) {
 	}
 }
 
-// cancellingDispatcher cancels the request context while the dispatch is in
-// progress, as a client disconnect would, then answers with err.
-type cancellingDispatcher struct {
-	cancel context.CancelFunc
-	err    error
-}
-
-func (d *cancellingDispatcher) Dispatch(context.Context, string, string, string, string, map[string]string) error {
-	d.cancel()
-	return d.err
-}
-
 // executeWithCancel runs execute with a request context that the dispatcher
 // cancels mid-call.
 func executeWithCancel(t *testing.T, f *windowFixture, id string, dispatchErr error) {
