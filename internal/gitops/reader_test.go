@@ -197,6 +197,63 @@ func TestReadTenant_missing(t *testing.T) {
 	}
 }
 
+// readTenant joins the name into a filesystem path, so anything outside the
+// allowlist must be refused before any file is touched (mctl-api#232). A
+// planted values.yaml outside tenants/ must stay unreadable.
+func TestReadTenant_rejectsInvalidNames(t *testing.T) {
+	dir, r := setupTempRepo(t)
+	// Reachable by "../../" from tenants/<name>: platform-gitops/values.yaml.
+	if err := os.MkdirAll(filepath.Join(dir, "platform-gitops"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "platform-gitops", "values.yaml"), []byte("tenant:\n  name: escaped\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeTenantYAML(t, dir, "acme", "tenant:\n  name: acme\n")
+
+	bad := map[string]string{
+		"empty":            "",
+		"dot":              ".",
+		"dotdot":           "..",
+		"parent":           "../x",
+		"deep parent":      "a/../../x",
+		"escape to file":   "acme/../..",
+		"slash":            "acme/x",
+		"leading slash":    "/etc",
+		"backslash":        `acme\x`,
+		"uppercase":        "Acme",
+		"unicode":          "acm\u00e9",
+		"unicode digit":    "\u0663",
+		"underscore":       "a_b",
+		"leading hyphen":   "-acme",
+		"space":            "ac me",
+		"trailing newline": "acme\n",
+		"nul":              "acme\x00",
+	}
+	for name, in := range bad {
+		t.Run(name, func(t *testing.T) {
+			tenant, err := r.readTenant(in)
+			if !errors.Is(err, ErrInvalidTenantName) {
+				t.Fatalf("readTenant(%q) = %v, %v; want ErrInvalidTenantName", in, tenant, err)
+			}
+			if errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("invalid name must not look like a missing tenant: %v", err)
+			}
+			if _, err := r.GetTenant(in); !errors.Is(err, ErrInvalidTenantName) {
+				t.Fatalf("GetTenant(%q) err = %v, want ErrInvalidTenantName", in, err)
+			}
+		})
+	}
+	for _, ok := range []string{"acme", "a", "0", "a-b-1"} {
+		if !tenantNamePattern.MatchString(ok) {
+			t.Errorf("%q should be a valid tenant name", ok)
+		}
+	}
+	if _, err := r.readTenant("acme"); err != nil {
+		t.Fatalf("valid tenant: %v", err)
+	}
+}
+
 func TestListTenants(t *testing.T) {
 	dir, r := setupTempRepo(t)
 	writeTenantYAML(t, dir, "alpha", `tenant: {name: alpha, quotas: {}}`)
@@ -755,6 +812,34 @@ func TestResolveKnownHostsPathLocked_MaterializesFreshAndCaches(t *testing.T) {
 	}
 	if path2 != path {
 		t.Fatalf("resolved path not cached: %q then %q", path, path2)
+	}
+}
+
+// A tmp reaper can delete the materialized file under a long-lived process;
+// the cache must notice and write it again (mctl-api#233).
+func TestResolveKnownHostsPathLocked_RecoversWhenFileDeleted(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+
+	r := &Reader{}
+	path, err := r.resolveKnownHostsPathLocked()
+	if err != nil {
+		t.Fatalf("resolveKnownHostsPathLocked: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+
+	path2, err := r.resolveKnownHostsPathLocked()
+	if err != nil {
+		t.Fatalf("after delete: %v", err)
+	}
+	//nolint:gosec // path is resolveKnownHostsPathLocked's own output, under t.TempDir()
+	got, err := os.ReadFile(path2)
+	if err != nil {
+		t.Fatalf("returned path is not usable: %v", err)
+	}
+	if !bytes.Equal(got, githubKnownHosts) {
+		t.Fatalf("re-materialized content does not match the embedded default")
 	}
 }
 

@@ -363,7 +363,15 @@ func (h *Handlers) handleOAuthGitHubCallback(w http.ResponseWriter, r *http.Requ
 	// principal mode they are decided per request by principal instead.
 	var groups []string
 	if h.opts.TenantAuthzMode != TenantAuthzPrincipal {
-		groups = o.ResolveGroups(login)
+		var gerr error
+		if groups, gerr = o.ResolveGroups(r.Context(), login); gerr != nil {
+			// Fail closed: a token minted from a failed lookup would carry an
+			// incomplete group set for its whole lifetime (mctl-api#158).
+			slog.Error("failed to resolve tenant groups at login", "error", gerr)
+			oauthUpstreamSignins.WithLabelValues(auth.UpstreamGitHub, "server_error").Inc()
+			oauthError(w, pending.RedirectURI, clientState, "server_error", "sign-in could not be completed; try again")
+			return
+		}
 	}
 
 	// Issue a mctl authorization code (or, for a CIMD client, ask the human

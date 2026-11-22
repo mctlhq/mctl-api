@@ -875,21 +875,36 @@ func NewOAuthServer(baseURL, ghClientID, ghClientSecret string, jwtSecret []byte
 	return s
 }
 
-// ResolveGroups resolves the tenant groups for a GitHub login, best-effort.
+// ResolveGroups resolves the tenant groups for a GitHub login at sign-in.
 // It is the exported entry point used at login
 // (internal/api/oauth_handlers.go, right after the GitHub OAuth callback
-// validates the login) and is reimplemented over resolveGroupsChecked,
-// discarding the error: a resolver failure (or none configured) at login
-// time still grants "admins" as computed right now, exactly as it did before
-// this method existed. Unlike the per-request paths, login waits out an
-// in-progress gitops refresh rather than accepting a "busy" decline. Login is
-// not a hot path, and the groups resolved here become the refresh-token
-// snapshot that later degraded resolutions fall back on.
-func (s *OAuthServer) ResolveGroups(login string) []string {
-	if groups, err := s.resolveGroups(login, true); err == nil {
-		return groups
+// validates the login) and is built over resolveGroups. A resolver failure
+// is returned, wrapped in ErrServerError, and the caller must not issue a
+// token: the groups resolved here become the access token and the 30-day
+// refresh-token snapshot, so an incomplete set would lock the user out of
+// their tenants with nothing saying why (mctl-api#158). A deployment with
+// no TenantResolver is the feature being off, not a failure: it yields
+// "admins" as computed right now, as before. Unlike the per-request paths,
+// login waits out an in-progress gitops refresh rather than accepting a
+// "busy" decline. Login is not a hot path.
+//
+// ctx is checked before and after the lookup; TenantResolver itself takes
+// no context, so a cancelled request is not interrupted mid-lookup.
+func (s *OAuthServer) ResolveGroups(ctx context.Context, login string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("resolve groups: %w: %w", ErrServerError, err)
 	}
-	return s.withAdmins(login, nil)
+	groups, err := s.resolveGroups(login, true)
+	if errors.Is(err, errResolverNotConfigured) {
+		return s.withAdmins(login, nil), nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("resolve groups: %w: %w", ErrServerError, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("resolve groups: %w: %w", ErrServerError, err)
+	}
+	return groups, nil
 }
 
 // resolveGroupsChecked resolves groups for login, reporting failure instead

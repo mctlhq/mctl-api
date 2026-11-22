@@ -87,6 +87,9 @@ type Reader struct {
 	sshKeyPath     string         // Path to SSH private key (optional, takes precedence over token)
 	knownHostsPath string         // Path to a known_hosts file for SSH host-key pinning (optional; empty means "use the shipped embedded default, materialized lazily")
 	mu             sync.RWMutex
+	// skippedDirsWarned is the last set of skipped tenant directory names a
+	// scan logged, so a stray directory warns once rather than per scan.
+	skippedDirsWarned atomic.Value // string
 	// lastSync is the Unix-nanosecond time of the last successful refresh (0
 	// = never). It is atomic rather than guarded by mu because refresh()
 	// holds the write lock across git subprocesses: a caller that only wants
@@ -620,7 +623,15 @@ func (r *Reader) resolveKnownHostsPathLocked() (string, error) {
 		return r.knownHostsPath, nil
 	}
 	if r.resolvedKnownHostsPath != "" {
-		return r.resolvedKnownHostsPath, nil
+		// Trust the cache only while the file is still there: a tmp reaper
+		// can remove it under a long-lived process, and with
+		// StrictHostKeyChecking=yes a missing file is a permanent fetch
+		// failure (mctl-api#233). Any stat failure, not only "not exist",
+		// is treated as unverified and re-materializes.
+		if _, err := os.Stat(r.resolvedKnownHostsPath); err == nil {
+			return r.resolvedKnownHostsPath, nil
+		}
+		r.resolvedKnownHostsPath = ""
 	}
 
 	f, err := os.CreateTemp("", "mctl-api-known-hosts-*")
@@ -743,10 +754,7 @@ func (r *Reader) listTenantsLocked() ([]Tenant, error) {
 	}
 
 	var tenants []Tenant
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
+	for _, entry := range r.tenantDirs(entries) {
 		t, err := r.readTenant(entry.Name())
 		if err != nil {
 			slog.Warn("failed to read tenant", "name", entry.Name(), "error", err)
@@ -856,10 +864,7 @@ func (r *Reader) NamespaceProfile(namespace string) (profile string, owned bool,
 	}
 
 	owner := ""
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
+	for _, entry := range r.tenantDirs(entries) {
 		t, err := r.readTenant(entry.Name())
 		if err != nil {
 			// A directory with no values file is skipped elsewhere, but here
@@ -946,10 +951,7 @@ func (r *Reader) ListTenantsStrict() ([]Tenant, error) {
 		return nil, fmt.Errorf("listing tenants: %w", err)
 	}
 	var tenants []Tenant
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
+	for _, e := range r.tenantDirs(entries) {
 		t, err := r.readTenant(e.Name())
 		if err != nil {
 			return nil, fmt.Errorf("reading tenant %q: %w", e.Name(), err)
@@ -1062,10 +1064,7 @@ func (r *Reader) memberRolesMatching(namespace string, match memberMatcher) ([][
 
 	var roles [][]string
 	owner := ""
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
+	for _, entry := range r.tenantDirs(entries) {
 		t, err := r.readTenant(entry.Name())
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
@@ -1086,7 +1085,61 @@ func (r *Reader) memberRolesMatching(namespace string, match memberMatcher) ([][
 	return roles, nil
 }
 
+// tenantDirs returns the entries of a platform-gitops/tenants listing that
+// can be tenants: directories whose name passes tenantNamePattern. A
+// directory whose name fails the allowlist (_template, .archive, Old-Tenant)
+// can never be a tenant, so a scan skips it instead of failing every scan
+// with ErrInvalidTenantName. A directory whose name passes is returned even
+// when its values.yaml is unreadable or corrupt: that error must surface.
+// Names come from os.ReadDir and are single path segments, so the strict
+// request-path check in readTenant stays for GetTenant. The skip is counted
+// in tenantDirsSkipped and logged once per distinct set of names.
+func (r *Reader) tenantDirs(entries []os.DirEntry) []os.DirEntry {
+	var out []os.DirEntry
+	var skipped []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if !tenantNamePattern.MatchString(e.Name()) {
+			skipped = append(skipped, e.Name())
+			continue
+		}
+		out = append(out, e)
+	}
+	tenantDirsSkipped.Set(float64(len(skipped)))
+	if len(skipped) > 0 {
+		sig := strings.Join(skipped, "\x00")
+		if prev, _ := r.skippedDirsWarned.Load().(string); prev != sig {
+			r.skippedDirsWarned.Store(sig)
+			const maxNames = 10
+			shown := skipped
+			if len(shown) > maxNames {
+				shown = shown[:maxNames]
+			}
+			slog.Warn("skipping directories under platform-gitops/tenants whose names are not valid tenant names",
+				"count", len(skipped), "names", shown)
+		}
+	}
+	return out
+}
+
+// tenantNamePattern is the allowlist for a tenant directory name. It is
+// matched against the whole name, anchored with \z so a trailing newline is
+// rejected.
+var tenantNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*\z`)
+
+// ErrInvalidTenantName is returned by readTenant for a name that is not a
+// valid tenant directory name. It deliberately does not wrap fs.ErrNotExist:
+// callers that skip a directory without values.yaml must not skip this.
+var ErrInvalidTenantName = errors.New("invalid tenant name")
+
 func (r *Reader) readTenant(name string) (*Tenant, error) {
+	// name reaches filepath.Join, which cleans ".." upward instead of
+	// refusing it. Reject, never sanitize (mctl-api#232).
+	if !tenantNamePattern.MatchString(name) {
+		return nil, fmt.Errorf("%w: %q", ErrInvalidTenantName, name)
+	}
 	valuesPath := filepath.Join(r.localPath, "platform-gitops", "tenants", name, "values.yaml")
 	data, err := os.ReadFile(valuesPath) //nolint:gosec // path built from trusted repo root
 	if err != nil {

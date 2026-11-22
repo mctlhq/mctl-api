@@ -228,7 +228,11 @@ func TestZitadelSigninIssuesTheLinkedGitHubLoginsCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref, err := h.oauth.IssueJWT("mashkovd", "prn_01JTESTAAAAAAAAAAAAAAAAAAA", h.oauth.ResolveGroups("mashkovd"))
+	refGroups, err := h.oauth.ResolveGroups(context.Background(), "mashkovd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := h.oauth.IssueJWT("mashkovd", "prn_01JTESTAAAAAAAAAAAAAAAAAAA", refGroups)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,6 +255,34 @@ func TestZitadelSigninIssuesTheLinkedGitHubLoginsCode(t *testing.T) {
 	// The state is single use.
 	if rec := h.callback(state); rec.Code != http.StatusBadRequest {
 		t.Fatalf("replayed callback = %d, want 400", rec.Code)
+	}
+}
+
+type failingTenants struct{}
+
+func (failingTenants) GetTenantsForUser(string) ([]string, error) {
+	return nil, errors.New("gitops checkout unreachable")
+}
+
+// A tenant-resolver failure during sign-in answers the client server_error
+// and issues no code, instead of minting a token with an empty group set
+// (mctl-api#158).
+func TestZitadelSigninFailsClosedWhenGroupResolverFails(t *testing.T) {
+	h := newUpstreamHarness(t, OAuthUpstreamZitadel, linkedTo("mashkovd"))
+	h.oauth.TenantResolver = failingTenants{}
+	before := testutil.ToFloat64(oauthUpstreamSignins.WithLabelValues(auth.UpstreamZitadel, "server_error"))
+
+	rec := h.callback(h.toZitadel(h.get(authorizeQuery(""))))
+	loc, _ := url.Parse(rec.Header().Get("Location"))
+	if rec.Code != http.StatusFound || !strings.HasPrefix(loc.String(), testClientRedirect) {
+		t.Fatalf("callback = %d %q, want an error redirect to the client: %s", rec.Code, loc, rec.Body.String())
+	}
+	q := loc.Query()
+	if q.Get("error") != "server_error" || q.Get("code") != "" || q.Get("state") != "client-state" {
+		t.Fatalf("client redirect = %s, want server_error with the client's state and no code", loc)
+	}
+	if after := testutil.ToFloat64(oauthUpstreamSignins.WithLabelValues(auth.UpstreamZitadel, "server_error")); after != before+1 {
+		t.Errorf("server_error counter moved %v, want 1", after-before)
 	}
 }
 

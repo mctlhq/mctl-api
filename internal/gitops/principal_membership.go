@@ -187,13 +187,18 @@ var tenantPrincipalKeysInvalid = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 // directory, else 0. The two gauges above are cleared on a failed scan, so
 // an empty series there means "not observed" only when this is 0; the
 // switch criterion reads all three.
+var tenantDirsSkipped = prometheus.NewGauge(prometheus.GaugeOpts{
+	Name: "mctl_gitops_tenant_dirs_skipped",
+	Help: "Directories under platform-gitops/tenants skipped by the last scan because their name is not a valid tenant name.",
+})
+
 var tenantPrincipalKeysScanOK = prometheus.NewGauge(prometheus.GaugeOpts{
 	Name: "tenant_principal_keys_scan_ok",
 	Help: "1 when the last scan of GitOps tenant principal keys could list the tenants, else 0.",
 })
 
 func init() {
-	prometheus.MustRegister(tenantMemberEntryUnkeyed, tenantPrincipalKeysInvalid, tenantPrincipalKeysScanOK)
+	prometheus.MustRegister(tenantMemberEntryUnkeyed, tenantPrincipalKeysInvalid, tenantPrincipalKeysScanOK, tenantDirsSkipped)
 }
 
 // recordPrincipalKeyMetrics refreshes the gauges from the checkout after
@@ -211,10 +216,7 @@ func (r *Reader) recordPrincipalKeyMetrics() {
 		return
 	}
 	tenantPrincipalKeysScanOK.Set(1)
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
+	for _, entry := range r.tenantDirs(entries) {
 		t, err := r.readTenant(entry.Name())
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
@@ -270,10 +272,7 @@ func (r *Reader) AllMemberEntries() (MemberEntries, error) {
 		return MemberEntries{}, fmt.Errorf("reading tenants dir: %w", err)
 	}
 	out := MemberEntries{KeyErrors: map[string]string{}}
-	for _, dir := range dirs {
-		if !dir.IsDir() {
-			continue
-		}
+	for _, dir := range r.tenantDirs(dirs) {
 		t, err := r.readTenant(dir.Name())
 		if errors.Is(err, fs.ErrNotExist) {
 			continue

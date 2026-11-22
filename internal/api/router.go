@@ -1493,6 +1493,22 @@ func init() {
 	prometheus.MustRegister(httpRequestDuration)
 }
 
+// unmatchedPathLabel is the metrics path label for requests chi has no route
+// pattern for.
+const unmatchedPathLabel = "unmatched"
+
+// metricsMethodLabel maps an HTTP method onto an allowlist so a client cannot
+// create series with invented method strings.
+func metricsMethodLabel(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodOptions,
+		http.MethodConnect, http.MethodTrace:
+		return method
+	}
+	return "other"
+}
+
 // metricsMiddleware returns middleware that records Prometheus metrics for each
 // request. It skips infrastructure paths (/healthz, /readyz, /metrics) to avoid
 // noise. The chi route pattern is used for the path label to prevent high cardinality.
@@ -1516,15 +1532,22 @@ func metricsMiddleware() func(http.Handler) http.Handler {
 
 			duration := time.Since(start).Seconds()
 
-			path := r.URL.Path
+			// Both labels come from the client, so each is bounded: an
+			// unmatched request (404) has no route pattern and is recorded
+			// under one constant instead of its raw URL, and a method
+			// outside the known set is recorded as "other". Otherwise an
+			// unauthenticated client could mint series without limit
+			// (mctl-api#241).
+			path := unmatchedPathLabel
 			if rctx := chi.RouteContext(r.Context()); rctx != nil {
 				if pattern := rctx.RoutePattern(); pattern != "" {
 					path = pattern
 				}
 			}
+			method := metricsMethodLabel(r.Method)
 
-			httpRequestsTotal.WithLabelValues(r.Method, path, strconv.Itoa(ww.Status())).Inc()
-			httpRequestDuration.WithLabelValues(r.Method, path).Observe(duration)
+			httpRequestsTotal.WithLabelValues(method, path, strconv.Itoa(ww.Status())).Inc()
+			httpRequestDuration.WithLabelValues(method, path).Observe(duration)
 		})
 	}
 }

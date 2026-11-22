@@ -63,10 +63,7 @@ func (r *Reader) snapshotPrincipalsLocked() *principalSnapshot {
 		s.listErr = fmt.Errorf("reading tenants dir: %w", err)
 		return s
 	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
+	for _, entry := range r.tenantDirs(entries) {
 		t, err := r.readTenant(entry.Name())
 		if errors.Is(err, fs.ErrNotExist) {
 			// No values.yaml: not a tenant.
