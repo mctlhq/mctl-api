@@ -58,12 +58,13 @@ func TestOccurrenceKeys(t *testing.T) {
 	}
 }
 
-// T2: the key depends only on (producer, type, stable id), never a delivery id.
-func TestEventKeyIgnoresDelivery(t *testing.T) {
-	first := eventKey("au_1", "event", "github", "check_run", "evt-9")
-	second := eventKey("au_1", "event", "github", "check_run", "evt-9")
-	if first != second {
-		t.Fatal("same stable producer event id must give one key")
+// T2: the key for a stable producer event is pinned. A delivery id is not an
+// input of EventSource, so the key cannot depend on it; the golden value also
+// catches an accidental change to the encoding or the domain tag.
+func TestEventKeyGolden(t *testing.T) {
+	const want = "occ_bec475851dfb6bc2e01779c037eecde5"
+	if got := eventKey("au_1", "event", "github", "check_run", "evt-9"); got != want {
+		t.Fatalf("event key = %q, want %q", got, want)
 	}
 }
 
