@@ -139,7 +139,7 @@ func TestRemoveCustomDomain_RegistryWarningRedacted(t *testing.T) {
 // Prompt handlers are not covered by the tool middleware, so the platform
 // skill prompt must redact its own upstream errors.
 func TestPromptPlatformSkill_UpstreamErrorRedacted(t *testing.T) {
-	for name, body := range map[string]string{
+	for name, body := range map[string]string{ //nolint:gosec // G101: synthetic credentials in the fixtures below
 		"500":       `{"error":"dial postgres://admin:hunter2@db.team-a.svc.cluster.local:5432 refused"}`, //nolint:gosec // G101: synthetic credentials, the test asserts they are redacted
 		"malformed": ``,
 	} {
