@@ -305,6 +305,11 @@
       "reason": "Admin-only read of Argo CD sync windows of one AppProject, and one application's canSync state. Read-only; exposes platform deploy scheduling; not enabled on the shared portal, an owner decision."
     },
     {
+      "name": "mctl_propose_release_window",
+      "enabled": false,
+      "reason": "Admin-only request and execution of one Argo CD deny sync window: the owner decides on an MFA page, the execute call opens a gitops pull request and merges nothing. Changes deploy scheduling; not enabled on the shared portal, an owner decision."
+    },
+    {
       "name": "mctl_list_agent_versions",
       "enabled": true,
       "reason": "Published versions of an mctl-agents agent with manifest, git SHA, image reference and prompt hash; release metadata, no tenant data."
