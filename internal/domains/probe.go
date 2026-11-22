@@ -104,6 +104,11 @@ func (p *HTTPSProber) Probe(ctx context.Context, host string) error {
 	return err
 }
 
+// Permanent reports a refusal retrying cannot change (a non-public or
+// unprobeable host). Every other failure, such as a 404 before ingress sync or
+// a TLS error before the certificate is issued, may still clear.
+func (e *ProbeError) Permanent() bool { return e.permanent() }
+
 // permanent reports a refusal retrying cannot change.
 func (e *ProbeError) permanent() bool { return e.Hint == hintNonPublic || e.Hint == hintBadHost }
 

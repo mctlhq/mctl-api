@@ -587,23 +587,32 @@ func TestUpdateDomainStatus_ActiveNeedsAnObservedHTTPSAnswer(t *testing.T) {
 		t.Fatalf("row = %+v, want active", d)
 	}
 
-	// Probe fails: 502, row failed with the hint, never active.
-	bad := &fakeDomainProber{err: &domains.ProbeError{Hint: "HTTP 520: origin TLS handshake problem"}}
+	// Probe fails transiently (ingress/cert not ready yet): 503 + Retry-After,
+	// the row keeps its status so a retry can still activate it.
+	bad := &fakeDomainProber{err: &domains.ProbeError{Hint: "HTTP 404: ingress did not match the host"}}
 	rec, id = patchActive(t, store, bad, "probe-bad.example.com")
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502; body=%q", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("status = %d retry-after=%q, want 503 with Retry-After; body=%q", rec.Code, rec.Header().Get("Retry-After"), rec.Body.String())
 	}
 	d, _ := store.Get(context.Background(), id)
-	if d == nil || d.Status != domains.StatusFailed || !strings.Contains(d.LastError, "520") {
-		t.Fatalf("row = %+v, want failed with the hint", d)
+	if d == nil || d.Status == domains.StatusFailed || d.Status == domains.StatusActive || !strings.Contains(d.LastError, "404") {
+		t.Fatalf("row = %+v, want unchanged non-terminal status with the hint", d)
 	}
 
-	// A prober error that is not a ProbeError is still not active.
+	// A permanent refusal is terminal: 502, row failed.
+	perm := &fakeDomainProber{err: &domains.ProbeError{Hint: "domain resolves to a non-public address; refusing to probe it"}}
+	rec, id = patchActive(t, store, perm, "probe-perm.example.com")
+	d, _ = store.Get(context.Background(), id)
+	if rec.Code != http.StatusBadGateway || d == nil || d.Status != domains.StatusFailed {
+		t.Fatalf("status=%d row=%+v, want 502 and failed", rec.Code, d)
+	}
+
+	// A prober error that is not a ProbeError is never active and leaks no raw error.
 	odd := &fakeDomainProber{err: errors.New("dial 10.0.0.7: connection refused")}
 	rec, id = patchActive(t, store, odd, "probe-odd.example.com")
 	d, _ = store.Get(context.Background(), id)
-	if rec.Code != http.StatusBadGateway || d.Status != domains.StatusFailed || strings.Contains(d.LastError, "10.0.0.7") {
-		t.Fatalf("status=%d row=%+v, want failed without the raw transport error", rec.Code, d)
+	if rec.Code != http.StatusServiceUnavailable || d.Status == domains.StatusActive || strings.Contains(d.LastError, "10.0.0.7") || strings.Contains(rec.Body.String(), "10.0.0.7") {
+		t.Fatalf("status=%d row=%+v, want 503, not active, no raw transport error", rec.Code, d)
 	}
 
 	// No prober configured: cannot probe, so not active and the row is untouched.

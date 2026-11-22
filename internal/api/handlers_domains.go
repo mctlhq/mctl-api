@@ -761,8 +761,23 @@ func (h *Handlers) probeBeforeActive(w http.ResponseWriter, r *http.Request, id 
 	var pe *domains.ProbeError
 	if errors.As(perr, &pe) {
 		hint = pe.Error()
+	} else {
+		pe = nil
 	}
 	slog.Warn("custom domain not verified over https", "domain", d.Domain, "id", id)
+	// The workflow calls back right after the ingress push, before ArgoCD
+	// has synced or the certificate exists, so an unanswered probe is usually
+	// "not yet", not "never". Only a permanent refusal is terminal; anything
+	// else keeps the row's status, records the hint and asks the caller to
+	// retry. Never active either way.
+	if pe == nil || !pe.Permanent() {
+		if err := h.opts.DomainStore.SetStatus(r.Context(), id, d.Status, hint); err != nil {
+			slog.Error("failed to record domain probe hint", "id", id, "error", err)
+		}
+		w.Header().Set("Retry-After", "10")
+		writeError(w, http.StatusServiceUnavailable, "domain is not active yet: "+hint)
+		return false
+	}
 	if err := h.opts.DomainStore.SetStatus(r.Context(), id, domains.StatusFailed, hint); err != nil {
 		slog.Error("failed to record domain probe failure", "id", id, "error", err)
 	}
