@@ -1,5 +1,15 @@
 # Changelog
 
+## [4.173.1](https://github.com/mctlhq/mctl-api/compare/4.173.0...4.173.1) (2026-11-22)
+
+
+### Bug Fixes
+
+* **release-window:** keep the specific state answer for an expired executed window ([fbe1210](https://github.com/mctlhq/mctl-api/commit/fbe12108e90af7a216982e58216fa8285745134a))
+* **release-window:** settle after a client disconnect and report an expired claim ([acee68a](https://github.com/mctlhq/mctl-api/commit/acee68afdc370628a665030cab1672eda7cdaad8))
+* **release-window:** settle after a client disconnect and report an expired claim ([07942f8](https://github.com/mctlhq/mctl-api/commit/07942f89adad2b5754c81e80317308bbf9945126))
+* **release-window:** start the settle deadline after the dispatch returns ([eec20ff](https://github.com/mctlhq/mctl-api/commit/eec20ffad7cd84cc736a0346b318462d5ef43119))
+
 ## [4.173.0](https://github.com/mctlhq/mctl-api/compare/4.172.0...4.173.0) (2026-11-22)
 
 
