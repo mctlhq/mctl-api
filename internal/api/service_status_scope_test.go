@@ -223,3 +223,40 @@ func TestServiceStatus_UnreadableOwnershipFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+// TestServiceStatus_AlreadyPrefixedName: an alert's service label is the
+// qualified {team}-{service} name; it must resolve as-is instead of being
+// double-prefixed into a false "not found".
+func TestServiceStatus_AlreadyPrefixedName(t *testing.T) {
+	argo := &scriptedArgo{fakeArgoCD: fakeArgoCD{apps: map[string]*argocd.AppStatus{
+		"acme-web": {Name: "acme-web", Health: "Healthy", SyncStatus: "Synced", Project: "apps", DestNamespace: "acme"},
+	}}}
+	w := getAs(t, statusRouter(t, argo), "/api/v1/status/acme/acme-web", acmeUser)
+	assertStatus(t, w, http.StatusOK)
+	got, _ := decodeJSON(t, w)["argocd"].(map[string]interface{})
+	if got == nil || got["name"] != "acme-web" {
+		t.Fatalf("argocd = %v, want acme-web resolved as-is", got)
+	}
+}
+
+// TestServiceStatus_PrefixedNameOfAnotherTenantFailsClosed: "acme" asking for
+// "acme-beta-web" names tenant acme-beta's application as-is; its destination
+// namespace is not acme's, so nothing of it may come back.
+func TestServiceStatus_PrefixedNameOfAnotherTenantFailsClosed(t *testing.T) {
+	argo := &scriptedArgo{fakeArgoCD: fakeArgoCD{apps: map[string]*argocd.AppStatus{
+		"acme-beta-web": {Name: "acme-beta-web", Health: "Degraded", SyncStatus: "OutOfSync", Revision: "beta-secret-rev", Project: "apps", DestNamespace: "acme-beta"},
+	}}}
+	w := getAs(t, statusRouter(t, argo), "/api/v1/status/acme/acme-beta-web", acmeUser)
+	assertStatus(t, w, http.StatusOK)
+	if strings.Contains(w.Body.String(), "beta-secret-rev") || decodeJSON(t, w)["argocd"] != nil {
+		t.Fatalf("leaks another tenant's application: %s", w.Body.String())
+	}
+}
+
+// TestServiceStatus_PrefixedNameReadErrorFailsClosed: an unreadable as-is
+// read is an error, not a reason to try the other name.
+func TestServiceStatus_PrefixedNameReadErrorFailsClosed(t *testing.T) {
+	argo := &scriptedArgo{errs: map[string]error{"acme-web": errors.New("argocd returned 502")}}
+	w := getAs(t, statusRouter(t, argo), "/api/v1/status/acme/acme-web", acmeUser)
+	assertStatus(t, w, http.StatusServiceUnavailable)
+}
