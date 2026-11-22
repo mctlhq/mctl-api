@@ -301,13 +301,13 @@
     },
     {
       "name": "mctl_get_sync_windows",
-      "enabled": false,
-      "reason": "Admin-only read of Argo CD sync windows of one AppProject, and one application's canSync state. Read-only; exposes platform deploy scheduling; not enabled on the shared portal, an owner decision."
+      "enabled": true,
+      "reason": "Admin-only read of Argo CD sync windows of one AppProject, and one application's canSync state. Read-only; exposes platform deploy scheduling, which a non-admin caller is refused by the API itself. Enabled on the shared portal by owner decision 2026-11-22: the owner is the only user of the portal, and the mctl API's own role check, not the portal switch, is the access control."
     },
     {
       "name": "mctl_propose_release_window",
-      "enabled": false,
-      "reason": "Admin-only request and execution of one Argo CD deny sync window: the owner decides on an MFA page, the execute call opens a gitops pull request and merges nothing. Changes deploy scheduling; not enabled on the shared portal, an owner decision."
+      "enabled": true,
+      "reason": "Admin-only request and execution of one Argo CD deny sync window: the owner decides on an MFA page, the execute call opens a gitops pull request and merges nothing, so a caller here can ask for a window but cannot approve or merge it. Enabled on the shared portal by owner decision 2026-11-22: the owner is the only user of the portal, and the mctl API's own role check, MFA approval and receipt gate are the access control."
     },
     {
       "name": "mctl_list_agent_versions",

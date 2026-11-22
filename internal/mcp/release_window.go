@@ -28,7 +28,7 @@ Call 2 (approval_id, nothing else): once the owner approved, spends that approva
 Only the project apps or platform, 1-20 applications of that project, deny windows only, and only the requester can execute. Never touches the default project.`),
 		mcplib.WithString("approval_id", mcplib.Description("Call 2: the approval id (aar_...) the owner approved. Give only this; the window fields are then not accepted.")),
 		mcplib.WithString("project", mcplib.Description("Call 1: Argo CD AppProject, apps or platform")),
-		mcplib.WithArray("applications", mcplib.Description("Call 1: Application names in that project, e.g. [\"labs-mctl-web\"]"), mcplib.WithStringItems()),
+		mcplib.WithArray("applications", mcplib.Description("Call 1: Application names in that project, e.g. [\"labs-portfolio\"]"), mcplib.WithStringItems()),
 		mcplib.WithString("schedule", mcplib.Description("Call 1: cron schedule in Argo CD syntax, UTC, e.g. \"0 22 * * 5\"")),
 		mcplib.WithString("duration", mcplib.Description("Call 1: how long the window lasts, hours then minutes, e.g. 48h or 1h30m")),
 	)
