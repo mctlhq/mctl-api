@@ -224,7 +224,6 @@ type windowShown struct {
 	approval *workitems.ActionApprovalRequest
 	window   workitems.ReleaseWindow
 	windowID string
-	hash     string
 	preview  []windowAppPreview
 	repo     string
 }
