@@ -25,14 +25,17 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/auth/cimd"
+	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
 // OAuthMeta is returned by /.well-known/oauth-authorization-server (RFC 8414).
@@ -395,6 +398,18 @@ var oauthInvalidTarget = prometheus.NewCounterVec(prometheus.CounterOpts{
 
 func init() { prometheus.MustRegister(oauthInvalidTarget) }
 
+// oauthClientRegistrations counts POST /oauth/register outcomes
+// (mctl-api#200). The result label is a closed set, never caller input:
+// registered, unauthorized, invalid_metadata, redirect_rejected, error.
+// Requests dropped by the rate limiter never reach the handler and are
+// counted by the HTTP middleware's 429s instead.
+var oauthClientRegistrations = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "oauth_client_registrations_total",
+	Help: "Dynamic client registration outcomes on POST /oauth/register (mctl-api#200).",
+}, []string{"result"})
+
+func init() { prometheus.MustRegister(oauthClientRegistrations) }
+
 // handleOAuthToken exchanges an authorization code or refresh token for an access token.
 //
 // POST /oauth/token
@@ -643,6 +658,7 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 	if token := h.opts.OAuthRegistrationToken; token != "" {
 		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if got == r.Header.Get("Authorization") || !hmac.Equal([]byte(got), []byte(token)) {
+			oauthClientRegistrations.WithLabelValues("unauthorized").Inc()
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			_ = json.NewEncoder(w).Encode(map[string]string{
@@ -667,6 +683,7 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 		err = json.Unmarshal(raw, &req)
 	}
 	if err != nil {
+		oauthClientRegistrations.WithLabelValues("invalid_metadata").Inc()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{
@@ -682,6 +699,7 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 	// registration, so two different byte strings would otherwise quietly
 	// become one client under a name neither of them sent.
 	if !utf8.Valid(raw) {
+		oauthClientRegistrations.WithLabelValues("invalid_metadata").Inc()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{
@@ -692,6 +710,7 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(req.RedirectURIs) == 0 {
+		oauthClientRegistrations.WithLabelValues("invalid_metadata").Inc()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{
@@ -715,6 +734,7 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 			// the allowlist itself; bound it so an oversized submission
 			// cannot inflate the response or the log line.
 			shown := truncateEchoedValue(uri)
+			oauthClientRegistrations.WithLabelValues("redirect_rejected").Inc()
 			slog.Warn("OAuth client registration rejected: redirect_uri not allowed",
 				"redirect_uri", shown, "client_name", truncateEchoedValue(req.ClientName))
 			w.Header().Set("Content-Type", "application/json")
@@ -732,6 +752,7 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 	// returns the same client_id, and the id survives a restart.
 	client, err := o.RegisterDynamicClient(req.ClientName, req.RedirectURIs)
 	if err != nil {
+		oauthClientRegistrations.WithLabelValues("error").Inc()
 		slog.Error("OAuth client registration failed", "error", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -752,6 +773,24 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 		loggedURIs = append(loggedURIs, truncateEchoedValue(uri))
 	}
 	slog.Info("OAuth client registered", "client_id", client.ClientID, "client_name", truncateEchoedValue(client.ClientName), "redirect_uris", loggedURIs)
+	oauthClientRegistrations.WithLabelValues("registered").Inc()
+	// The registration is an unauthenticated write, so the durable record is
+	// what an operator reads after a spike (mctl-api#200). Only bounded,
+	// non-secret fields: the client id, a truncated name, and the count and
+	// schemes of the redirect URIs -- never the URIs themselves, whose paths
+	// and queries are caller-controlled.
+	h.logAudit(r, audit.Entry{
+		UserID:    audit.UserOAuthRegistration,
+		Operation: audit.OperationOAuthClientRegister,
+		Parameters: map[string]string{
+			"client_id":           client.ClientID,
+			"client_name":         truncateEchoedValue(client.ClientName),
+			"redirect_uri_count":  strconv.Itoa(len(client.RedirectURIs)),
+			"redirect_uri_scheme": redirectSchemes(client.RedirectURIs),
+		},
+		Status:    "succeeded",
+		RiskLevel: string(operations.RiskLow),
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -769,6 +808,27 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 		// usual case, and the Cloudflare portal's -- named none.
 		"scope": oauthScope,
 	})
+}
+
+// redirectSchemes returns the distinct URI schemes of uris, sorted and
+// comma-joined, for the registration audit row. A URI that does not parse
+// contributes "invalid" rather than its text.
+func redirectSchemes(uris []string) string {
+	seen := map[string]bool{}
+	for _, raw := range uris {
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme == "" {
+			seen["invalid"] = true
+			continue
+		}
+		seen[strings.ToLower(truncateEchoedValue(u.Scheme))] = true
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return strings.Join(out, ",")
 }
 
 // ─── GitHub OAuth helpers ─────────────────────────────────────────────────────

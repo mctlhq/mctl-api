@@ -982,7 +982,7 @@ var operationToTool = map[string]string{
 // serviceEnumOperationToTool maps the four DevLoop operations whose
 // `service` parameter carries an Enum to the MCP tool that mirrors it.
 // mctl-agents-single-service is intentionally excluded (a deliberately
-// shorter, unrelated list of eight rotating service-agent targets) and
+// shorter, unrelated list of seven rotating service-agent targets) and
 // mctl-agents-incidents is intentionally excluded (its registry `service`
 // parameter does carry an Enum, but mctl_trigger_incident_responder exposes
 // no `service` argument, so there is nothing to mirror) — see
