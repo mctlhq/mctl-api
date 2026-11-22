@@ -430,6 +430,19 @@ const (
 // Every service enum in this repository is derived from it.
 var mctlAgentsServices = []string{"mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway", "mctl-claude-remote", "mctl-alice", "mctl-support"}
 
+// mctlAgentsSingleServiceServices is the deliberately shorter list of
+// rotating service-agent targets for mctl-agents-single-service: only the
+// services that have an agents/<svc> scaffold directory in mctl-agents.
+// run_service_agent.py exits with "Agent directory not found" for any other
+// service, so widening this list turns a 400 at validation into a failed
+// workflow. It is NOT derived from mctlAgentsServices.
+var mctlAgentsSingleServiceServices = []string{"mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"}
+
+// MctlAgentsSingleServiceServices returns a copy of the single-service list.
+func MctlAgentsSingleServiceServices() []string {
+	return append([]string(nil), mctlAgentsSingleServiceServices...)
+}
+
 // mctlAgentsServiceEnum is mctlAgentsServices plus "" for "all / unused".
 var mctlAgentsServiceEnum = append([]string{""}, mctlAgentsServices...)
 
@@ -864,7 +877,7 @@ var builtinOperations = []Operation{
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/"},
 		Parameters: []ParameterDef{
 			{Name: "mode", Type: "string", Required: false, Default: "single-service", Description: "Run mode (locked to 'single-service')", Enum: []string{"single-service"}},
-			{Name: "service", Type: "string", Required: true, Description: "Which service-agent to run", Enum: MctlAgentsServices()},
+			{Name: "service", Type: "string", Required: true, Description: "Which service-agent to run", Enum: MctlAgentsSingleServiceServices()},
 		},
 	},
 	{

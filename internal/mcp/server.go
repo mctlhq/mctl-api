@@ -2956,7 +2956,7 @@ Admin-only. Returns workflow_name.`),
 		mcplib.WithString("service",
 			mcplib.Required(),
 			mcplib.Description("Which service-agent to run"),
-			mcplib.Enum(operations.MctlAgentsServices()...),
+			mcplib.Enum(operations.MctlAgentsSingleServiceServices()...),
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {

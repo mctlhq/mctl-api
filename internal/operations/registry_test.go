@@ -830,13 +830,40 @@ func TestEveryMctlAgentsServiceEnumIsDerived(t *testing.T) {
 			if p.Name != "service" || len(p.Enum) == 0 {
 				continue
 			}
+			if op.Name == "mctl-agents-single-service" {
+				// Deliberately shorter list; pinned by
+				// TestSingleServiceEnumIsScaffoldedServicesOnly.
+				continue
+			}
 			checked++
 			if !reflect.DeepEqual(p.Enum, mctlAgentsServices) && !reflect.DeepEqual(p.Enum, mctlAgentsServiceEnum) {
 				t.Errorf("operation %q service enum %v is not derived from mctlAgentsServices", op.Name, p.Enum)
 			}
 		}
 	}
-	if checked < 5 {
+	if checked < 4 {
 		t.Fatalf("only %d mctl-agents-* service enums found; the walk is not seeing the operations", checked)
 	}
+}
+
+// TestSingleServiceEnumIsScaffoldedServicesOnly pins the single-service enum
+// to the services that have an agents/<svc> scaffold directory in mctl-agents.
+// run_service_agent.py exits with "Agent directory not found" for anything
+// else, so a wider enum would submit workflows that fail instead of returning
+// a 400 at validation.
+func TestSingleServiceEnumIsScaffoldedServicesOnly(t *testing.T) {
+	want := []string{"mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"}
+	op, ok := NewRegistry().Get("mctl-agents-single-service")
+	if !ok {
+		t.Fatal("mctl-agents-single-service not registered")
+	}
+	for _, p := range op.Parameters {
+		if p.Name == "service" {
+			if !reflect.DeepEqual(p.Enum, want) {
+				t.Fatalf("single-service enum = %v, want %v", p.Enum, want)
+			}
+			return
+		}
+	}
+	t.Fatal("single-service has no service parameter")
 }
