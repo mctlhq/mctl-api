@@ -79,6 +79,15 @@ const OperationSupportRequest = "support.request"
 // support-audience token minted for the MCP support tools (mctl-api#852).
 const OperationSupportTokenMint = "support.token_mint"
 
+// OperationOAuthClientRegister is the operation of the row written for every
+// successful dynamic client registration on POST /oauth/register
+// (mctl-api#200). The endpoint is unauthenticated, so the row's UserID is the
+// fixed UserOAuthRegistration, not a caller-supplied value.
+const OperationOAuthClientRegister = "oauth.client_register"
+
+// UserOAuthRegistration is the UserID of registration rows.
+const UserOAuthRegistration = "oauth-dcr"
+
 // OperationAgentScopeDenied is the operation of a scope refusal row.
 const OperationAgentScopeDenied = "agent_scope.denied"
 

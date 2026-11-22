@@ -22,6 +22,9 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 )
 
@@ -238,4 +241,60 @@ func postRegister(router http.Handler, body, bearer string) *httptest.ResponseRe
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	return rec
+}
+
+// TestOAuthRegister_AuditsAndCountsRegistrations covers mctl-api#200: a
+// successful registration writes one audit row and bumps the counter, a
+// refused one bumps its own result label and writes no audit row, and the row
+// never carries the redirect URI itself.
+func TestOAuthRegister_AuditsAndCountsRegistrations(t *testing.T) {
+	log := audit.NewLogger()
+	router := NewRouter(Options{OAuthServer: newTestOAuth(), AuditLog: log})
+	counter := func(result string) float64 {
+		return testutil.ToFloat64(oauthClientRegistrations.WithLabelValues(result))
+	}
+	registeredBefore, rejectedBefore := counter("registered"), counter("redirect_rejected")
+
+	rec := postRegister(router, `{"client_name":"cli","redirect_uris":["http://127.0.0.1:9/callback?secret=hunter2"]}`, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		ClientID string `json:"client_id"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+
+	if rec := postRegister(router, `{"client_name":"evil","redirect_uris":["https://evil.com/cb"]}`, ""); rec.Code != http.StatusBadRequest {
+		t.Fatalf("rejected status = %d, want 400", rec.Code)
+	}
+
+	if got := counter("registered") - registeredBefore; got != 1 {
+		t.Errorf("registered counter delta = %v, want 1", got)
+	}
+	if got := counter("redirect_rejected") - rejectedBefore; got != 1 {
+		t.Errorf("redirect_rejected counter delta = %v, want 1", got)
+	}
+
+	var rows []audit.Entry
+	for _, e := range log.List(50) {
+		if e.Operation == audit.OperationOAuthClientRegister {
+			rows = append(rows, e)
+		}
+	}
+	if len(rows) != 1 {
+		t.Fatalf("registration audit rows = %d, want exactly 1 (refusals are not audited here)", len(rows))
+	}
+	row := rows[0]
+	if row.Parameters["client_id"] != resp.ClientID || row.Parameters["client_name"] != "cli" ||
+		row.Parameters["redirect_uri_count"] != "1" || row.Parameters["redirect_uri_scheme"] != "http" {
+		t.Errorf("audit parameters = %v", row.Parameters)
+	}
+	if row.UserID != audit.UserOAuthRegistration || row.Status != "succeeded" {
+		t.Errorf("audit row user/status = %q/%q", row.UserID, row.Status)
+	}
+	if b, _ := json.Marshal(row); strings.Contains(string(b), "hunter2") || strings.Contains(string(b), "127.0.0.1:9") {
+		t.Errorf("audit row leaks the redirect URI: %s", b)
+	}
 }
