@@ -36,6 +36,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/argocd"
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/k8s"
 	"github.com/mctlhq/mctl-api/internal/loki"
 	"github.com/mctlhq/mctl-api/internal/operations"
@@ -153,6 +154,10 @@ func (h *Handlers) GetTenant(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tenant, err := h.opts.GitReader.GetTenant(name)
+	if errors.Is(err, gitops.ErrInvalidTenantName) {
+		writeError(w, http.StatusBadRequest, "invalid tenant name")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusNotFound, "tenant not found: "+name)
 		return
@@ -255,9 +260,27 @@ func (h *Handlers) GetServiceStatus(w http.ResponseWriter, r *http.Request) {
 	// tenant "acme-beta"'s app "web". Ownership is the destination namespace,
 	// so only an application that deploys into the caller's tenant counts.
 	argoAppName := team + "-" + app
-	status, found, err := h.tenantAppStatus(argoAppName, team)
-	if err == nil && !found {
-		status, found, err = h.tenantAppStatus("preview-"+argoAppName, team, team+"-preview")
+	// A caller may pass the already-qualified {team}-{service} name, as an
+	// alert's service label is. Try that as-is first; ownership is still the
+	// destination namespace, so a name that belongs to another tenant is not
+	// found and the lookup falls through to the double-prefixed name.
+	candidates := []string{argoAppName}
+	if strings.HasPrefix(app, team+"-") {
+		candidates = []string{app, argoAppName}
+	}
+	var (
+		status *argocd.AppStatus
+		found  bool
+		err    error
+	)
+	for _, name := range candidates {
+		status, found, err = h.tenantAppStatus(name, team)
+		if err == nil && !found {
+			status, found, err = h.tenantAppStatus("preview-"+name, team, team+"-preview")
+		}
+		if err != nil || found {
+			break
+		}
 	}
 	if err != nil {
 		slog.Warn("service status: argocd read failed", "team", team, "app", app, "error", err)
@@ -849,6 +872,10 @@ func (h *Handlers) GetResourceUsage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	t, err := h.opts.GitReader.GetTenant(tenant)
+	if errors.Is(err, gitops.ErrInvalidTenantName) {
+		writeError(w, http.StatusBadRequest, "invalid tenant name")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusNotFound, "tenant not found: "+tenant)
 		return

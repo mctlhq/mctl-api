@@ -500,7 +500,14 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 	issue := func(login, principalID string) {
 		var groups []string
 		if h.opts.TenantAuthzMode != TenantAuthzPrincipal && login != "" {
-			groups = o.ResolveGroups(login)
+			var gerr error
+			if groups, gerr = o.ResolveGroups(r.Context(), login); gerr != nil {
+				// Fail closed (mctl-api#158): never mint from a failed lookup.
+				slog.Error("oauth: failed to resolve tenant groups at login", "error", gerr)
+				result = "server_error"
+				oauthError(w, pending.RedirectURI, pending.ClientState, "server_error", "sign-in could not be completed; try again")
+				return
+			}
 		}
 		result = h.finishAuthorization(w, r, authzCompletion{
 			Login: login, PrincipalID: principalID, Groups: groups,

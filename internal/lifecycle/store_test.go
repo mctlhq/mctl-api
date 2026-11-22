@@ -1651,7 +1651,7 @@ func TestHandoffStartUpdateRefusesTheStateItDidNotRead(t *testing.T) {
 	restarted, err := scanOne(s.pool.QueryRow(ctx, handoffStartUpdateSQL,
 		StateHandingOff, shepherd.Type, shepherd.ID, now, now, now,
 		entity.Kind, entity.ID, PhaseReviewRemediation, begun.Epoch, StateActive,
-		"", ""))
+		"", "", begun.LastSeenAt))
 	if err == nil {
 		t.Fatalf("a stale active read restarted the handoff clock to %v", restarted.HandoffStartedAt)
 	}
@@ -1677,7 +1677,7 @@ func TestHandoffStartUpdateRefusesTheStateItDidNotRead(t *testing.T) {
 	ok, err := scanOne(s.pool.QueryRow(ctx, handoffStartUpdateSQL,
 		StateHandingOff, other.Type, other.ID, now, begun.LastSeenAt, now,
 		entity.Kind, entity.ID, PhaseReviewRemediation, begun.Epoch, StateHandingOff,
-		shepherd.Type, shepherd.ID))
+		shepherd.Type, shepherd.ID, begun.LastSeenAt))
 	if err != nil {
 		t.Fatalf("the statement refused the state the row really has: %v", err)
 	}
@@ -2590,7 +2590,7 @@ func TestAStalledReannouncementCannotRevertARetarget(t *testing.T) {
 	_, err = scanOne(s.pool.QueryRow(ctx, handoffStartUpdateSQL,
 		StateHandingOff, first.Type, first.ID, *started.HandoffStartedAt, started.LastSeenAt, time.Now().UTC(),
 		entity.Kind, entity.ID, PhaseReviewRemediation, got.Epoch, StateHandingOff,
-		first.Type, first.ID))
+		first.Type, first.ID, started.LastSeenAt))
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("a stalled re-announcement reverted an acknowledged retarget: %v", err)
 	}
@@ -2628,7 +2628,7 @@ func TestAStalledReannouncementCannotRevertARetarget(t *testing.T) {
 	if _, err := scanOne(blocker.QueryRow(ctx, handoffStartUpdateSQL,
 		StateHandingOff, third.Type, third.ID, time.Now().UTC(), now.LastSeenAt, time.Now().UTC(),
 		entity.Kind, entity.ID, PhaseReviewRemediation, got.Epoch, StateHandingOff,
-		second.Type, second.ID)); err != nil {
+		second.Type, second.ID, now.LastSeenAt)); err != nil {
 		_ = blocker.Rollback(ctx)
 		t.Fatalf("blocker retarget: %v", err)
 	}
@@ -2916,7 +2916,7 @@ func TestAnOverlappingDuplicateHandoffStartSucceeds(t *testing.T) {
 	landed, err := scanOne(winner.QueryRow(ctx, handoffStartUpdateSQL,
 		StateHandingOff, second.Type, second.ID, time.Now().UTC(), begun.LastSeenAt, time.Now().UTC(),
 		entity.Kind, entity.ID, PhaseReviewRemediation, got.Epoch, StateHandingOff,
-		first.Type, first.ID))
+		first.Type, first.ID, begun.LastSeenAt))
 	if err != nil {
 		t.Fatalf("winner announcement: %v", err)
 	}
@@ -3286,5 +3286,67 @@ func TestEventsRecordCallerPrincipal(t *testing.T) {
 	}
 	if got[EventOwnerAcquired] != "prn_AGENT/prn_TELEGRAM" || got[EventProgress] != "/" {
 		t.Fatalf("events = %v", got)
+	}
+}
+
+// TestHandoffStartUpdateRefusesAStaleLivenessRead pins last_seen_at in
+// handoffStartUpdateSQL (mctl-api#343). A HandoffStart that read the row, then
+// lost a heartbeat race, must not write its stale last_seen_at back over the
+// fresher one. Driven at the SQL level with a connection that takes no
+// advisory lock, because inTx would otherwise serialise the two writers.
+func TestHandoffStartUpdateRefusesAStaleLivenessRead(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	entity := pr(prefix, "handoff-liveness-sql")
+	owner := devloop("wf-1")
+
+	got, err := s.Acquire(ctx, AcquireRequest{Entity: entity, Phase: PhaseReviewRemediation, Owner: owner})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	stale, err := s.Get(ctx, entity, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	// The heartbeat that lands after the read.
+	time.Sleep(5 * time.Millisecond)
+	if _, err := s.RecordProgress(ctx, entity, PhaseReviewRemediation, owner, got.Epoch, "heartbeat"); err != nil {
+		t.Fatalf("progress: %v", err)
+	}
+	fresh, err := s.Get(ctx, entity, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get fresh: %v", err)
+	}
+	if !fresh.LastSeenAt.After(stale.LastSeenAt) {
+		t.Fatalf("test setup: heartbeat did not advance last_seen_at (%s -> %s)", stale.LastSeenAt, fresh.LastSeenAt)
+	}
+
+	now := time.Now().UTC()
+	_, err = scanOne(s.pool.QueryRow(ctx, handoffStartUpdateSQL,
+		StateHandingOff, shepherd.Type, shepherd.ID, now, stale.LastSeenAt, now,
+		entity.Kind, entity.ID, PhaseReviewRemediation, got.Epoch, StateActive,
+		"", "", stale.LastSeenAt))
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a stale liveness read overwrote a concurrent heartbeat: %v", err)
+	}
+	after, err := s.Get(ctx, entity, PhaseReviewRemediation)
+	if err != nil {
+		t.Fatalf("get after: %v", err)
+	}
+	if !after.LastSeenAt.Equal(fresh.LastSeenAt) || after.State != StateActive {
+		t.Fatalf("refused write still changed the row: last_seen %s -> %s, state %s",
+			fresh.LastSeenAt, after.LastSeenAt, after.State)
+	}
+
+	// Other direction: the liveness the row really has lets the same statement land.
+	ok, err := scanOne(s.pool.QueryRow(ctx, handoffStartUpdateSQL,
+		StateHandingOff, shepherd.Type, shepherd.ID, now, fresh.LastSeenAt, now,
+		entity.Kind, entity.ID, PhaseReviewRemediation, got.Epoch, StateActive,
+		"", "", fresh.LastSeenAt))
+	if err != nil {
+		t.Fatalf("the statement refused the liveness the row really has: %v", err)
+	}
+	if ok.State != StateHandingOff {
+		t.Fatalf("handoff did not land: %s", ok.State)
 	}
 }

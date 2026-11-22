@@ -22,6 +22,7 @@ package auth
 // token and is not itself laundered through ValidateJWT's own re-resolution.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -956,8 +957,8 @@ func TestResolveGroupsAtLoginSkipsNegativeCache(t *testing.T) {
 	server.TenantResolver = resolver
 	server.noteResolverFailure(errors.New("transient"))
 
-	if groups := server.ResolveGroups("dmitrii"); !slices.Equal(groups, []string{"acme"}) {
-		t.Fatalf("expected login to bypass the negative cache, got %v", groups)
+	if groups, err := server.ResolveGroups(context.Background(), "dmitrii"); err != nil || !slices.Equal(groups, []string{"acme"}) {
+		t.Fatalf("expected login to bypass the negative cache, got %v, %v", groups, err)
 	}
 	if _, err := server.resolveGroupsChecked("bob"); err == nil {
 		t.Fatalf("expected the per-request path to still honour the negative cache")
@@ -974,8 +975,51 @@ func TestResolveGroupsAtLoginWaitsOutBusyResolver(t *testing.T) {
 	resolver.setBusy(true)
 	server.TenantResolver = resolver
 
-	if groups := server.ResolveGroups("dmitrii"); !slices.Equal(groups, []string{"acme"}) {
-		t.Fatalf("expected login to resolve through the blocking lookup, got %v", groups)
+	if groups, err := server.ResolveGroups(context.Background(), "dmitrii"); err != nil || !slices.Equal(groups, []string{"acme"}) {
+		t.Fatalf("expected login to resolve through the blocking lookup, got %v, %v", groups, err)
+	}
+}
+
+// A resolver failure at login is an error, never an empty or admins-only
+// group set that becomes the refresh-token snapshot (mctl-api#158). Fails if
+// ResolveGroups swallows the error.
+func TestResolveGroupsAtLoginFailsClosedOnResolverError(t *testing.T) {
+	server := newTestOAuthServer(t)
+	resolver := &stubTenantResolver{}
+	resolver.setErr(errors.New("gitops checkout unreachable"))
+	server.TenantResolver = resolver
+
+	groups, err := server.ResolveGroups(context.Background(), "dmitrii")
+	if err == nil {
+		t.Fatalf("expected an error on resolver failure, got groups %v", groups)
+	}
+	if !errors.Is(err, ErrServerError) {
+		t.Fatalf("expected ErrServerError, got %v", err)
+	}
+	if groups != nil {
+		t.Fatalf("expected no groups on failure, got %v", groups)
+	}
+}
+
+// No resolver configured is the feature being off, not a failure.
+func TestResolveGroupsAtLoginWithoutResolverIsNotAnError(t *testing.T) {
+	server := newTestOAuthServer(t)
+	server.TenantResolver = nil
+	if _, err := server.ResolveGroups(context.Background(), "dmitrii"); err != nil {
+		t.Fatalf("expected no error without a resolver, got %v", err)
+	}
+}
+
+// A cancelled request context fails the login rather than minting.
+func TestResolveGroupsAtLoginHonoursCancelledContext(t *testing.T) {
+	server := newTestOAuthServer(t)
+	resolver := &stubTenantResolver{}
+	resolver.setTenants("dmitrii", []string{"acme"})
+	server.TenantResolver = resolver
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := server.ResolveGroups(ctx, "dmitrii"); !errors.Is(err, ErrServerError) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected ErrServerError wrapping context.Canceled, got %v", err)
 	}
 }
 
