@@ -58,6 +58,9 @@ type ReleaseWindowHeadReader interface {
 // ReleaseWindowOptions configures the release window routes.
 type ReleaseWindowOptions struct {
 	Head ReleaseWindowHeadReader
+	// Repository is the owner/name the base commit belongs to; the approval
+	// page links the commit to it. Empty shows the commit as plain text.
+	Repository string
 	// TTL is how long a request stays decidable; zero means 72 hours.
 	TTL time.Duration
 }
@@ -227,13 +230,17 @@ func (h *Handlers) RequestReleaseWindow(w http.ResponseWriter, r *http.Request) 
 	} else {
 		h.releaseWindowAudit(r, user, "release.window.request", "succeeded", "replayed", params)
 	}
-	writeJSON(w, createdStatus(created), map[string]any{
+	out := map[string]any{
 		"schema_version": workitems.ActionApprovalSchemaVersion,
 		"window":         releaseWindowView{Approval: approval, Window: win, WindowID: id, WindowSHA256: hash},
-		"decided_by":     "the owner, signed in fresh with a second factor; a bearer token cannot decide it",
-		"decide_unavailable": "the release window approval page is not enabled on this server, " +
-			"so this request cannot be decided yet",
-	})
+		"decided_by":     "the owner, signed in fresh with a second factor on the release window approval page; a bearer token cannot decide it",
+	}
+	if h.releaseWindowApproval != nil {
+		out["decide_url"] = h.releaseWindowApproval.decideURL(approval.ID)
+	} else {
+		out["decide_unavailable"] = "the release window approval page is not enabled on this server, so this request cannot be decided"
+	}
+	writeJSON(w, createdStatus(created), out)
 }
 
 // ListReleaseWindows answers GET /api/v1/release/windows.
