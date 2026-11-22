@@ -1,5 +1,38 @@
 # Changelog
 
+## [4.173.0](https://github.com/mctlhq/mctl-api/compare/4.172.0...4.173.0) (2026-11-22)
+
+
+### Features
+
+* **oauth:** audit and count dynamic client registrations ([da33bbb](https://github.com/mctlhq/mctl-api/commit/da33bbb4477243512af3abe4e550adb85158f644)), closes [#200](https://github.com/mctlhq/mctl-api/issues/200)
+* **release-window:** execute an approved window by one workflow dispatch (S3) ([e4d29aa](https://github.com/mctlhq/mctl-api/commit/e4d29aaa8656a4cb749aa69095bc8e22ff5ac4ed))
+* **release-window:** execute an approved window by one workflow dispatch (S3) ([549d77b](https://github.com/mctlhq/mctl-api/commit/549d77b5325a2f3f2cfe14d1606adf36e7fd162a))
+* **release-window:** MFA decide page for release.window requests (S2) ([7e040ba](https://github.com/mctlhq/mctl-api/commit/7e040ba0a074da74d455cbe33efb427da18e3874))
+* **release-window:** MFA decide page for release.window requests (S2) ([9a304e3](https://github.com/mctlhq/mctl-api/commit/9a304e348e133698ed0369faefad2ae2539b7670))
+* **release-window:** request and read release.window approvals (S1) ([d9d2ad1](https://github.com/mctlhq/mctl-api/commit/d9d2ad110a6bc1db99dc9f0a8c0082ffd84a85f9))
+* **release-window:** request and read release.window approvals (S1) ([263b16b](https://github.com/mctlhq/mctl-api/commit/263b16b64e0af0fca3129c63aa393e13b4f168c2))
+
+
+### Bug Fixes
+
+* **api:** bound metrics label cardinality for unmatched routes ([ab53064](https://github.com/mctlhq/mctl-api/commit/ab530647fe9f3dcc73052b193fa42a421f4e4870)), closes [#241](https://github.com/mctlhq/mctl-api/issues/241)
+* **api:** resolve already team-prefixed names in service status ([fe27964](https://github.com/mctlhq/mctl-api/commit/fe27964199ab00e3bf95d20ae72ca8c0a25f45d0))
+* **api:** resolve already team-prefixed names in service status ([524d08b](https://github.com/mctlhq/mctl-api/commit/524d08b2ab94fc091e2a10c5bf4ecd3e3a3ca694))
+* **auth:** fail login closed when tenant group resolution fails ([3e53a98](https://github.com/mctlhq/mctl-api/commit/3e53a98800a7d7d8a9ab77a9b58346792a268a75)), closes [#158](https://github.com/mctlhq/mctl-api/issues/158)
+* bound metrics labels, validate tenant names, fail login closed ([5062295](https://github.com/mctlhq/mctl-api/commit/5062295fbd4b1d2c5949d4bd21985b16b8fb5f6c))
+* **gitops:** re-materialize known_hosts when the cached file is gone ([285fd10](https://github.com/mctlhq/mctl-api/commit/285fd1077b7aaa9f133fa0c69094a1334d427620)), closes [#233](https://github.com/mctlhq/mctl-api/issues/233)
+* **gitops:** skip invalidly named tenant directories in scans ([98e8a51](https://github.com/mctlhq/mctl-api/commit/98e8a51664d2f122799d87d334d248ca8211f462))
+* **gitops:** validate tenant names before building a filesystem path ([4f63860](https://github.com/mctlhq/mctl-api/commit/4f63860a4a1c440280fc9d8d6581c7f3ec543245)), closes [#232](https://github.com/mctlhq/mctl-api/issues/232)
+* **lifecycle:** pin last_seen_at in the HandoffStart update ([38d27fb](https://github.com/mctlhq/mctl-api/commit/38d27fba3ea0dd210fed7a03d6666eb4a05dc029)), closes [#343](https://github.com/mctlhq/mctl-api/issues/343)
+* **mcp:** redact upstream errors in remove-domain warning and prompt ([ce800b9](https://github.com/mctlhq/mctl-api/commit/ce800b9b4b400d76a30db1333e873102819d3d91))
+* **mcp:** redact upstream secrets in every tool error result ([7485f79](https://github.com/mctlhq/mctl-api/commit/7485f7927ac9422c4b2c3df6da2e5a5a770b1449))
+* **mcp:** redact upstream secrets in every tool error result ([2307a04](https://github.com/mctlhq/mctl-api/commit/2307a04c79f689a5b57affc7d96aced08b7cba13)), closes [#299](https://github.com/mctlhq/mctl-api/issues/299)
+* **mcp:** strip userinfo before the API-URL match, keep pointer content, nil-safe redactUpstream ([ab57d14](https://github.com/mctlhq/mctl-api/commit/ab57d14eca1e3199b4e3cf7de1008968ce882cb3))
+* **operations:** keep single-service enum to scaffolded services ([d67ff86](https://github.com/mctlhq/mctl-api/commit/d67ff862b2643f12b0905cd8188f66118fe36880)), closes [#274](https://github.com/mctlhq/mctl-api/issues/274)
+* **release-window:** bound the schedule and tighten the duration form ([636f079](https://github.com/mctlhq/mctl-api/commit/636f079eaeb5c37bab1454c941042342675dac77))
+* **release-window:** drop an unused field from the window page ([7d061bf](https://github.com/mctlhq/mctl-api/commit/7d061bf647955f0f02e6d6745d0e3bffb5eadf8d))
+
 ## [4.172.0](https://github.com/mctlhq/mctl-api/compare/4.171.0...4.172.0) (2026-11-21)
 
 
