@@ -60,7 +60,9 @@ func TestOccurrenceKeys(t *testing.T) {
 
 // T2: the key depends only on (producer, type, stable id), never a delivery id.
 func TestEventKeyIgnoresDelivery(t *testing.T) {
-	if eventKey("au_1", "event", "github", "check_run", "evt-9") != eventKey("au_1", "event", "github", "check_run", "evt-9") {
+	first := eventKey("au_1", "event", "github", "check_run", "evt-9")
+	second := eventKey("au_1", "event", "github", "check_run", "evt-9")
+	if first != second {
 		t.Fatal("same stable producer event id must give one key")
 	}
 }

@@ -67,7 +67,7 @@ func ManualSource(principal, tenant, callerKey string) (OccurrenceSource, error)
 }
 
 func appendField(b []byte, s string) []byte {
-	b = binary.BigEndian.AppendUint32(b, uint32(len(s)))
+	b = binary.BigEndian.AppendUint32(b, uint32(len(s))) //nolint:gosec // field values are bounded well below 4 GiB by the schema limits
 	return append(b, s...)
 }
 
