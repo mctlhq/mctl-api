@@ -39,6 +39,12 @@ func newStoreForTest(t *testing.T) *Store {
 			ActionKindReleaseGrant, releaseArtifactForTest("0.0.0").TagCommit); err != nil {
 			t.Fatal(err)
 		}
+		// Release windows bind the mctl-gitops base commit as execution_id and
+		// are idempotent per window and base, for the same reason.
+		if _, err := s.pool.Exec(ctx, "DELETE FROM action_approval_requests WHERE action_kind = $1 AND execution_id = ANY($2)",
+			ActionKindReleaseWindow, []string{rwBase, strings.Repeat("e", 40)}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	wipe()
 	t.Cleanup(func() {
