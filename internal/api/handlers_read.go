@@ -36,6 +36,7 @@ import (
 	"github.com/mctlhq/mctl-api/internal/argocd"
 	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/gitops"
 	"github.com/mctlhq/mctl-api/internal/k8s"
 	"github.com/mctlhq/mctl-api/internal/loki"
 	"github.com/mctlhq/mctl-api/internal/operations"
@@ -153,6 +154,10 @@ func (h *Handlers) GetTenant(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tenant, err := h.opts.GitReader.GetTenant(name)
+	if errors.Is(err, gitops.ErrInvalidTenantName) {
+		writeError(w, http.StatusBadRequest, "invalid tenant name")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusNotFound, "tenant not found: "+name)
 		return
@@ -849,6 +854,10 @@ func (h *Handlers) GetResourceUsage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	t, err := h.opts.GitReader.GetTenant(tenant)
+	if errors.Is(err, gitops.ErrInvalidTenantName) {
+		writeError(w, http.StatusBadRequest, "invalid tenant name")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusNotFound, "tenant not found: "+tenant)
 		return

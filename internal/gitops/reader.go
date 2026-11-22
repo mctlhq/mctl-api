@@ -1086,7 +1086,22 @@ func (r *Reader) memberRolesMatching(namespace string, match memberMatcher) ([][
 	return roles, nil
 }
 
+// tenantNamePattern is the allowlist for a tenant directory name. It is
+// matched against the whole name, anchored with \z so a trailing newline is
+// rejected.
+var tenantNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*\z`)
+
+// ErrInvalidTenantName is returned by readTenant for a name that is not a
+// valid tenant directory name. It deliberately does not wrap fs.ErrNotExist:
+// callers that skip a directory without values.yaml must not skip this.
+var ErrInvalidTenantName = errors.New("invalid tenant name")
+
 func (r *Reader) readTenant(name string) (*Tenant, error) {
+	// name reaches filepath.Join, which cleans ".." upward instead of
+	// refusing it. Reject, never sanitize (mctl-api#232).
+	if !tenantNamePattern.MatchString(name) {
+		return nil, fmt.Errorf("%w: %q", ErrInvalidTenantName, name)
+	}
 	valuesPath := filepath.Join(r.localPath, "platform-gitops", "tenants", name, "values.yaml")
 	data, err := os.ReadFile(valuesPath) //nolint:gosec // path built from trusted repo root
 	if err != nil {
