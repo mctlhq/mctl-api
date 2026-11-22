@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -49,6 +51,10 @@ const (
 	releaseWindowWorkflow    = "release-window-pr.yml"
 	releaseWindowDispatchRef = "main"
 
+	// releaseWindowSettleTimeout is the default bound of each settle after a
+	// dispatch (ReleaseWindowOptions.SettleTimeout overrides it).
+	releaseWindowSettleTimeout = 15 * time.Second
+
 	codeReleaseWindowNotDecided = "release_window_not_decided"
 	codeReleaseWindowDispatch   = "release_window_dispatch_failed"
 	codeReleaseWindowNoDispatch = "release_window_dispatch_unavailable"
@@ -64,6 +70,19 @@ func (o *ReleaseWindowOptions) dispatchRepo() (owner, name, full string) {
 	}
 	owner, name, _ = strings.Cut(full, "/")
 	return owner, name, full
+}
+
+// settleContext is the context of a settle after a dispatch. A request context
+// cancelled by a client disconnect would fail the settle too and leave the
+// approval in flight for the whole reclaim bound, so it is detached from the
+// request. Its deadline is created here, after the dispatch returned, so a
+// slow or timed-out dispatch does not spend the settle's budget.
+func (o *ReleaseWindowOptions) settleContext(parent context.Context) (context.Context, context.CancelFunc) {
+	d := releaseWindowSettleTimeout
+	if o != nil && o.SettleTimeout > 0 {
+		d = o.SettleTimeout
+	}
+	return context.WithTimeout(context.WithoutCancel(parent), d)
 }
 
 // ExecuteReleaseWindow answers POST /api/v1/release/windows/{approval_id}/execute.
@@ -164,9 +183,12 @@ func (h *Handlers) ExecuteReleaseWindow(w http.ResponseWriter, r *http.Request) 
 		"base_sha":      win.BaseSHA,
 		"window_sha256": hash,
 	}
-	if err := h.opts.WorkflowDispatcher.Dispatch(r.Context(), owner, repo, releaseWindowWorkflow, releaseWindowDispatchRef, inputs); err != nil {
+	dispatchErr := h.opts.WorkflowDispatcher.Dispatch(r.Context(), owner, repo, releaseWindowWorkflow, releaseWindowDispatchRef, inputs)
+	if err := dispatchErr; err != nil {
+		settleCtx, cancelSettle := o.settleContext(r.Context())
+		defer cancelSettle()
 		// Not accepted: hand the decision back so a retry needs no new one.
-		if _, serr := h.opts.WorkItems.SettleReleaseWindowApproval(r.Context(), claim, false); serr != nil {
+		if _, serr := h.opts.WorkItems.SettleReleaseWindowApproval(settleCtx, claim, false); serr != nil {
 			slog.Error("release window: could not return the claim after a failed dispatch", "approval", id, "error", serr)
 		}
 		// A dispatch that never reached GitHub is "unavailable"; only a real
@@ -182,7 +204,9 @@ func (h *Handlers) ExecuteReleaseWindow(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	done, serr := h.opts.WorkItems.SettleReleaseWindowApproval(r.Context(), claim, true)
+	settleCtx, cancelSettle := o.settleContext(r.Context())
+	defer cancelSettle()
+	done, serr := h.opts.WorkItems.SettleReleaseWindowApproval(settleCtx, claim, true)
 	resp := map[string]any{
 		"schema_version":    workitems.ActionApprovalSchemaVersion,
 		"status":            "dispatched",

@@ -64,6 +64,8 @@ type recordingDispatcher struct {
 	calls []dispatchCall
 	err   error
 	delay time.Duration
+	// hook, when set, runs inside the call and decides its result.
+	hook func() error
 }
 
 type dispatchCall struct {
@@ -76,9 +78,13 @@ func (d *recordingDispatcher) Dispatch(_ context.Context, owner, repo, workflow,
 		time.Sleep(d.delay)
 	}
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	d.calls = append(d.calls, dispatchCall{owner, repo, workflow, ref, inputs})
-	return d.err
+	hook, err := d.hook, d.err
+	d.mu.Unlock()
+	if hook != nil {
+		return hook()
+	}
+	return err
 }
 
 func (d *recordingDispatcher) count() int {
@@ -105,6 +111,8 @@ type windowFixtureOpts struct {
 	enabled      bool
 	noDispatcher bool
 	repository   string
+	// settleTimeout overrides the settle bound after a dispatch (0 = default).
+	settleTimeout time.Duration
 }
 
 func newWindowFixture(t *testing.T, enabled bool) *windowFixture {
@@ -148,7 +156,7 @@ func newWindowFixtureWith(t *testing.T, fo windowFixtureOpts) *windowFixture {
 		opts.WorkflowDispatcher = f.dispatch
 	}
 	if enabled {
-		opts.ReleaseWindows = &mctlapi.ReleaseWindowOptions{Head: f.head, Repository: fo.repository}
+		opts.ReleaseWindows = &mctlapi.ReleaseWindowOptions{Head: f.head, Repository: fo.repository, SettleTimeout: fo.settleTimeout}
 	}
 	f.router = mctlapi.NewRouter(opts)
 	return f

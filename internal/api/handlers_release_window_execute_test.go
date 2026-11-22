@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
@@ -357,5 +358,66 @@ func TestExecuteReleaseWindowRouteIsDarkByDefault(t *testing.T) {
 	}
 	if f.dispatch.count() != 0 {
 		t.Fatal("a dark route dispatched")
+	}
+}
+
+// executeWithCancel runs execute with a request context that the dispatcher
+// cancels mid-call.
+func executeWithCancel(t *testing.T, f *windowFixture, id string, dispatchErr error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.dispatch.mu.Lock()
+	f.dispatch.hook = func() error { cancel(); return dispatchErr }
+	f.dispatch.mu.Unlock()
+	req := httptest.NewRequest(http.MethodPost, executePath(id), nil).WithContext(auth.WithUser(ctx, adminUser))
+	f.router.ServeHTTP(httptest.NewRecorder(), req)
+}
+
+// A client that goes away during the dispatch must not leave the approval in
+// flight: the settle runs detached from the request.
+func TestExecuteReleaseWindowSettlesAfterTheClientDisconnects(t *testing.T) {
+	t.Run("dispatch accepted", func(t *testing.T) {
+		f := newWindowFixture(t, true)
+		id := f.request(t)
+		f.approve(t, id)
+		executeWithCancel(t, f, id, nil)
+		if got := f.state(t, id); got != workitems.ApprovalExecuted {
+			t.Fatalf("state %s after an accepted dispatch and a disconnect, want executed", got)
+		}
+	})
+	t.Run("dispatch failed", func(t *testing.T) {
+		f := newWindowFixture(t, true)
+		id := f.request(t)
+		f.approve(t, id)
+		executeWithCancel(t, f, id, context.Canceled)
+		if got := f.state(t, id); got != workitems.ApprovalApproved {
+			t.Fatalf("state %s after a failed dispatch and a disconnect, want approved (intact)", got)
+		}
+	})
+}
+
+// A slow dispatch must not spend the settle's budget: the settle's deadline
+// starts when the dispatch returns, so a dispatch slower than the settle bound
+// still settles. (The real dispatcher's HTTP timeout equals the default bound.)
+func TestExecuteReleaseWindowSlowDispatchStillSettles(t *testing.T) {
+	for name, c := range map[string]struct {
+		err  error
+		want string
+	}{
+		"accepted": {nil, workitems.ApprovalExecuted},
+		"failed":   {errors.New("github: timeout"), workitems.ApprovalApproved},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newWindowFixtureWith(t, windowFixtureOpts{enabled: true, settleTimeout: 300 * time.Millisecond})
+			f.dispatch.delay = 700 * time.Millisecond // longer than the settle bound
+			f.dispatch.setErr(c.err)
+			id := f.request(t)
+			f.approve(t, id)
+			postAsRaw(t, f.router, executePath(id), nil, adminUser)
+			if got := f.state(t, id); got != c.want {
+				t.Fatalf("state %s after a slow dispatch, want %s", got, c.want)
+			}
+		})
 	}
 }
