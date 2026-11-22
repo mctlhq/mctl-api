@@ -55,12 +55,19 @@ const (
 
 	// MaxReleaseWindowApplications is the workflow's own bound.
 	MaxReleaseWindowApplications = 20
+	// MaxReleaseWindowScheduleLen bounds the cron text, so that the widest
+	// legal window always fits the target column and an oversized schedule is
+	// refused by Validate, before any GitHub or Argo read.
+	MaxReleaseWindowScheduleLen = 100
 )
 
 var (
 	releaseWindowAppRe      = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{0,62}$`)
 	releaseWindowScheduleRe = regexp.MustCompile(`^[0-9*/,-]+( [0-9*/,-]+){4}$`)
-	releaseWindowDurationRe = regexp.MustCompile(`^([0-9]{1,4}[hm]){1,2}$`)
+	// Hours then minutes, each at least 1 and at most 4 digits with no
+	// leading zero: 48h, 90m, 1h30m. Not 0h, 1h1h or 30m1h. Non-emptiness is
+	// checked in Validate (both groups are optional here).
+	releaseWindowDurationRe = regexp.MustCompile(`^(?:[1-9][0-9]{0,3}h)?(?:[1-9][0-9]{0,3}m)?$`)
 	releaseWindowSHARe      = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	releaseWindowIDRe       = regexp.MustCompile(`^w-[0-9a-f]{12}$`)
 )
@@ -91,9 +98,9 @@ func (w ReleaseWindow) Validate() error {
 		return invalid("release window project %q must be one of %s", w.Project, strings.Join(ReleaseWindowProjects, ", "))
 	case len(w.Applications) == 0 || len(w.Applications) > MaxReleaseWindowApplications:
 		return invalid("release window needs 1-%d applications", MaxReleaseWindowApplications)
-	case !releaseWindowScheduleRe.MatchString(w.Schedule):
+	case len(w.Schedule) > MaxReleaseWindowScheduleLen || !releaseWindowScheduleRe.MatchString(w.Schedule):
 		return invalid("release window schedule %q is not a five-field cron", w.Schedule)
-	case !releaseWindowDurationRe.MatchString(w.Duration):
+	case w.Duration == "" || !releaseWindowDurationRe.MatchString(w.Duration):
 		return invalid("release window duration %q must look like 48h, 90m or 1h30m", w.Duration)
 	case !releaseWindowSHARe.MatchString(w.BaseSHA):
 		return invalid("release window base_sha %q is not a full lower-case SHA-1", w.BaseSHA)

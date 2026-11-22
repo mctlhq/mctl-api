@@ -53,21 +53,30 @@ func TestWindowHashBindsTheProject(t *testing.T) {
 
 func TestReleaseWindowValidateRefuses(t *testing.T) {
 	bad := map[string]func(*ReleaseWindow){
-		"default project":     func(w *ReleaseWindow) { w.Project = "default" },
-		"empty project":       func(w *ReleaseWindow) { w.Project = "" },
-		"no applications":     func(w *ReleaseWindow) { w.Applications = nil },
-		"glob application":    func(w *ReleaseWindow) { w.Applications = []string{"labs-*"} },
-		"upper application":   func(w *ReleaseWindow) { w.Applications = []string{"Labs-web"} },
-		"unsorted":            func(w *ReleaseWindow) { w.Applications = []string{"b", "a"} },
-		"duplicate":           func(w *ReleaseWindow) { w.Applications = []string{"a", "a"} },
-		"comma in name":       func(w *ReleaseWindow) { w.Applications = []string{"a,b"} },
-		"newline in schedule": func(w *ReleaseWindow) { w.Schedule = "0 22 * * 5\n" },
-		"four-field cron":     func(w *ReleaseWindow) { w.Schedule = "0 22 * *" },
-		"named weekday":       func(w *ReleaseWindow) { w.Schedule = "0 22 * * FRI" },
-		"bad duration":        func(w *ReleaseWindow) { w.Duration = "2d" },
-		"empty duration":      func(w *ReleaseWindow) { w.Duration = "" },
-		"short base":          func(w *ReleaseWindow) { w.BaseSHA = "abc" },
-		"upper base":          func(w *ReleaseWindow) { w.BaseSHA = strings.ToUpper(rwBase) },
+		"default project":      func(w *ReleaseWindow) { w.Project = "default" },
+		"empty project":        func(w *ReleaseWindow) { w.Project = "" },
+		"no applications":      func(w *ReleaseWindow) { w.Applications = nil },
+		"glob application":     func(w *ReleaseWindow) { w.Applications = []string{"labs-*"} },
+		"upper application":    func(w *ReleaseWindow) { w.Applications = []string{"Labs-web"} },
+		"unsorted":             func(w *ReleaseWindow) { w.Applications = []string{"b", "a"} },
+		"duplicate":            func(w *ReleaseWindow) { w.Applications = []string{"a", "a"} },
+		"comma in name":        func(w *ReleaseWindow) { w.Applications = []string{"a,b"} },
+		"newline in schedule":  func(w *ReleaseWindow) { w.Schedule = "0 22 * * 5\n" },
+		"four-field cron":      func(w *ReleaseWindow) { w.Schedule = "0 22 * *" },
+		"named weekday":        func(w *ReleaseWindow) { w.Schedule = "0 22 * * FRI" },
+		"bad duration":         func(w *ReleaseWindow) { w.Duration = "2d" },
+		"zero hours":           func(w *ReleaseWindow) { w.Duration = "0h" },
+		"zero minutes":         func(w *ReleaseWindow) { w.Duration = "0m" },
+		"minutes before hours": func(w *ReleaseWindow) { w.Duration = "30m1h" },
+		"hours twice":          func(w *ReleaseWindow) { w.Duration = "1h1h" },
+		"leading zero":         func(w *ReleaseWindow) { w.Duration = "01h" },
+		"five digit duration":  func(w *ReleaseWindow) { w.Duration = "10000h" },
+		"oversized schedule": func(w *ReleaseWindow) {
+			w.Schedule = strings.Repeat("0,", 60) + "0 22 * * 5"
+		},
+		"empty duration": func(w *ReleaseWindow) { w.Duration = "" },
+		"short base":     func(w *ReleaseWindow) { w.BaseSHA = "abc" },
+		"upper base":     func(w *ReleaseWindow) { w.BaseSHA = strings.ToUpper(rwBase) },
 		"too many apps": func(w *ReleaseWindow) {
 			w.Applications = nil
 			for i := 0; i <= MaxReleaseWindowApplications; i++ {
@@ -95,7 +104,11 @@ func TestWidestWindowFitsTheTarget(t *testing.T) {
 	for i := 0; i < MaxReleaseWindowApplications; i++ {
 		w.Applications = append(w.Applications, fmt.Sprintf("%02d-%s", i, strings.Repeat("a", 60)))
 	}
-	w.Schedule = "0,15,30,45 0,6,12,18 1-31 1-12 0-6"
+	// The longest schedule Validate lets through, so this really is the widest legal window.
+	w.Schedule = strings.Repeat("0,", 45) + "0 22 * * 5"
+	if len(w.Schedule) > MaxReleaseWindowScheduleLen {
+		t.Fatalf("test schedule is %d bytes, over the %d bound", len(w.Schedule), MaxReleaseWindowScheduleLen)
+	}
 	target, err := ReleaseWindowTarget(w)
 	if err != nil {
 		t.Fatal(err)
