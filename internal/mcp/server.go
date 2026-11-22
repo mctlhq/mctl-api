@@ -176,16 +176,22 @@ var internalHostPattern = regexp.MustCompile(
 // error), credentials embedded in URLs and cluster-internal hosts. The full
 // error is still available to operators via server-side slog logging.
 func (s *Server) redactErrorText(msg string) string {
+	// Userinfo first: "http://user:pw@api-host:9000/x" does not contain the
+	// configured apiURL until the credentials are gone, so stripping them
+	// afterwards would leave the bare API address in the message.
+	msg = urlUserinfoPattern.ReplaceAllString(msg, "${1}")
 	if s.apiURL != "" {
 		msg = strings.ReplaceAll(msg, s.apiURL, "the mctl API")
 	}
-	msg = urlUserinfoPattern.ReplaceAllString(msg, "${1}")
 	msg = loopbackFragmentPattern.ReplaceAllString(msg, "the mctl API")
 	return internalHostPattern.ReplaceAllString(msg, "an internal host")
 }
 
 // redactUpstream renders err for a caller with redactErrorText applied.
 func (s *Server) redactUpstream(err error) string {
+	if err == nil {
+		return ""
+	}
 	return s.redactErrorText(err.Error())
 }
 
@@ -214,7 +220,7 @@ func (s *Server) redactToolErrors(next server.ToolHandlerFunc) server.ToolHandle
 			case *mcplib.TextContent:
 				cp := *t
 				cp.Text = s.redactErrorText(cp.Text)
-				content[i] = cp
+				content[i] = &cp // keep the pointer type consumers may assert on
 			default:
 				content[i] = c
 			}

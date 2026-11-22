@@ -167,3 +167,43 @@ func TestPromptPlatformSkill_UpstreamErrorRedacted(t *testing.T) {
 		})
 	}
 }
+
+// A URL whose userinfo splits the scheme from the host must not leave the
+// configured API address behind once the credentials are stripped.
+func TestRedactErrorText_UserinfoStrippedBeforeAPIURLMatch(t *testing.T) {
+	s := NewServer("http://api.example.test:9000", "")
+	got := s.redactErrorText("Get http://admin:pw@api.example.test:9000/x: refused")
+	if strings.Contains(got, "api.example.test") || strings.Contains(got, "pw") {
+		t.Fatalf("leaked the API address or the credential: %q", got)
+	}
+}
+
+func TestRedactUpstream_NilErrorIsEmpty(t *testing.T) {
+	if got := NewServer("http://api.example.test:9000", "").redactUpstream(nil); got != "" {
+		t.Fatalf("redactUpstream(nil) = %q, want empty", got)
+	}
+}
+
+// The redacted copy of a *TextContent stays a *TextContent, and the caller's
+// original is not mutated.
+func TestRedactToolErrors_PointerContentStaysPointer(t *testing.T) {
+	s := NewServer("http://api.example.test:9000", "")
+	orig := &mcplib.TextContent{Type: "text", Text: "dial postgres://u:pw@db.team-a.svc.cluster.local:5432 refused"}
+	h := s.redactToolErrors(func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		return &mcplib.CallToolResult{IsError: true, Content: []mcplib.Content{orig}}, nil
+	})
+	res, err := h(context.Background(), mcplib.CallToolRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := res.Content[0].(*mcplib.TextContent)
+	if !ok {
+		t.Fatalf("content type = %T, want *mcplib.TextContent", res.Content[0])
+	}
+	if strings.Contains(got.Text, "pw") || strings.Contains(got.Text, "db.team-a") {
+		t.Fatalf("not redacted: %q", got.Text)
+	}
+	if !strings.Contains(orig.Text, "pw") {
+		t.Fatal("the caller's original content was mutated")
+	}
+}
