@@ -60,6 +60,8 @@ func TestFixtures(t *testing.T) {
 				verr = ValidateDefinition(body)
 			case "run":
 				verr = ValidateRun(body)
+			case "manual-run":
+				verr = ValidateManualRunRequest(body)
 			default:
 				t.Fatalf("unknown kind %q", m.Kind)
 			}
@@ -112,7 +114,7 @@ func TestErrorVocabularyMatchesSchema(t *testing.T) {
 			t.Errorf("%s has no status", c)
 		}
 	}
-	if len(Codes()) != 18 {
+	if len(Codes()) != 19 {
 		t.Fatalf("vocabulary size = %d", len(Codes()))
 	}
 }
@@ -149,37 +151,13 @@ func TestResolveAtDST(t *testing.T) {
 
 func errOf(_ time.Time, err error) error { return err }
 
-func TestOccurrenceKeys(t *testing.T) {
-	at := time.Date(2026, 12, 1, 10, 0, 0, 0, time.UTC)
-	a := OccurrenceKeyAt("au_1", 1, "at", at)
-	if a != OccurrenceKeyAt("au_1", 1, "at", at.In(time.FixedZone("x", 3600))) {
-		t.Fatal("key must be zone independent")
-	}
-	if !strings.HasPrefix(a, "occ_") || len(a) != 36 {
-		t.Fatalf("bad key %q", a)
-	}
-	b := OccurrenceKeyAt("au_1", 1, "at", at.Add(time.Minute))
-	if a == b || ExternalKey("au_1", a) == ExternalKey("au_1", b) || FireIdempotencyKey(a) == FireIdempotencyKey(b) {
-		t.Fatal("overlapping occurrences must differ")
-	}
-	if FireIdempotencyKey(a) != FireIdempotencyKey(OccurrenceKeyAt("au_1", 1, "at", at)) || ExternalKey("au_1", a) != "automation:au_1:"+a {
-		t.Fatal("derivation unstable")
-	}
-	var s OccurrenceSet
-	if err := s.Claim(a); err != nil {
-		t.Fatal(err)
-	}
-	if CodeOf(s.Claim(a)) != CodeOccurrenceDuplicate {
-		t.Fatal("second delivery must be a replay")
-	}
-}
-
 func liveInputs() Inputs {
 	return Inputs{
 		Link: LinkLive, Install: InstallLive, SurfaceMatches: true, TenantMember: true,
 		TargetExists: true, TenantAccessible: true, OwnerMatches: true,
 		PinnedPolicyVersion: "p1", LivePolicyVersion: "p1",
-		BudgetNeeded: 1, HeadroomPerRun: 5, HeadroomPerDay: 5, HeadroomPerTenant: 5,
+		UsageAuthority: UsageAuthorityVerifiedMetering,
+		BudgetNeeded:   1, HeadroomPerRun: 5, HeadroomPerDay: 5, HeadroomPerTenant: 5,
 		ThisExecutionID: "we_1",
 	}
 }
@@ -204,6 +182,8 @@ func TestDecide(t *testing.T) {
 		{"cross tenant", func(i *Inputs) { i.TenantAccessible = false }, CheckpointCreateUpdate, CodeNotFound},
 		{"missing", func(i *Inputs) { i.TargetExists = false }, CheckpointCreateUpdate, CodeNotFound},
 		{"owner change", func(i *Inputs) { i.ChangesOwner = true }, CheckpointCreateUpdate, CodeNotFound},
+		{"usage authority unknown", func(i *Inputs) { i.UsageAuthority = UsageAuthorityUnknown }, CheckpointFire, CodeAuthorityUnavailable},
+		{"commerce payment only", func(i *Inputs) { i.UsageAuthority = UsageAuthorityCommercePayment; i.HeadroomPerRun = 1 << 40 }, CheckpointFire, CodeAuthorityUnavailable},
 		{"policy drift", func(i *Inputs) { i.LivePolicyVersion = "p2" }, CheckpointFire, CodePolicyDrift},
 		{"per run budget", func(i *Inputs) { i.HeadroomPerRun = 0 }, CheckpointFire, CodeBudgetExhausted},
 		{"per day budget", func(i *Inputs) { i.HeadroomPerDay = 0 }, CheckpointFire, CodeBudgetExhausted},

@@ -74,5 +74,14 @@
 {"file":"invalid/patch-trigger-schedule.json","kind":"patch","code":"automation_trigger_unsupported"},
 {"file":"invalid/patch-reminder-ttl.json","kind":"patch","code":"automation_invalid"},
 {"file":"invalid/patch-support-ttl.json","kind":"patch","code":"automation_support_constraint","template":"support.diagnostic-followup.v1"},
-{"file":"invalid/patch-support-fires.json","kind":"patch","code":"automation_support_constraint","template":"support.diagnostic-followup.v1"}
+{"file":"invalid/patch-support-fires.json","kind":"patch","code":"automation_support_constraint","template":"support.diagnostic-followup.v1"},
+{"file":"valid/manual-run.json","kind":"manual-run","code":""},
+{"file":"valid/reminder-at-instant-fractional.json","kind":"create","code":""},
+{"file":"invalid/manual-run-spoof-occurrence_key.json","kind":"manual-run","code":"automation_server_owned_field"},
+{"file":"invalid/manual-run-spoof-principal.json","kind":"manual-run","code":"automation_server_owned_field"},
+{"file":"invalid/manual-run-spoof-tenant.json","kind":"manual-run","code":"automation_server_owned_field"},
+{"file":"invalid/manual-run-spoof-au_id.json","kind":"manual-run","code":"automation_server_owned_field"},
+{"file":"invalid/manual-run-extra.json","kind":"manual-run","code":"automation_unknown_field"},
+{"file":"invalid/manual-run-empty-key.json","kind":"manual-run","code":"automation_invalid"},
+{"file":"invalid/offset-zone-etc.json","kind":"create","code":"automation_invalid"}
 ]

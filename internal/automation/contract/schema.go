@@ -56,7 +56,10 @@ const (
 	CodeNotFound             = Code("automation_not_found")
 	CodeVersionConflict      = Code("automation_version_conflict")
 	CodeIdempotencyKeyReused = Code("automation_idempotency_key_reused")
+	// CodeOccurrenceDuplicate is reserved: its meaning is unchanged but it is
+	// not emitted for an identical replay (that returns replayed: true).
 	CodeOccurrenceDuplicate  = Code("automation_occurrence_duplicate")
+	CodeOccurrenceConflict   = Code("automation_occurrence_conflict")
 	CodeIdentityUnlinked     = Code("automation_identity_unlinked")
 	CodePolicyDrift          = Code("automation_policy_drift")
 	CodeBudgetExhausted      = Code("automation_budget_exhausted")
@@ -70,7 +73,7 @@ var httpStatus = map[Code]int{
 	CodeInvalid: 400, CodeUnknownField: 400, CodeServerOwnedField: 400,
 	CodeTemplateNotAllowed: 400, CodeTriggerUnsupported: 400, CodeTimeAmbiguous: 400,
 	CodeSupportConstraint: 400, CodeNotFound: 404, CodeVersionConflict: 409,
-	CodeIdempotencyKeyReused: 409, CodeOccurrenceDuplicate: 409, CodeIdentityUnlinked: 403,
+	CodeIdempotencyKeyReused: 409, CodeOccurrenceDuplicate: 409, CodeOccurrenceConflict: 409, CodeIdentityUnlinked: 403,
 	CodePolicyDrift: 409, CodeBudgetExhausted: 409, CodeApprovalRequired: 409,
 	CodeApprovalNotReusable: 409, CodePaused: 409, CodeAuthorityUnavailable: 503,
 }
