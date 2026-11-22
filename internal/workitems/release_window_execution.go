@@ -77,6 +77,12 @@ func (s *Store) ClaimReleaseWindowApproval(ctx context.Context, id, caller, inte
 	if cur.ActionKind != ActionKindReleaseWindow {
 		return nil, fmt.Errorf("%w: %s", ErrApprovalKindNotSpendable, id)
 	}
+	// An expired request can never be claimed again, whatever state it is in:
+	// say so, instead of telling the caller to retry an in-flight claim that
+	// the expiry guard in the UPDATE will refuse for good.
+	if !cur.ExpiresAt.After(now) {
+		return nil, fmt.Errorf("%w: %s", ErrApprovalExpired, id)
+	}
 	if cur.State == ApprovalInFlight {
 		return nil, fmt.Errorf("%w: %s", ErrApprovalInFlight, id)
 	}

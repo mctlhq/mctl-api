@@ -64,6 +64,8 @@ type recordingDispatcher struct {
 	calls []dispatchCall
 	err   error
 	delay time.Duration
+	// hook, when set, runs inside the call and decides its result.
+	hook func() error
 }
 
 type dispatchCall struct {
@@ -76,9 +78,13 @@ func (d *recordingDispatcher) Dispatch(_ context.Context, owner, repo, workflow,
 		time.Sleep(d.delay)
 	}
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	d.calls = append(d.calls, dispatchCall{owner, repo, workflow, ref, inputs})
-	return d.err
+	hook, err := d.hook, d.err
+	d.mu.Unlock()
+	if hook != nil {
+		return hook()
+	}
+	return err
 }
 
 func (d *recordingDispatcher) count() int {

@@ -239,3 +239,24 @@ func TestApprovedReleaseWindowIsNotSpendableByAnyGenericPath(t *testing.T) {
 		t.Errorf("a generic path moved the row to %s", cur.State)
 	}
 }
+
+// An in-flight claim whose request has expired can never be claimed again, so
+// the answer is "expired, ask again", not "in flight, retry later".
+func TestExpiredInFlightClaimReportsExpiredNotInFlight(t *testing.T) {
+	s := newStoreForTest(t)
+	ctx := context.Background()
+	a := approvedWindow(t, s, rwBase)
+	if _, err := s.ClaimReleaseWindowApproval(ctx, a.ID, rwRequester, a.IntentHash, ReleaseWindowReclaimAfter); err != nil {
+		t.Fatal(err)
+	}
+	// Still inside its window: the honest answer is in flight.
+	if _, err := s.ClaimReleaseWindowApproval(ctx, a.ID, rwRequester, a.IntentHash, ReleaseWindowReclaimAfter); !errors.Is(err, ErrApprovalInFlight) {
+		t.Fatalf("live claim: %v, want ErrApprovalInFlight", err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE action_approval_requests SET expires_at = now() - interval '1 minute', reserved_at = now() - interval '11 minutes' WHERE id = $1`, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimReleaseWindowApproval(ctx, a.ID, rwRequester, a.IntentHash, ReleaseWindowReclaimAfter); !errors.Is(err, ErrApprovalExpired) {
+		t.Fatalf("expired in-flight claim: %v, want ErrApprovalExpired", err)
+	}
+}

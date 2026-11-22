@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
@@ -358,4 +359,52 @@ func TestExecuteReleaseWindowRouteIsDarkByDefault(t *testing.T) {
 	if f.dispatch.count() != 0 {
 		t.Fatal("a dark route dispatched")
 	}
+}
+
+// cancellingDispatcher cancels the request context while the dispatch is in
+// progress, as a client disconnect would, then answers with err.
+type cancellingDispatcher struct {
+	cancel context.CancelFunc
+	err    error
+}
+
+func (d *cancellingDispatcher) Dispatch(context.Context, string, string, string, string, map[string]string) error {
+	d.cancel()
+	return d.err
+}
+
+// executeWithCancel runs execute with a request context that the dispatcher
+// cancels mid-call.
+func executeWithCancel(t *testing.T, f *windowFixture, id string, dispatchErr error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.dispatch.mu.Lock()
+	f.dispatch.hook = func() error { cancel(); return dispatchErr }
+	f.dispatch.mu.Unlock()
+	req := httptest.NewRequest(http.MethodPost, executePath(id), nil).WithContext(auth.WithUser(ctx, adminUser))
+	f.router.ServeHTTP(httptest.NewRecorder(), req)
+}
+
+// A client that goes away during the dispatch must not leave the approval in
+// flight: the settle runs detached from the request.
+func TestExecuteReleaseWindowSettlesAfterTheClientDisconnects(t *testing.T) {
+	t.Run("dispatch accepted", func(t *testing.T) {
+		f := newWindowFixture(t, true)
+		id := f.request(t)
+		f.approve(t, id)
+		executeWithCancel(t, f, id, nil)
+		if got := f.state(t, id); got != workitems.ApprovalExecuted {
+			t.Fatalf("state %s after an accepted dispatch and a disconnect, want executed", got)
+		}
+	})
+	t.Run("dispatch failed", func(t *testing.T) {
+		f := newWindowFixture(t, true)
+		id := f.request(t)
+		f.approve(t, id)
+		executeWithCancel(t, f, id, context.Canceled)
+		if got := f.state(t, id); got != workitems.ApprovalApproved {
+			t.Fatalf("state %s after a failed dispatch and a disconnect, want approved (intact)", got)
+		}
+	})
 }

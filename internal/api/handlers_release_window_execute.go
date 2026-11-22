@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -48,6 +50,10 @@ import (
 const (
 	releaseWindowWorkflow    = "release-window-pr.yml"
 	releaseWindowDispatchRef = "main"
+
+	// releaseWindowSettleTimeout bounds the settle after a dispatch, which runs
+	// detached from the request.
+	releaseWindowSettleTimeout = 15 * time.Second
 
 	codeReleaseWindowNotDecided = "release_window_not_decided"
 	codeReleaseWindowDispatch   = "release_window_dispatch_failed"
@@ -164,9 +170,15 @@ func (h *Handlers) ExecuteReleaseWindow(w http.ResponseWriter, r *http.Request) 
 		"base_sha":      win.BaseSHA,
 		"window_sha256": hash,
 	}
+	// Settling must survive the caller going away: a request context cancelled
+	// by a client disconnect would fail the settle-back too and leave the
+	// approval in flight for the whole reclaim bound. Detached from the
+	// request, with its own short deadline.
+	settleCtx, cancelSettle := context.WithTimeout(context.WithoutCancel(r.Context()), releaseWindowSettleTimeout)
+	defer cancelSettle()
 	if err := h.opts.WorkflowDispatcher.Dispatch(r.Context(), owner, repo, releaseWindowWorkflow, releaseWindowDispatchRef, inputs); err != nil {
 		// Not accepted: hand the decision back so a retry needs no new one.
-		if _, serr := h.opts.WorkItems.SettleReleaseWindowApproval(r.Context(), claim, false); serr != nil {
+		if _, serr := h.opts.WorkItems.SettleReleaseWindowApproval(settleCtx, claim, false); serr != nil {
 			slog.Error("release window: could not return the claim after a failed dispatch", "approval", id, "error", serr)
 		}
 		// A dispatch that never reached GitHub is "unavailable"; only a real
@@ -182,7 +194,7 @@ func (h *Handlers) ExecuteReleaseWindow(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	done, serr := h.opts.WorkItems.SettleReleaseWindowApproval(r.Context(), claim, true)
+	done, serr := h.opts.WorkItems.SettleReleaseWindowApproval(settleCtx, claim, true)
 	resp := map[string]any{
 		"schema_version":    workitems.ActionApprovalSchemaVersion,
 		"status":            "dispatched",
