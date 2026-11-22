@@ -105,6 +105,9 @@ type Options struct {
 	// ReleaseGrants mounts the release grant routes (mctl-api#1022). Nil, or
 	// without a resolver or repositories, leaves them unmounted.
 	ReleaseGrants *ReleaseGrantOptions
+	// ReleaseWindows mounts the release window routes (sync-window write
+	// path, S1). Nil, or without a head reader, leaves them unmounted.
+	ReleaseWindows *ReleaseWindowOptions
 	// ReleaseApproval is the release approval page (mctl-api#1022 S2), the
 	// only place a release grant is decided. Mounted only when complete and
 	// ReleaseGrants is enabled.
@@ -800,6 +803,10 @@ func NewRouter(opts Options) http.Handler {
 			if h.opts.ReleaseGrants.enabled() && h.opts.WorkItems != nil {
 				r.Post("/release/grants", h.RequestReleaseGrant)
 				r.Get("/release/grants", h.ListReleaseGrants)
+			}
+			if h.opts.ReleaseWindows.enabled() && h.opts.WorkItems != nil {
+				r.Post("/release/windows", h.RequestReleaseWindow)
+				r.Get("/release/windows", h.ListReleaseWindows)
 			}
 			r.Get("/deploy/deployments/{id}", h.GetDeployment)
 			r.Get("/status/{team}/{app}", h.GetServiceStatus)

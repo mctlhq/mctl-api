@@ -1527,6 +1527,7 @@ func main() {
 	deployApprovalPage := deployApprovalOptions(cfg, deployApprovalUIEnvFromOS(), principalResolver, principalAuthz,
 		oauthFlowStore(oauthServer), workItemsStore != nil, deployPlans != nil)
 	releaseGrants := releaseGrantOptions(releaseGrantEnvFromOS(), gitOpsTokenSource(), workItemsStore != nil)
+	releaseWindows := releaseWindowOptions(releaseWindowEnvFromOS(), gitOpsTokenSource(), workItemsStore != nil)
 	// Release approval page (mctl-api#1022 S2): dark unless
 	// RELEASE_APPROVAL_UI_ENABLED is true and everything it reads is up.
 	releaseApprovalPage := releaseApprovalOptions(cfg, releaseApprovalUIEnvFromOS(), principalResolver, principalAuthz,
@@ -1565,6 +1566,7 @@ func main() {
 		GlovoBasketApproval:            glovoBasketPage,
 		DeployApproval:                 deployApprovalPage,
 		ReleaseGrants:                  releaseGrants,
+		ReleaseWindows:                 releaseWindows,
 		ReleaseApproval:                releaseApprovalPage,
 		OAuthUpstream:                  cfg.oauthUpstreamMode(),
 		OAuthZitadel:                   oauthZitadelOptions(cfg, principalStore, oauthServer),

@@ -119,6 +119,14 @@ var Policies = PolicySet{
 		Reasons:    []string{workitems.ReleaseGrantPolicyRuleID},
 		SideEffect: "write",
 	},
+	// The owner approves one deny sync window on one AppProject, added by a
+	// pull request (sync-window write path, proposal issue-2828).
+	workitems.ReleaseWindowPolicyRuleID: {
+		Version:    workitems.ReleaseWindowPolicyVersion,
+		Decision:   "require_approval",
+		Reasons:    []string{workitems.ReleaseWindowPolicyRuleID},
+		SideEffect: "write",
+	},
 }
 
 // Policy status values returned by Check.
