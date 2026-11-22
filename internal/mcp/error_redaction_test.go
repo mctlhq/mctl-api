@@ -15,10 +15,13 @@
 package mcp
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
 
 // The upstream answers 500 with a message carrying a URL with credentials and
@@ -99,5 +102,68 @@ func TestRedactToolErrors_SuccessUntouched(t *testing.T) {
 	}
 	if got := resultText(t, res); !strings.Contains(got, "db.team-a.svc.cluster.local") {
 		t.Errorf("success result was rewritten: %s", got)
+	}
+}
+
+// A success result may still embed an upstream error (the registry lookup
+// warning of mctl_remove_custom_domain); it must be redacted at the site.
+func TestRemoveCustomDomain_RegistryWarningRedacted(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/domains" {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"dial postgres://admin:hunter2@db.team-a.svc.cluster.local:5432 refused"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"workflowName":"wf"}`))
+	}))
+	defer backend.Close()
+
+	res, err := callToolRemoveCustomDomain(t, backend.URL, map[string]any{
+		"team": "labs", "service": "svc", "domain": "api.example.com", "confirm": "yes",
+	})
+	if err != nil || res == nil || res.IsError {
+		t.Fatalf("expected a success result, got %+v %v", res, err)
+	}
+	text := resultText(t, res)
+	if !strings.Contains(text, "could not consult the domains registry") {
+		t.Fatalf("warning missing: %s", text)
+	}
+	for _, leak := range []string{"hunter2", "admin:", "svc.cluster.local", backend.URL} {
+		if strings.Contains(text, leak) {
+			t.Errorf("warning leaked %q: %s", leak, text)
+		}
+	}
+}
+
+// Prompt handlers are not covered by the tool middleware, so the platform
+// skill prompt must redact its own upstream errors.
+func TestPromptPlatformSkill_UpstreamErrorRedacted(t *testing.T) {
+	for name, body := range map[string]string{
+		"500":       `{"error":"dial postgres://admin:hunter2@db.team-a.svc.cluster.local:5432 refused"}`,
+		"malformed": ``,
+	} {
+		t.Run(name, func(t *testing.T) {
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if name == "500" {
+					w.WriteHeader(http.StatusInternalServerError)
+				}
+				_, _ = w.Write([]byte(body))
+			}))
+			defer api.Close()
+			s := NewServer(api.URL, "tok")
+			_, handler := s.promptPlatformSkill()
+			_, err := handler(context.Background(), mcplib.GetPromptRequest{
+				Params: mcplib.GetPromptParams{Arguments: map[string]string{"skill": "x"}},
+			})
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			for _, leak := range []string{"hunter2", "admin:", "svc.cluster.local", api.URL} {
+				if strings.Contains(err.Error(), leak) {
+					t.Errorf("prompt error leaked %q: %v", leak, err)
+				}
+			}
+		})
 	}
 }

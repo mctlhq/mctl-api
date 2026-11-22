@@ -1825,7 +1825,7 @@ func (s *Server) toolRemoveCustomDomain() (mcplib.Tool, server.ToolHandlerFunc) 
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to remove domain: %v", err)), nil
 		}
 		if listWarn != nil {
-			return mcplib.NewToolResultText(fmt.Sprintf("%s\n\nNote: could not consult the domains registry to check for a row to clean up (%v) — this triggered the removal workflow directly without confirming whether a registry row exists for this hostname.", string(body), listWarn)), nil
+			return mcplib.NewToolResultText(fmt.Sprintf("%s\n\nNote: could not consult the domains registry to check for a row to clean up (%v) — this triggered the removal workflow directly without confirming whether a registry row exists for this hostname.", string(body), s.redactUpstream(listWarn))), nil
 		}
 		return mcplib.NewToolResultText(string(body)), nil
 	}
@@ -2742,7 +2742,7 @@ func (s *Server) promptPlatformSkill() (mcplib.Prompt, server.PromptHandlerFunc)
 		}
 		body, err := s.apiGet(ctx, "/api/v1/platform-skills/"+url.PathEscape(name))
 		if err != nil {
-			return nil, fmt.Errorf("failed to read platform skill %q: %w", name, err)
+			return nil, fmt.Errorf("failed to read platform skill %q: %s", name, s.redactUpstream(err))
 		}
 		var skill struct {
 			Metadata struct {
@@ -2752,7 +2752,7 @@ func (s *Server) promptPlatformSkill() (mcplib.Prompt, server.PromptHandlerFunc)
 			Content string `json:"content"`
 		}
 		if err := json.Unmarshal(body, &skill); err != nil {
-			return nil, fmt.Errorf("failed to parse platform skill %q: %w", name, err)
+			return nil, fmt.Errorf("failed to parse platform skill %q: %s", name, s.redactUpstream(err))
 		}
 		description := skill.Metadata.Description
 		if description == "" {
