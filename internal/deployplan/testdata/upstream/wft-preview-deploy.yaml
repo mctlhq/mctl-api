@@ -440,7 +440,7 @@ spec:
           for attempt in range(30):
               time.sleep(10)
               runs = api_request("GET",
-                  f"/repos/{GITOPS_ORG}/{GITOPS_REPO}/actions/workflows/build-image.yaml/runs?per_page=5")
+                  f"/repos/{GITOPS_ORG}/{GITOPS_REPO}/actions/workflows/build-image.yaml/runs?per_page=100")
               for run in runs.get("workflow_runs", []):
                   if run.get("name", "") == run_name or build_id in run.get("name", ""):
                       run_id = run["id"]
