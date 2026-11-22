@@ -815,6 +815,34 @@ func TestResolveKnownHostsPathLocked_MaterializesFreshAndCaches(t *testing.T) {
 	}
 }
 
+// A tmp reaper can delete the materialized file under a long-lived process;
+// the cache must notice and write it again (mctl-api#233).
+func TestResolveKnownHostsPathLocked_RecoversWhenFileDeleted(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+
+	r := &Reader{}
+	path, err := r.resolveKnownHostsPathLocked()
+	if err != nil {
+		t.Fatalf("resolveKnownHostsPathLocked: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+
+	path2, err := r.resolveKnownHostsPathLocked()
+	if err != nil {
+		t.Fatalf("after delete: %v", err)
+	}
+	//nolint:gosec // path is resolveKnownHostsPathLocked's own output, under t.TempDir()
+	got, err := os.ReadFile(path2)
+	if err != nil {
+		t.Fatalf("returned path is not usable: %v", err)
+	}
+	if !bytes.Equal(got, githubKnownHosts) {
+		t.Fatalf("re-materialized content does not match the embedded default")
+	}
+}
+
 // TestResolveKnownHostsPathLocked_NeverReusesAnExistingFile is the security
 // property the whole design turns on. A predictable path lets another local
 // user pre-create the file — as a symlink, or byte-identical but

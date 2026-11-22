@@ -620,7 +620,15 @@ func (r *Reader) resolveKnownHostsPathLocked() (string, error) {
 		return r.knownHostsPath, nil
 	}
 	if r.resolvedKnownHostsPath != "" {
-		return r.resolvedKnownHostsPath, nil
+		// Trust the cache only while the file is still there: a tmp reaper
+		// can remove it under a long-lived process, and with
+		// StrictHostKeyChecking=yes a missing file is a permanent fetch
+		// failure (mctl-api#233). Any stat failure, not only "not exist",
+		// is treated as unverified and re-materializes.
+		if _, err := os.Stat(r.resolvedKnownHostsPath); err == nil {
+			return r.resolvedKnownHostsPath, nil
+		}
+		r.resolvedKnownHostsPath = ""
 	}
 
 	f, err := os.CreateTemp("", "mctl-api-known-hosts-*")
