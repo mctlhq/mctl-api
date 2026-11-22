@@ -2956,7 +2956,7 @@ Admin-only. Returns workflow_name.`),
 		mcplib.WithString("service",
 			mcplib.Required(),
 			mcplib.Description("Which service-agent to run"),
-			mcplib.Enum("mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"),
+			mcplib.Enum(operations.MctlAgentsServices()...),
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -3013,7 +3013,7 @@ Optional service/slug filters narrow the run scope. There is no force or unbound
 Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_recent_agent_runs for progress.`),
 		mcplib.WithString("service",
 			mcplib.Description("Optional. Filter to one service. Leave empty to consider all services."),
-			mcplib.Enum("", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway", "mctl-claude-remote", "mctl-alice", "mctl-support"),
+			mcplib.Enum(operations.MctlAgentsServiceEnum()...),
 		),
 		mcplib.WithString("slug",
 			mcplib.Description("Optional. Filter to one proposal slug (across services unless service is also set)."),
@@ -3054,7 +3054,7 @@ Admin-only. Returns workflow_name; poll mctl_get_workflow_status or mctl_list_re
 			// shepherd PRs); the shepherd must drive those to merge too.
 			// Keep aligned with internal/operations/registry.go entry for
 			// `mctl-agents-shepherd` and with the implementer's enum.
-			mcplib.Enum("", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway", "mctl-claude-remote", "mctl-alice", "mctl-support"),
+			mcplib.Enum(operations.MctlAgentsServiceEnum()...),
 		),
 		mcplib.WithString("slug",
 			mcplib.Description("Optional. Filter to one proposal slug (across services unless service is also set)."),
@@ -3099,7 +3099,7 @@ Optional service filter narrows the sweep; dry_run=true prints every decision an
 Admin-only.`),
 		mcplib.WithString("service",
 			mcplib.Description("Optional. Reconcile only this service. Leave empty to sweep every service."),
-			mcplib.Enum("", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway", "mctl-claude-remote", "mctl-alice", "mctl-support"),
+			mcplib.Enum(operations.MctlAgentsServiceEnum()...),
 		),
 		mcplib.WithString("dry_run",
 			mcplib.Description("Set to 'true' to print every would-be flip without writing .status.yaml or opening any PR. Default 'false'."),
@@ -3202,7 +3202,7 @@ Human admins only, acting directly, and only under the break-glass; a service or
 		mcplib.WithString("service",
 			mcplib.Required(),
 			mcplib.Description("Service owning the proposal."),
-			mcplib.Enum("mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway", "mctl-claude-remote", "mctl-alice", "mctl-support"),
+			mcplib.Enum(operations.MctlAgentsServices()...),
 		),
 		mcplib.WithString("slug",
 			mcplib.Required(),

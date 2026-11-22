@@ -425,9 +425,20 @@ const (
 	approvalRefPattern = `^aar_[A-Za-z0-9_-]{1,124}$`
 )
 
-// mctlAgentsServiceEnum lists the services mctl-agents knows, plus "" for
-// "all / unused".
-var mctlAgentsServiceEnum = []string{"", "mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway", "mctl-claude-remote", "mctl-alice", "mctl-support"}
+// mctlAgentsServices is the single source of truth for the services
+// mctl-agents knows (mirror of SERVICES in mctl-agents config/settings.py).
+// Every service enum in this repository is derived from it.
+var mctlAgentsServices = []string{"mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway", "mctl-claude-remote", "mctl-alice", "mctl-support"}
+
+// mctlAgentsServiceEnum is mctlAgentsServices plus "" for "all / unused".
+var mctlAgentsServiceEnum = append([]string{""}, mctlAgentsServices...)
+
+// MctlAgentsServices returns a copy of the mctl-agents service list (no "").
+func MctlAgentsServices() []string { return append([]string(nil), mctlAgentsServices...) }
+
+// MctlAgentsServiceEnum returns a copy of the service list with a leading ""
+// meaning "all / unused".
+func MctlAgentsServiceEnum() []string { return append([]string(nil), mctlAgentsServiceEnum...) }
 
 // freeTextParameters lists the parameters that stay free text. Each carries a
 // MaxLength and a control-character-excluding Pattern. Workflow templates must
@@ -853,7 +864,7 @@ var builtinOperations = []Operation{
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/"},
 		Parameters: []ParameterDef{
 			{Name: "mode", Type: "string", Required: false, Default: "single-service", Description: "Run mode (locked to 'single-service')", Enum: []string{"single-service"}},
-			{Name: "service", Type: "string", Required: true, Description: "Which service-agent to run", Enum: []string{"mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents"}},
+			{Name: "service", Type: "string", Required: true, Description: "Which service-agent to run", Enum: MctlAgentsServices()},
 		},
 	},
 	{
@@ -1058,7 +1069,7 @@ var builtinOperations = []Operation{
 		AdminOnly:        true,
 		ModifiesPaths:    []string{"platform-gitops/agents-state/{service}/proposals/{slug}/.status.yaml"},
 		Parameters: []ParameterDef{
-			{Name: "service", Type: "string", Required: true, Description: "Service owning the proposal.", Enum: []string{"mctl-web", "mctl-docs", "mctl-api", "mctl-portal", "mctl-agent", "mctl-gitops", "mctl-agents", "mctl-telegram", "mctl-design", "mctl-pairdesk", "mctl-academy", "seerrsense", "portfolio", ".github", "newton-mcp-gateway", "mctl-claude-remote", "mctl-alice", "mctl-support"}},
+			{Name: "service", Type: "string", Required: true, Description: "Service owning the proposal.", Enum: MctlAgentsServices()},
 			{Name: "slug", Type: "string", Required: true, Description: "Proposal slug (directory name under proposals/), e.g. issue-42-fix-foo.", Pattern: slugPattern},
 			// No Default: "unknown" is not an identity, and a field that manufactures
 			// one is worse than an absent field — the implementer refuses an approval

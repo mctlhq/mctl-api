@@ -15,7 +15,9 @@
 package operations
 
 import (
+	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -49,12 +51,12 @@ func TestImplementAndShepherdServiceEnumCoversMctlAgentsServices(t *testing.T) {
 	// standalone path left to approve it. Catching that class needs the real
 	// SERVICES list, which is in another repository and not reachable from a
 	// unit test. Until something fetches it, adding a service means editing
-	// nine places here: the four ParameterDef enums in registry.go, their four
-	// mcplib.Enum mirrors in internal/mcp/server.go, and this list. The four
-	// mirrors are backstopped by TestServiceEnumsMatchRegistry, which compares
-	// the two sides value-for-value and in order, so forgetting one of those
-	// still gets you a red build. This list is the one nothing backstops: it is
-	// a fifth edit alongside the four registry enums, not a check on them.
+	// two places here: mctlAgentsServices in registry.go (every
+	// ParameterDef enum and every mcplib.Enum in internal/mcp/server.go is
+	// derived from it) and wantServices above. Derivation
+	// is enforced by TestEveryMctlAgentsServiceEnumIsDerived below. To sync with
+	// upstream, copy SERVICES from mctl-agents config/settings.py into both
+	// mctlAgentsServices and wantServices.
 	registry := NewRegistry()
 	// mctl-agents-approve and mctl-agents-reconcile duplicate the same enum
 	// (mctl-agents-investigate takes an issue_url instead of a service param,
@@ -807,5 +809,34 @@ func TestCreateTenantNameCappedAt31(t *testing.T) {
 	}
 	if errs := reg.ValidateInput(del, map[string]string{"tenant_name": name(63)}); hasTenantNameError(errs) {
 		t.Errorf("delete-tenant rejected a 63-character name, want it to keep accepting existing tenants: %v", errs)
+	}
+}
+
+// TestEveryMctlAgentsServiceEnumIsDerived is the drift test for mctl-api#274:
+// every "service" parameter of every mctl-agents-* operation must carry exactly
+// the single mctlAgentsServices list (with or without the leading "" meaning
+// "all"), and that list must equal wantServices. A hand-typed enum in a new or
+// existing operation fails here instead of rejecting a valid service at runtime.
+func TestEveryMctlAgentsServiceEnumIsDerived(t *testing.T) {
+	if !reflect.DeepEqual(mctlAgentsServices, wantServices) {
+		t.Fatalf("mctlAgentsServices = %v, want %v (sync with mctl-agents SERVICES)", mctlAgentsServices, wantServices)
+	}
+	checked := 0
+	for _, op := range NewRegistry().List() {
+		if !strings.HasPrefix(op.Name, "mctl-agents-") {
+			continue
+		}
+		for _, p := range op.Parameters {
+			if p.Name != "service" || len(p.Enum) == 0 {
+				continue
+			}
+			checked++
+			if !reflect.DeepEqual(p.Enum, mctlAgentsServices) && !reflect.DeepEqual(p.Enum, mctlAgentsServiceEnum) {
+				t.Errorf("operation %q service enum %v is not derived from mctlAgentsServices", op.Name, p.Enum)
+			}
+		}
+	}
+	if checked < 5 {
+		t.Fatalf("only %d mctl-agents-* service enums found; the walk is not seeing the operations", checked)
 	}
 }
