@@ -16,6 +16,7 @@ package contract
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/mctlhq/mctl-api/internal/secretscan"
 )
@@ -45,9 +46,10 @@ type Template struct {
 	SideEffects     []string
 }
 
-// templates is the closed allowlist (templates/v1). Isolated-model: the queue
-// and workflow names are contract placeholders, not registered workflows.
-var templates = map[string]Template{
+// registry is the closed template registry (templates/v1); registration does
+// not enable a template (see TemplateEnabled). Isolated-model: the queue and
+// workflow names are contract placeholders, not registered workflows.
+var registry = map[string]Template{
 	"reminder.v1": {
 		ID: "reminder.v1", ParamsSchema: "template-reminder.v1.schema.json",
 		Capability: "notify.surface", TaskQueue: "mctl-dev-loop", WorkflowType: "AutomationReminder",
@@ -60,10 +62,21 @@ var templates = map[string]Template{
 	},
 }
 
-// LookupTemplate resolves a template id on the allowlist.
+// enabledTemplates is the MVP gate on (template, kind) pairs: only reminder.v1
+// with "at" is enabled. support.diagnostic-followup.v1 is registered and
+// schema-valid but absent here until separately authorized.
+var enabledTemplates = map[string][]string{"reminder.v1": {"at"}}
+
+// LookupTemplate resolves a template id in the registry. It says nothing about
+// whether the template is enabled.
 func LookupTemplate(id string) (Template, bool) {
-	t, ok := templates[id]
+	t, ok := registry[id]
 	return t, ok
+}
+
+// TemplateEnabled reports whether (id, kind) is on the enabled allowlist.
+func TemplateEnabled(id, kind string) bool {
+	return slices.Contains(enabledTemplates[id], kind)
 }
 
 func checkReminderText(params map[string]any) error {

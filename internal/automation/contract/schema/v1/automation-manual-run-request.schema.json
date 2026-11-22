@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mctl.ai/schemas/automation/v1/automation-manual-run-request.schema.json",
+  "title": "automation-manual-run-request.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["idempotency_key"],
+  "properties": {
+    "schema_version": {"const": "automation/v1"},
+    "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 128}
+  }
+}

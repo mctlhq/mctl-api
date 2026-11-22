@@ -25,6 +25,49 @@ const (
 	SupportMaxFires = 3
 )
 
+// SupportTokenMaxTTL is the longest a support run token may live. It mirrors
+// AgentScopeSupport.MaxTTL in internal/auth/agent_scope.go (not imported: that
+// package is out of scope). A definition TTL of up to SupportMaxTTL never
+// extends a run token past this.
+const SupportTokenMaxTTL = time.Hour
+
+// SupportFireInputs are the already-resolved facts a Support fire needs.
+type SupportFireInputs struct {
+	ConsentLive        bool // tenant owner consent is live for this fire
+	ConsentVerified    bool // consent was independently verified
+	TokenMintedForFire bool // minted for this fire through the separately approved path
+	TokenSelfMinted    bool // minted by an agent or service itself
+	TokenTTL           time.Duration
+	TokenExpiresAt     time.Time
+	Now                time.Time
+	AuthRef            string
+	AuthRefLive        bool
+}
+
+// CheckSupportFire requires live, independently verified owner consent and a
+// token freshly minted for this fire, unexpired, at most SupportTokenMaxTTL,
+// not self-minted. An auth_ref never authorizes by presence. It does not assume
+// mctl-api#901 is approved. Claim class: isolated-model.
+func CheckSupportFire(in SupportFireInputs) error {
+	switch {
+	case !in.ConsentLive:
+		return fail(CodeSupportConstraint, "live tenant owner consent required")
+	case !in.ConsentVerified:
+		return fail(CodeSupportConstraint, "consent must be independently verified")
+	case !in.TokenMintedForFire:
+		return fail(CodeSupportConstraint, "token must be minted for this fire")
+	case in.TokenSelfMinted:
+		return fail(CodeSupportConstraint, "token must not be self-minted")
+	case in.TokenTTL <= 0 || in.TokenTTL > SupportTokenMaxTTL:
+		return fail(CodeSupportConstraint, "token ttl must be within %s", SupportTokenMaxTTL)
+	case in.TokenExpiresAt.IsZero() || !in.Now.Before(in.TokenExpiresAt):
+		return fail(CodeSupportConstraint, "token expired")
+	case in.AuthRef != "" && !in.AuthRefLive:
+		return fail(CodeSupportConstraint, "auth_ref requires live authorization")
+	}
+	return nil
+}
+
 // SupportInputs are the already-resolved facts the Support constraints apply to.
 type SupportInputs struct {
 	OwnerAuthorized   bool

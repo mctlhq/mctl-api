@@ -22,18 +22,18 @@ import (
 	_ "time/tzdata"
 )
 
-// mvpTriggers is the MVP gate on (template, kind) pairs: only reminder.v1
-// with "at" is enabled. Support templates are not enabled yet.
-var mvpTriggers = map[string][]string{"reminder.v1": {"at"}}
-
 var offsetOnlyZone = regexp.MustCompile(`^(UTC|GMT)?[+-]?[0-9]`)
+
+// gmtNumericZone matches the fixed-offset GMT family (Etc/GMT+2, Etc/GMT-14,
+// Etc/GMT0, GMT0, GMT+0). Plain GMT and Etc/GMT stay accepted.
+var gmtNumericZone = regexp.MustCompile(`^(Etc/)?GMT[+-]?[0-9]+$`)
 
 // CheckTrigger applies the semantic rules the schema cannot express: the MVP
 // gate, the template's allowed kinds, unsupported event sources and the local
 // time resolution (zone, DST gap and fold).
 func CheckTrigger(trig map[string]any, tmpl Template) error {
 	k, _ := trig["kind"].(string)
-	if !slices.Contains(mvpTriggers[tmpl.ID], k) || !slices.Contains(tmpl.AllowedTriggers, k) {
+	if !TemplateEnabled(tmpl.ID, k) || !slices.Contains(tmpl.AllowedTriggers, k) {
 		return fail(CodeTriggerUnsupported, "trigger kind %q", k)
 	}
 	if k == "event" {
@@ -60,7 +60,7 @@ func CheckTrigger(trig map[string]any, tmpl Template) error {
 // "reject". "reject" yields automation_time_ambiguous. An unknown zone or an
 // offset-only zone yields automation_invalid. See docs/automation-contract.md.
 func ResolveAt(local, zone, gap, fold string) (time.Time, error) {
-	if zone == "" || zone == "Local" || offsetOnlyZone.MatchString(zone) {
+	if zone == "" || zone == "Local" || offsetOnlyZone.MatchString(zone) || gmtNumericZone.MatchString(zone) {
 		return time.Time{}, fail(CodeInvalid, "zone must be an IANA zone name")
 	}
 	loc, err := time.LoadLocation(zone)

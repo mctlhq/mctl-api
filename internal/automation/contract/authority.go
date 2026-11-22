@@ -64,6 +64,19 @@ const (
 	InstallExpired
 )
 
+// UsageAuthority is what backs the per-run, per-day and per-tenant usage
+// ceilings. Commerce payer/payment limits (monthly, per-request) are a payment
+// control, not inference usage metering, so they never satisfy the ceilings.
+// The real metering authority is unknown. The zero value is UsageAuthorityUnknown.
+type UsageAuthority int
+
+// Usage authorities.
+const (
+	UsageAuthorityUnknown UsageAuthority = iota
+	UsageAuthorityCommercePayment
+	UsageAuthorityVerifiedMetering
+)
+
 // ApprovalBinding is the execution an aar_ is bound to.
 type ApprovalBinding struct{ ExecutionID string }
 
@@ -85,6 +98,9 @@ type Inputs struct {
 	PinnedPolicyVersion string
 	LivePolicyVersion   string
 
+	// UsageAuthority names what the headroom values come from. Only
+	// UsageAuthorityVerifiedMetering allows a fire.
+	UsageAuthority    UsageAuthority
 	BudgetNeeded      int64
 	HeadroomPerRun    int64
 	HeadroomPerDay    int64
@@ -126,6 +142,10 @@ func Decide(cp Checkpoint, in Inputs) Decision {
 	}
 	if in.PinnedPolicyVersion != in.LivePolicyVersion {
 		return deny(CodePolicyDrift)
+	}
+	if in.UsageAuthority != UsageAuthorityVerifiedMetering {
+		// Unknown, or only Commerce payment: deny whatever the headroom.
+		return deny(CodeAuthorityUnavailable)
 	}
 	if in.BudgetNeeded > in.HeadroomPerRun || in.BudgetNeeded > in.HeadroomPerDay || in.BudgetNeeded > in.HeadroomPerTenant {
 		return deny(CodeBudgetExhausted)
