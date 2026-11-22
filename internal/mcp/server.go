@@ -17,6 +17,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -158,16 +159,70 @@ func (s *Server) displayURL() string {
 // fully redact a loopback failure.
 var loopbackFragmentPattern = regexp.MustCompile(`(?i)(\[::1\]|127(?:\.\d{1,3}){3}|\blocalhost\b)(:\d+)?`)
 
-// redactUpstream strips the internal upstream base URL (and any loopback
-// address fragment that might otherwise leak through, e.g. from a dial error)
-// from an error message rendered to a caller. The full error is still
-// available to operators via server-side slog logging at the call site.
-func (s *Server) redactUpstream(err error) string {
-	if s.apiURL == "" {
-		return err.Error()
+// urlUserinfoPattern matches the "user:password@" part of a URL authority.
+// Upstream and transport errors quote the full request URL, so credentials
+// embedded in it would otherwise reach the MCP client.
+var urlUserinfoPattern = regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://)[^\s/@"']+@`)
+
+// internalHostPattern matches cluster-internal DNS names (*.svc,
+// *.cluster.local, *.internal) and RFC 1918 addresses, each with an optional
+// port.
+var internalHostPattern = regexp.MustCompile(
+	`(?i)(\b[a-z0-9-]+(\.[a-z0-9-]+)*\.(svc|cluster\.local|internal)\b|` +
+		`\b(10(\.\d{1,3}){3}|192\.168(\.\d{1,3}){2}|172\.(1[6-9]|2\d|3[01])(\.\d{1,3}){2})\b)(:\d+)?`)
+
+// redactErrorText strips from an error message rendered to a caller: the
+// internal upstream base URL, loopback address fragments (e.g. from a dial
+// error), credentials embedded in URLs and cluster-internal hosts. The full
+// error is still available to operators via server-side slog logging.
+func (s *Server) redactErrorText(msg string) string {
+	if s.apiURL != "" {
+		msg = strings.ReplaceAll(msg, s.apiURL, "the mctl API")
 	}
-	msg := strings.ReplaceAll(err.Error(), s.apiURL, "the mctl API")
-	return loopbackFragmentPattern.ReplaceAllString(msg, "the mctl API")
+	msg = urlUserinfoPattern.ReplaceAllString(msg, "${1}")
+	msg = loopbackFragmentPattern.ReplaceAllString(msg, "the mctl API")
+	return internalHostPattern.ReplaceAllString(msg, "an internal host")
+}
+
+// redactUpstream renders err for a caller with redactErrorText applied.
+func (s *Server) redactUpstream(err error) string {
+	return s.redactErrorText(err.Error())
+}
+
+// redactToolErrors is the one shared error path: every tool error result
+// (IsError) and every handler error passes through it, so no handler has to
+// remember to redact an upstream error it formats into its message (~85 sites
+// format "Failed to ...: %v" with the raw upstream error). Successful results
+// are untouched. Innermost middleware, so tracing sees the redacted text too.
+func (s *Server) redactToolErrors(next server.ToolHandlerFunc) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		res, err := next(ctx, req)
+		if err != nil {
+			if msg := s.redactErrorText(err.Error()); msg != err.Error() {
+				err = errors.New(msg)
+			}
+		}
+		if res == nil || !res.IsError {
+			return res, err
+		}
+		content := make([]mcplib.Content, len(res.Content))
+		for i, c := range res.Content {
+			switch t := c.(type) {
+			case mcplib.TextContent:
+				t.Text = s.redactErrorText(t.Text)
+				content[i] = t
+			case *mcplib.TextContent:
+				cp := *t
+				cp.Text = s.redactErrorText(cp.Text)
+				content[i] = cp
+			default:
+				content[i] = c
+			}
+		}
+		out := *res
+		out.Content = content
+		return &out, err
+	}
 }
 
 // NewStreamableHTTPHandler returns an HTTP handler that serves the MCP Streamable HTTP transport.
@@ -242,6 +297,9 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 		// Innermost, so a recovered panic flows back out through the tracing
 		// middleware as an error and the span is marked failed.
 		server.WithToolHandlerMiddleware(recoverToolPanic),
+		// Registered last, so innermost: redacts every tool error result
+		// before anything else sees it.
+		server.WithToolHandlerMiddleware(s.redactToolErrors),
 	)
 	s.mcpServer = srv
 

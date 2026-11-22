@@ -1,0 +1,103 @@
+// Copyright 2025 MCTL Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package mcp
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+// The upstream answers 500 with a message carrying a URL with credentials and
+// cluster-internal hosts. Handlers format that into "Failed to ...: %v", so
+// only the shared middleware keeps it from the MCP client.
+func TestToolErrors_UpstreamSecretsRedactedAcrossHandlers(t *testing.T) {
+	const upstreamMsg = `{"error":"dial postgres://admin:hunter2@db.team-a.svc.cluster.local:5432/app: refused; fallback http://10.1.2.3:8080 and https://vault.internal:8200"}`
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(upstreamMsg))
+	}))
+	defer api.Close()
+	s := NewServer(api.URL, "")
+	srv := s.NewMCPServer()
+
+	calls := []struct {
+		tool string
+		args map[string]any
+	}{
+		{"mctl_list_tenants", map[string]any{}},
+		{"mctl_list_services", map[string]any{"team": "team-a"}},
+		{"mctl_get_tenant", map[string]any{"name": "team-a"}},
+		{"mctl_get_incident", map[string]any{"id": "inc-1"}},
+		{"mctl_list_workflows", map[string]any{}},
+		{"mctl_list_recent_operations", map[string]any{}},
+	}
+	for _, c := range calls {
+		res, rpcErr := callTool(t, srv, c.tool, c.args)
+		if res == nil {
+			t.Errorf("%s: protocol-level error %q", c.tool, rpcErr)
+			continue
+		}
+		if !res.IsError {
+			t.Errorf("%s: expected an error result", c.tool)
+			continue
+		}
+		text := resultText(t, res)
+		if !strings.Contains(text, "Failed to") {
+			t.Errorf("%s: message lost its readable prefix: %s", c.tool, text)
+		}
+		for _, leak := range []string{"hunter2", "admin:", "svc.cluster.local", "10.1.2.3", "vault.internal", api.URL} {
+			if strings.Contains(text, leak) {
+				t.Errorf("%s: error leaked %q: %s", c.tool, leak, text)
+			}
+		}
+	}
+}
+
+func TestRedactErrorText(t *testing.T) {
+	s := NewServer("http://api.example.test:9000", "")
+	tests := []struct{ in, want string }{
+		{"missing required argument: team", "missing required argument: team"},
+		{"invalid issue_url: not a URL", "invalid issue_url: not a URL"},
+		{"GET http://api.example.test:9000/x failed", "GET the mctl API/x failed"},
+		{"dial https://u:p@example.com/x", "dial https://example.com/x"},
+		{"dial tcp 192.168.1.5:5432", "dial tcp an internal host"},
+		{"dial tcp 172.20.0.1", "dial tcp an internal host"},
+		{"public 172.32.0.1 stays", "public 172.32.0.1 stays"},
+		{"see https://docs.example.com/x", "see https://docs.example.com/x"},
+	}
+	for _, tc := range tests {
+		if got := s.redactErrorText(tc.in); got != tc.want {
+			t.Errorf("redactErrorText(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// Successful results are never rewritten, even when they contain internal
+// looking text: only error results are redacted.
+func TestRedactToolErrors_SuccessUntouched(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"host":"db.team-a.svc.cluster.local"}`))
+	}))
+	defer api.Close()
+	res, rpcErr := callTool(t, NewServer(api.URL, "").NewMCPServer(), "mctl_list_tenants", map[string]any{})
+	if res == nil || res.IsError {
+		t.Fatalf("expected success, got %+v %q", res, rpcErr)
+	}
+	if got := resultText(t, res); !strings.Contains(got, "db.team-a.svc.cluster.local") {
+		t.Errorf("success result was rewritten: %s", got)
+	}
+}
