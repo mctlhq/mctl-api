@@ -172,6 +172,9 @@ var governedAgentTools = toolSet(
 	"mctl_request_deploy_approval",
 	// Spends an owner's grant and submits preview-deploy (mctl-api#1026).
 	"mctl_deploy_apply",
+	// Requests one deny sync window, then spends the owner's approval to open
+	// a gitops pull request; an agent needs a receipt for either call.
+	"mctl_propose_release_window",
 	"mctl_add_custom_domain",
 	"mctl_approve_dev_loop",
 	"mctl_bind_agent_release",

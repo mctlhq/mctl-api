@@ -822,6 +822,7 @@ func NewRouter(opts Options) http.Handler {
 			if h.opts.ReleaseWindows.enabled() && h.opts.WorkItems != nil {
 				r.Post("/release/windows", h.RequestReleaseWindow)
 				r.Get("/release/windows", h.ListReleaseWindows)
+				r.Post("/release/windows/{approval_id}/execute", h.ExecuteReleaseWindow)
 			}
 			r.Get("/deploy/deployments/{id}", h.GetDeployment)
 			r.Get("/status/{team}/{app}", h.GetServiceStatus)

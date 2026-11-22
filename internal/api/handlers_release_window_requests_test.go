@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -55,15 +57,64 @@ func (a *windowArgo) GetAppSyncWindows(project, app string) (*argocd.AppSyncWind
 	return &argocd.AppSyncWindows{Application: app, CanSync: true}, nil
 }
 
+// recordingDispatcher records what would have been dispatched. delay holds
+// each call open, so concurrent callers overlap.
+type recordingDispatcher struct {
+	mu    sync.Mutex
+	calls []dispatchCall
+	err   error
+	delay time.Duration
+}
+
+type dispatchCall struct {
+	owner, repo, workflow, ref string
+	inputs                     map[string]string
+}
+
+func (d *recordingDispatcher) Dispatch(_ context.Context, owner, repo, workflow, ref string, inputs map[string]string) error {
+	if d.delay > 0 {
+		time.Sleep(d.delay)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.calls = append(d.calls, dispatchCall{owner, repo, workflow, ref, inputs})
+	return d.err
+}
+
+func (d *recordingDispatcher) count() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.calls)
+}
+
+func (d *recordingDispatcher) setErr(err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.err = err
+}
+
 type windowFixture struct {
-	router http.Handler
-	head   *fakeWindowHead
-	argo   *windowArgo
-	wi     *workitems.Store
+	router   http.Handler
+	head     *fakeWindowHead
+	argo     *windowArgo
+	wi       *workitems.Store
+	dispatch *recordingDispatcher
+}
+
+type windowFixtureOpts struct {
+	enabled      bool
+	noDispatcher bool
+	repository   string
 }
 
 func newWindowFixture(t *testing.T, enabled bool) *windowFixture {
 	t.Helper()
+	return newWindowFixtureWith(t, windowFixtureOpts{enabled: enabled})
+}
+
+func newWindowFixtureWith(t *testing.T, fo windowFixtureOpts) *windowFixture {
+	t.Helper()
+	enabled := fo.enabled
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
 		if os.Getenv("CI") != "" {
@@ -92,8 +143,12 @@ func newWindowFixture(t *testing.T, enabled bool) *windowFixture {
 		Registry: operations.NewRegistry(), GitReader: &fakeGitReader{}, ArgoCD: f.argo,
 		AuditLog: audit.NewLogger(), Executor: &fakeExecutor{}, WorkItems: wi,
 	}
+	f.dispatch = &recordingDispatcher{}
+	if !fo.noDispatcher {
+		opts.WorkflowDispatcher = f.dispatch
+	}
 	if enabled {
-		opts.ReleaseWindows = &mctlapi.ReleaseWindowOptions{Head: f.head}
+		opts.ReleaseWindows = &mctlapi.ReleaseWindowOptions{Head: f.head, Repository: fo.repository}
 	}
 	f.router = mctlapi.NewRouter(opts)
 	return f
