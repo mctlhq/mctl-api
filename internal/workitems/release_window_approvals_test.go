@@ -104,7 +104,8 @@ func TestWidestWindowFitsTheTarget(t *testing.T) {
 	for i := 0; i < MaxReleaseWindowApplications; i++ {
 		w.Applications = append(w.Applications, fmt.Sprintf("%02d-%s", i, strings.Repeat("a", 60)))
 	}
-	// The longest schedule Validate lets through, so this really is the widest legal window.
+	// The longest of every field Validate lets through, so this really is the widest legal window.
+	w.Project, w.Duration = "platform", "9999h9999m"
 	w.Schedule = strings.Repeat("0,", 45) + "0 22 * * 5"
 	if len(w.Schedule) > MaxReleaseWindowScheduleLen {
 		t.Fatalf("test schedule is %d bytes, over the %d bound", len(w.Schedule), MaxReleaseWindowScheduleLen)

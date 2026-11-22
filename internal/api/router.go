@@ -482,6 +482,8 @@ type Handlers struct {
 	deployApproval *deployDecider
 	// releaseApproval is the release approval page; nil when not mounted.
 	releaseApproval *releaseDecider
+	// releaseWindowApproval is the release window approval page; nil when not mounted.
+	releaseWindowApproval *windowDecider
 }
 
 // NewRouter creates the HTTP router with all API routes.
@@ -504,6 +506,11 @@ func NewRouter(opts Options) http.Handler {
 	}
 	if opts.ReleaseApproval.enabled() && opts.ReleaseGrants.enabled() && opts.WorkItems != nil {
 		h.releaseApproval = newReleaseDecider(opts.ReleaseApproval)
+	}
+	// The window page shares the release page's configuration (client,
+	// deciders, required amr) and needs the window routes as well.
+	if opts.ReleaseApproval.enabled() && opts.ReleaseWindows.enabled() && opts.WorkItems != nil {
+		h.releaseWindowApproval = newWindowDecider(opts.ReleaseApproval)
 	}
 	if opts.OAuthZitadel != nil {
 		h.oauthZitadel = &oauthZitadel{opts: opts.OAuthZitadel, lazyOIDCProvider: lazyOIDCProvider{issuer: opts.OAuthZitadel.Issuer}}
@@ -614,6 +621,14 @@ func NewRouter(opts Options) http.Handler {
 			r.Get(releaseCallbackPath, h.handleReleaseApprovalCallback)
 			r.Post(releaseConfirmPath, h.handleReleaseApprovalConfirm)
 			r.Get(releasePagePrefix+"{approval_ref}", h.handleReleaseApprovalPage)
+		}
+		// Release window approval page (sync-window write path, S2): dark
+		// unless configured. Own callback path, cookie and flow kinds.
+		if h.releaseWindowApproval != nil {
+			r.Post(releaseWindowStartPath, h.handleReleaseWindowApprovalStart)
+			r.Get(releaseWindowCallbackPath, h.handleReleaseWindowApprovalCallback)
+			r.Post(releaseWindowConfirmPath, h.handleReleaseWindowApprovalConfirm)
+			r.Get(releaseWindowPagePrefix+"{approval_ref}", h.handleReleaseWindowApprovalPage)
 		}
 	})
 	r.Group(func(r chi.Router) {

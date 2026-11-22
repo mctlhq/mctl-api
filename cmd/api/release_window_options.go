@@ -41,9 +41,10 @@ func releaseWindowOptions(env releaseWindowEnv, token ghtoken.Source, haveLedger
 		slog.Error("release windows disabled: the work-items store is not configured")
 		return nil
 	}
-	return &mctlapi.ReleaseWindowOptions{Head: &gitopshead.Resolver{
+	repo := strings.ToLower(envDefault(env.Repository, "mctlhq/mctl-gitops"))
+	return &mctlapi.ReleaseWindowOptions{Repository: repo, Head: &gitopshead.Resolver{
 		Token:      token,
-		Repository: strings.ToLower(envDefault(env.Repository, "mctlhq/mctl-gitops")),
+		Repository: repo,
 		Branch:     envDefault(env.Branch, "main"),
 	}}
 }
