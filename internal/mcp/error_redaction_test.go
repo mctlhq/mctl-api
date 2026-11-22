@@ -28,7 +28,7 @@ import (
 // cluster-internal hosts. Handlers format that into "Failed to ...: %v", so
 // only the shared middleware keeps it from the MCP client.
 func TestToolErrors_UpstreamSecretsRedactedAcrossHandlers(t *testing.T) {
-	const upstreamMsg = `{"error":"dial postgres://admin:hunter2@db.team-a.svc.cluster.local:5432/app: refused; fallback http://10.1.2.3:8080 and https://vault.internal:8200"}`
+	const upstreamMsg = `{"error":"dial postgres://admin:hunter2@db.team-a.svc.cluster.local:5432/app: refused; fallback http://10.1.2.3:8080 and https://vault.internal:8200"}` //nolint:gosec // G101: synthetic credentials, the test asserts they are redacted
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(upstreamMsg))
@@ -140,7 +140,7 @@ func TestRemoveCustomDomain_RegistryWarningRedacted(t *testing.T) {
 // skill prompt must redact its own upstream errors.
 func TestPromptPlatformSkill_UpstreamErrorRedacted(t *testing.T) {
 	for name, body := range map[string]string{
-		"500":       `{"error":"dial postgres://admin:hunter2@db.team-a.svc.cluster.local:5432 refused"}`,
+		"500":       `{"error":"dial postgres://admin:hunter2@db.team-a.svc.cluster.local:5432 refused"}`, //nolint:gosec // G101: synthetic credentials, the test asserts they are redacted
 		"malformed": ``,
 	} {
 		t.Run(name, func(t *testing.T) {
