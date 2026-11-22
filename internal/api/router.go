@@ -169,6 +169,10 @@ type Options struct {
 	// DomainVerifier resolves TXT/CNAME records to prove custom domain
 	// ownership (optional — nil makes /domains/*verify return 503).
 	DomainVerifier *domains.Verifier
+	// DomainProber fetches a custom domain over HTTPS before the status
+	// callback may mark it active (optional — nil makes that transition 503
+	// instead of trusting configuration alone).
+	DomainProber domains.Prober
 	// PlatformDomain is the platform's own domain (e.g. "mctl.ai"). Hostnames
 	// equal to or ending in "."+PlatformDomain are rejected by AddDomain —
 	// those stay GitOps-only via ingress.hosts. Defaults to "mctl.ai" when empty.

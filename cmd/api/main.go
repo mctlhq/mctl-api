@@ -1592,6 +1592,7 @@ func main() {
 		ReviewWorkerIngestEnabled:      strings.EqualFold(strings.TrimSpace(os.Getenv("REVIEW_WORKER_INGEST_ENABLED")), "true"),
 		DomainStore:                    domainStore,
 		DomainVerifier:                 domainVerifier,
+		DomainProber:                   &domains.HTTPSProber{},
 		PlatformDomain:                 cfg.PlatformDomain,
 		// Must equal the workflow's GITOPS_ORG (mctl-platform-config):
 		// preview-deploy refuses an image outside ghcr.io/<GITOPS_ORG>/.

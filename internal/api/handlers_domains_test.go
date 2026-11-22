@@ -546,9 +546,77 @@ func TestUpdateDomainStatus_HumanForbidden(t *testing.T) {
 	}
 }
 
+type fakeDomainProber struct {
+	err   error
+	hosts []string
+}
+
+func (f *fakeDomainProber) Probe(_ context.Context, host string) error {
+	f.hosts = append(f.hosts, host)
+	return f.err
+}
+
+// patchActive registers host and has the service principal PATCH it active.
+func patchActive(t *testing.T, store *domains.Store, prober domains.Prober, host string) (*httptest.ResponseRecorder, string) {
+	t.Helper()
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, DomainProber: prober, PlatformDomain: "mctl.ai"}}
+	addRec := httptest.NewRecorder()
+	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
+		strings.NewReader(`{"team":"labs","service":"svc","domain":"`+host+`"}`)),
+		auth.NewGitHubUser("u1", []string{"labs"})))
+	var created map[string]interface{}
+	_ = json.Unmarshal(addRec.Body.Bytes(), &created)
+	id, _ := created["id"].(string)
+	req := withURLParam(withUser(httptest.NewRequest(http.MethodPatch, "/api/v1/domains/"+id,
+		strings.NewReader(`{"status":"active"}`)), auth.NewServiceUser()), "id", id)
+	rec := httptest.NewRecorder()
+	h.UpdateDomainStatus(rec, req)
+	return rec, id
+}
+
+func TestUpdateDomainStatus_ActiveNeedsAnObservedHTTPSAnswer(t *testing.T) {
+	store := newTestDomainStore(t)
+
+	// Probe passes: active, and the stored hostname is what was probed.
+	ok := &fakeDomainProber{}
+	rec, id := patchActive(t, store, ok, "probe-ok.example.com")
+	if rec.Code != http.StatusOK || len(ok.hosts) != 1 || ok.hosts[0] != "probe-ok.example.com" {
+		t.Fatalf("status=%d hosts=%v body=%q", rec.Code, ok.hosts, rec.Body.String())
+	}
+	if d, _ := store.Get(context.Background(), id); d == nil || d.Status != domains.StatusActive {
+		t.Fatalf("row = %+v, want active", d)
+	}
+
+	// Probe fails: 502, row failed with the hint, never active.
+	bad := &fakeDomainProber{err: &domains.ProbeError{Hint: "HTTP 520: origin TLS handshake problem"}}
+	rec, id = patchActive(t, store, bad, "probe-bad.example.com")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%q", rec.Code, rec.Body.String())
+	}
+	d, _ := store.Get(context.Background(), id)
+	if d == nil || d.Status != domains.StatusFailed || !strings.Contains(d.LastError, "520") {
+		t.Fatalf("row = %+v, want failed with the hint", d)
+	}
+
+	// A prober error that is not a ProbeError is still not active.
+	odd := &fakeDomainProber{err: errors.New("dial 10.0.0.7: connection refused")}
+	rec, id = patchActive(t, store, odd, "probe-odd.example.com")
+	d, _ = store.Get(context.Background(), id)
+	if rec.Code != http.StatusBadGateway || d.Status != domains.StatusFailed || strings.Contains(d.LastError, "10.0.0.7") {
+		t.Fatalf("status=%d row=%+v, want failed without the raw transport error", rec.Code, d)
+	}
+
+	// No prober configured: cannot probe, so not active and the row is untouched.
+	rec, id = patchActive(t, store, nil, "probe-none.example.com")
+	d, _ = store.Get(context.Background(), id)
+	if rec.Code != http.StatusServiceUnavailable || d.Status == domains.StatusActive || d.Status == domains.StatusFailed {
+		t.Fatalf("status=%d row=%+v, want 503 and an unchanged row", rec.Code, d)
+	}
+}
+
 func TestUpdateDomainStatus_ServicePrincipalAllowed(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, DomainProber: &fakeDomainProber{}, PlatformDomain: "mctl.ai"}}
 
 	addRec := httptest.NewRecorder()
 	h.AddDomain(addRec, withUser(httptest.NewRequest(http.MethodPost, "/api/v1/domains",
@@ -890,7 +958,7 @@ func TestListDomains_IncludesChallengeForPending(t *testing.T) {
 // cname_target must still be present.
 func TestListDomains_OmitsChallengeForActive(t *testing.T) {
 	store := newTestDomainStore(t)
-	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, PlatformDomain: "mctl.ai"}}
+	h := &Handlers{opts: Options{GitReader: domainTestRoles(), DomainStore: store, DomainProber: &fakeDomainProber{}, PlatformDomain: "mctl.ai"}}
 	owner := auth.NewGitHubUser("u1", []string{"labs"})
 
 	addRec := httptest.NewRecorder()

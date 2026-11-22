@@ -708,6 +708,15 @@ func (h *Handlers) UpdateDomainStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := chi.URLParam(r, "id")
+	if req.Status == domains.StatusActive {
+		// The workflow only proves DNS and ingress config. Active means the
+		// domain answers over HTTPS, so fetch it first (mctl-api#286). The
+		// hostname is tenant-controlled: the prober is SSRF-safe, and
+		// anything short of an observed answer is not active.
+		if !h.probeBeforeActive(w, r, id) {
+			return
+		}
+	}
 	if err := h.opts.DomainStore.SetStatus(r.Context(), id, req.Status, req.Error); err != nil {
 		if errors.Is(err, domains.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "domain not found")
@@ -723,4 +732,40 @@ func (h *Handlers) UpdateDomainStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, d)
+}
+
+// probeBeforeActive fetches the domain over HTTPS before it may become
+// active. It returns true only when the probe observed an acceptable answer;
+// otherwise it has already written the response, and a failed probe has
+// moved the row to failed with a hint (never active). A missing prober is an
+// inability to probe: 503, row unchanged.
+func (h *Handlers) probeBeforeActive(w http.ResponseWriter, r *http.Request, id string) bool {
+	d, err := h.opts.DomainStore.Get(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, domains.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "domain not found")
+			return false
+		}
+		writeError(w, http.StatusInternalServerError, "failed to read domain")
+		return false
+	}
+	if h.opts.DomainProber == nil {
+		writeError(w, http.StatusServiceUnavailable, "domain HTTPS probe not configured; cannot mark the domain active")
+		return false
+	}
+	perr := h.opts.DomainProber.Probe(r.Context(), d.Domain)
+	if perr == nil {
+		return true
+	}
+	hint := "https probe could not verify the domain"
+	var pe *domains.ProbeError
+	if errors.As(perr, &pe) {
+		hint = pe.Error()
+	}
+	slog.Warn("custom domain not verified over https", "domain", d.Domain, "id", id)
+	if err := h.opts.DomainStore.SetStatus(r.Context(), id, domains.StatusFailed, hint); err != nil {
+		slog.Error("failed to record domain probe failure", "id", id, "error", err)
+	}
+	writeError(w, http.StatusBadGateway, "domain is not active: "+hint)
+	return false
 }
