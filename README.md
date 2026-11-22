@@ -93,7 +93,7 @@ make run &
 make run-mcp
 ```
 
-Auth is bypassed locally (`AUTH_REQUIRED` defaults to `false` when unset). Set `AUTH_REQUIRED=true` to test authentication.
+Authentication is required by default (`AUTH_REQUIRED` is `true` unless explicitly set to `false`). For local development set `AUTH_REQUIRED=false` to bypass it.
 
 ### Docker
 
