@@ -63,6 +63,10 @@ type ReleaseWindowOptions struct {
 	Repository string
 	// TTL is how long a request stays decidable; zero means 72 hours.
 	TTL time.Duration
+	// SettleTimeout bounds each settle that follows a dispatch; zero means 15
+	// seconds. It starts when the dispatch returns, so a slow dispatch does not
+	// spend it.
+	SettleTimeout time.Duration
 }
 
 func (o *ReleaseWindowOptions) enabled() bool { return o != nil && o.Head != nil }

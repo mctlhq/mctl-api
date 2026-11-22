@@ -396,3 +396,28 @@ func TestExecuteReleaseWindowSettlesAfterTheClientDisconnects(t *testing.T) {
 		}
 	})
 }
+
+// A slow dispatch must not spend the settle's budget: the settle's deadline
+// starts when the dispatch returns, so a dispatch slower than the settle bound
+// still settles. (The real dispatcher's HTTP timeout equals the default bound.)
+func TestExecuteReleaseWindowSlowDispatchStillSettles(t *testing.T) {
+	for name, c := range map[string]struct {
+		err  error
+		want string
+	}{
+		"accepted": {nil, workitems.ApprovalExecuted},
+		"failed":   {errors.New("github: timeout"), workitems.ApprovalApproved},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newWindowFixtureWith(t, windowFixtureOpts{enabled: true, settleTimeout: 300 * time.Millisecond})
+			f.dispatch.delay = 700 * time.Millisecond // longer than the settle bound
+			f.dispatch.setErr(c.err)
+			id := f.request(t)
+			f.approve(t, id)
+			postAsRaw(t, f.router, executePath(id), nil, adminUser)
+			if got := f.state(t, id); got != c.want {
+				t.Fatalf("state %s after a slow dispatch, want %s", got, c.want)
+			}
+		})
+	}
+}

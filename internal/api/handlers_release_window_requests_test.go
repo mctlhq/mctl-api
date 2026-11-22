@@ -111,6 +111,8 @@ type windowFixtureOpts struct {
 	enabled      bool
 	noDispatcher bool
 	repository   string
+	// settleTimeout overrides the settle bound after a dispatch (0 = default).
+	settleTimeout time.Duration
 }
 
 func newWindowFixture(t *testing.T, enabled bool) *windowFixture {
@@ -154,7 +156,7 @@ func newWindowFixtureWith(t *testing.T, fo windowFixtureOpts) *windowFixture {
 		opts.WorkflowDispatcher = f.dispatch
 	}
 	if enabled {
-		opts.ReleaseWindows = &mctlapi.ReleaseWindowOptions{Head: f.head, Repository: fo.repository}
+		opts.ReleaseWindows = &mctlapi.ReleaseWindowOptions{Head: f.head, Repository: fo.repository, SettleTimeout: fo.settleTimeout}
 	}
 	f.router = mctlapi.NewRouter(opts)
 	return f
