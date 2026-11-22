@@ -188,7 +188,7 @@ func TestRedactUpstream_NilErrorIsEmpty(t *testing.T) {
 // original is not mutated.
 func TestRedactToolErrors_PointerContentStaysPointer(t *testing.T) {
 	s := NewServer("http://api.example.test:9000", "")
-	orig := &mcplib.TextContent{Type: "text", Text: "dial postgres://u:pw@db.team-a.svc.cluster.local:5432 refused"}
+	orig := &mcplib.TextContent{Type: "text", Text: "dial postgres://u:pw@db.team-a.svc.cluster.local:5432 refused"} //nolint:gosec // G101: synthetic credentials, asserted away below
 	h := s.redactToolErrors(func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		return &mcplib.CallToolResult{IsError: true, Content: []mcplib.Content{orig}}, nil
 	})
