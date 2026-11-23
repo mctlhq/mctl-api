@@ -111,7 +111,7 @@ func TestExecuteReleaseWindowDispatchesOnce(t *testing.T) {
 		got["workflow_runs_url"] != "https://github.com/mctlhq/mctl-gitops/actions/workflows/release-window-pr.yml" {
 		t.Fatalf("response %v", got)
 	}
-	if !strings.Contains(got["next"].(string), "merged and synced nothing") {
+	if n := got["next"].(string); !strings.Contains(n, "merged and synced nothing") || !strings.Contains(n, "queues the pull request for merge") {
 		t.Errorf("the response overclaims: %v", got["next"])
 	}
 	if f.state(t, id) != workitems.ApprovalExecuted {

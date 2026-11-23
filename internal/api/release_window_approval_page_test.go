@@ -146,6 +146,11 @@ func (e *windowPageEnv) signIn(ref string, claims map[string]any) (*httptest.Res
 	if len(page.Result().Cookies()) != 0 || strings.Contains(page.Body.String(), "sha256:") {
 		e.t.Fatal("the link page set state or showed the window")
 	}
+	// The sign-in page is the first consent surface: it must already say that
+	// approving queues the pull request and that no person merges it.
+	if b := page.Body.String(); !strings.Contains(b, "queued for merge") || !strings.Contains(b, "no person reviews or merges it after you") {
+		e.t.Fatalf("the link page does not say what approving does: %s", b)
+	}
 	start := e.send(http.MethodPost, releaseWindowStartPath, nil, url.Values{"approval_ref": {ref}})
 	if start.Code != http.StatusSeeOther {
 		e.t.Fatalf("start = %d %s", start.Code, start.Body.String())
@@ -195,7 +200,8 @@ func TestReleaseWindowPage_DeciderApprovesWithEvidence(t *testing.T) {
 	hash, _ := win.WindowSHA256()
 	for _, want := range []string{"Project: apps", "labs-mctl-telegram, labs-mctl-web", `cron "0 22 * * 5" (UTC), duration 48h`,
 		"sha256:" + hash, win.BaseSHA, "labs-mctl-web: exists, can sync now yes", "labs-mctl-telegram: exists, can sync now no, active windows 1",
-		"https://github.com/mctlhq/mctl-gitops/commit/" + win.BaseSHA, "nothing is added to Git"} {
+		"https://github.com/mctlhq/mctl-gitops/commit/" + win.BaseSHA, "nothing is added to Git",
+		"queued for merge", "no person reviews or merges it after you"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("the decide page lacks %q:\n%s", want, body)
 		}
@@ -210,7 +216,7 @@ func TestReleaseWindowPage_DeciderApprovesWithEvidence(t *testing.T) {
 	if got.Code != http.StatusOK || !strings.Contains(got.Body.String(), "Release window approved") {
 		t.Fatalf("confirm = %d %s", got.Code, got.Body.String())
 	}
-	if b := got.Body.String(); !strings.Contains(b, "no pull request exists yet") || strings.Contains(b, "deployed") {
+	if b := got.Body.String(); !strings.Contains(b, "no pull request exists yet") || !strings.Contains(b, "queued for merge") || strings.Contains(b, "deployed") {
 		t.Fatalf("approved page overclaims: %s", b)
 	}
 	a := e.approval(id)
