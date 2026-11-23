@@ -25,6 +25,7 @@ import (
 
 	"github.com/mctlhq/mctl-api/internal/api"
 	"github.com/mctlhq/mctl-api/internal/auth"
+	"github.com/mctlhq/mctl-api/internal/glovo"
 	"github.com/mctlhq/mctl-api/internal/glovoconsent"
 )
 
@@ -37,11 +38,10 @@ import (
 // that is set but wrong is an error for the boot log and leaves the routes
 // unmounted (404); it never mounts with a default and never stops the boot.
 //
-// GLOVO_ACCESS_REQUIRED (default false) will switch slot accounting to approved
-// access requests (mctl-glovo#82). Today only "" and false are accepted: true
-// is refused at boot (consent stays off) until the grant source requires
-// approved access; anything else is a boot-log error and leaves consent off.
-// The access routes work either way.
+// GLOVO_ACCESS_REQUIRED (default false) switches slot accounting to approved
+// access requests (mctl-glovo#82) and makes the glovo:c2 grant source require
+// approved access (wireGlovoPersonalGrants). Anything but "", false and true is
+// a boot-log error and leaves consent off. The access routes work either way.
 //
 // GLOVO_C2_CAPACITY caps the active consents. Unset, 0 or malformed is
 // closed, logged at boot: the routes still mount, consent can be read and
@@ -60,12 +60,7 @@ func configureGlovoConsent(ctx context.Context, lookup func(string) (string, boo
 	switch strings.TrimSpace(rawAccess) {
 	case "", "false":
 	case "true":
-		// Fail closed: with the flag on, Record stops capping consents, but
-		// ConsentGrants still grants glovo:c2 on an active consent alone and
-		// no approve route exists yet, so flipping it would give uncapped,
-		// unapproved personal grants. Lift this once the grant source
-		// requires approved access.
-		return nil, errors.New("GLOVO_ACCESS_REQUIRED=true is refused until approved access gates the glovo:c2 grant; glovo consent stays off")
+		accessRequired = true
 	default:
 		return nil, fmt.Errorf("GLOVO_ACCESS_REQUIRED %q must be true or false; glovo consent stays off", rawAccess)
 	}
@@ -98,7 +93,7 @@ func configureGlovoConsent(ctx context.Context, lookup func(string) (string, boo
 		slog.Info("glovo link consent capacity", "capacity", capacity)
 	}
 	slog.Info("glovo access required", "enabled", accessRequired)
-	routes := &api.GlovoConsentRoutes{Enabled: true, Store: store, Capacity: capacity,
+	routes := &api.GlovoConsentRoutes{Enabled: true, Store: store, Capacity: capacity, AccessRequired: accessRequired,
 		ServiceProvider: provider, ServiceSubject: subject}
 	// The Postgres store carries the access side too. A store without it
 	// leaves the access routes and the `access` field off.
@@ -135,11 +130,23 @@ var glovoC2CapacityPattern = regexp.MustCompile(`^[1-9][0-9]{0,6}$`)
 // exactly as before. The consent source is the consent table itself, read on
 // every check: nothing is cached, so a withdrawn consent refuses the next
 // scope resolve and the next refresh.
+//
+// With GLOVO_ACCESS_REQUIRED on the source also reads the access state on
+// every check and requires it to be approved. If the access store is missing
+// then, the grants are not wired at all (fail closed: no personal grant is
+// better than an ungated one).
 func wireGlovoPersonalGrants(o *auth.OAuthServer, routes *api.GlovoRoutes, consent *api.GlovoConsentRoutes) bool {
 	if o == nil || routes == nil || !routes.Enabled || routes.Resolver == nil || consent == nil || !consent.Enabled || consent.Store == nil {
 		return false
 	}
 	src := glovoconsent.ConsentGrants{Store: consent.Store}
+	if consent.AccessRequired {
+		if glovo.IsNil(consent.Access) {
+			slog.Error("glovo personal grants not wired: GLOVO_ACCESS_REQUIRED is on but the store has no access side")
+			return false
+		}
+		src.Access = consent.Access
+	}
 	o.GlovoConsent = src
 	routes.Resolver.Consent = src
 	return true

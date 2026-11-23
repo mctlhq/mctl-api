@@ -102,6 +102,9 @@ type GlovoConsentRoutes struct {
 	// Access serves the self-service access routes and the `access` field of
 	// the service read (mctl-glovo#82). Nil: no access routes, no field.
 	Access GlovoAccessStore
+	// AccessRequired mirrors GLOVO_ACCESS_REQUIRED: the glovo:c2 grant
+	// source requires approved access (wired in cmd/api).
+	AccessRequired bool
 
 	once     sync.Once
 	perPrinc *httprate.RateLimiter
@@ -236,6 +239,11 @@ type glovoConsentView struct {
 }
 
 func (h *Handlers) auditGlovoConsent(r *http.Request, user *auth.User, op, status, pid string, rec *glovoconsent.Record, refusal string) {
+	if strings.HasPrefix(op, "glovo.access_request.") {
+		// Access operations carry only the principal, no consent version.
+		h.auditGlovoAccess(r, user, op, status, pid, refusal)
+		return
+	}
 	params := map[string]string{"principal": pid, "consent_version": glovoconsent.Version}
 	if rec != nil {
 		params["consent_id"] = rec.ID
