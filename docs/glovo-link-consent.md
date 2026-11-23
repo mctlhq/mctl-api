@@ -87,6 +87,9 @@ before the page can be used.
   live pending request only, revoke to approved access only; an expired pending
   request cannot be approved. The store enforces the same, so a second decider
   gets 409.
+- A decider cannot reject their own request (a self-rejection is stored like a
+  withdrawal and would read as `none`); approving or revoking one's own access is
+  allowed, since the owner is the only decider.
 - A reason is mandatory (at most 500 characters, no control characters) and is
   recorded with the decision; the store appends an event with the actor (the
   decider's principal id) and the reason. Approve passes `GLOVO_C2_CAPACITY` to

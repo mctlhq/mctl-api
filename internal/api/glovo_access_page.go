@@ -546,6 +546,11 @@ func (h *Handlers) handleGlovoAccessConfirm(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	actor := user.PrincipalID()
+	if decision == glovoAccessDecisionReject && actor == c.Principal {
+		h.auditGlovoAccessPage(r, user, id, c.Principal, "denied", "reject: own request")
+		d.failed(w, http.StatusConflict, "You cannot reject your own request: it would read as a withdrawal. Nothing was decided.")
+		return
+	}
 	_, err = h.decideGlovoAccess(r.Context(), decision, c.Principal, actor, reason)
 	switch {
 	case errors.Is(err, glovoconsent.ErrAccessNotPending), errors.Is(err, glovoconsent.ErrAccessNotApproved):

@@ -281,7 +281,7 @@ func TestGlovoAccessPage_ExpiredPendingCannotBeApproved(t *testing.T) {
 	a.RequestedAt, a.ExpiresAt = time.Now().Add(-8*24*time.Hour), time.Now().Add(-24*time.Hour)
 	e.acc.rows[accessPagePRN] = a
 	e.acc.mu.Unlock()
-	rec, ck, form := e.signIn(accessPagePRN, deciderClaims())
+	rec, _, form := e.signIn(accessPagePRN, deciderClaims())
 	if rec.Code != http.StatusOK || form.Get("challenge") != "" || strings.Contains(rec.Body.String(), "Approve access") ||
 		!strings.Contains(rec.Body.String(), "nothing to decide") {
 		t.Fatalf("expired callback = %d %s", rec.Code, rec.Body.String())
@@ -289,7 +289,7 @@ func TestGlovoAccessPage_ExpiredPendingCannotBeApproved(t *testing.T) {
 	// Forge the form: a request that expires between the page and the
 	// confirm is refused at confirm. Reopen as live, show, then let it lapse.
 	e.acc.set(accessPagePRN, glovoconsent.AccessPending)
-	_, ck, form = e.signIn(accessPagePRN, deciderClaims())
+	_, ck, form := e.signIn(accessPagePRN, deciderClaims())
 	e.acc.mu.Lock()
 	a = e.acc.rows[accessPagePRN]
 	a.ExpiresAt = time.Now().Add(-time.Minute)
@@ -300,6 +300,22 @@ func TestGlovoAccessPage_ExpiredPendingCannotBeApproved(t *testing.T) {
 	}
 	if e.acc.approveCalls != 0 || e.acc.rejectCalls != 0 {
 		t.Fatalf("a lapsed request reached the store: approve %d reject %d", e.acc.approveCalls, e.acc.rejectCalls)
+	}
+}
+
+// A decider cannot reject their own request: a self-rejection is stored like
+// a withdrawal and would read as none to the requester. Approving or revoking
+// one's own access stays allowed (the owner is the only decider).
+func TestGlovoAccessPage_SelfRejectionRefused(t *testing.T) {
+	e := newAccessPageEnv(t)
+	e.acc.set(basketAdminPRN, glovoconsent.AccessPending)
+	_, ck, form := e.signIn(basketAdminPRN, deciderClaims())
+	if got := e.confirm(ck, form, "reject", "r"); got.Code != http.StatusConflict || e.acc.rejectCalls != 0 {
+		t.Fatalf("self-reject = %d, reject calls %d", got.Code, e.acc.rejectCalls)
+	}
+	_, ck, form = e.signIn(basketAdminPRN, deciderClaims())
+	if got := e.confirm(ck, form, "approve", "owner"); got.Code != http.StatusOK || e.status(basketAdminPRN) != glovoconsent.AccessApproved {
+		t.Fatalf("self-approve = %d", got.Code)
 	}
 }
 
