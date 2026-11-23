@@ -61,13 +61,19 @@ import (
 // complete and the release window routes are enabled.
 
 const (
-	releaseWindowPageCookie      = "__Host-mctl_release_window_approval"
-	releaseWindowPagePrefix      = "/release/window-approvals/"
-	releaseWindowStartPath       = "/release/window-approvals/start"
-	releaseWindowCallbackPath    = "/release/window-approvals/callback"
-	releaseWindowConfirmPath     = "/release/window-approvals/confirm"
-	releaseWindowPageAuditOp     = "release-window-approval-page"
-	releaseWindowNotFoundMessage = "There is no release window approval with this reference waiting for you."
+	releaseWindowPageCookie = "__Host-mctl_release_window_approval"
+	releaseWindowPagePrefix = "/release/window-approvals/"
+	// The removal link differs only in the sign-in screen, so that its consent
+	// text can say what a removal does before anyone signs in. The start,
+	// callback and confirm routes, the cookie and the flow kinds are the
+	// window page's: no new redirect URI, and what is decided is read from the
+	// approval itself, never from which link was opened.
+	releaseWindowRemovalPagePrefix = "/release/window-removal-approvals/"
+	releaseWindowStartPath         = "/release/window-approvals/start"
+	releaseWindowCallbackPath      = "/release/window-approvals/callback"
+	releaseWindowConfirmPath       = "/release/window-approvals/confirm"
+	releaseWindowPageAuditOp       = "release-window-approval-page"
+	releaseWindowNotFoundMessage   = "There is no release window approval with this reference waiting for you."
 
 	releaseWindowKindStart  = "release-window-approval-start"
 	releaseWindowKindDecide = "release-window-approval-decide"
@@ -94,6 +100,10 @@ func (d *windowDecider) decideURL(approvalRef string) string {
 	return d.opts.BaseURL + releaseWindowPagePrefix + approvalRef
 }
 
+func (d *windowDecider) removalDecideURL(approvalRef string) string {
+	return d.opts.BaseURL + releaseWindowRemovalPagePrefix + approvalRef
+}
+
 func windowBrowser(r *http.Request) string {
 	ck, err := r.Cookie(releaseWindowPageCookie)
 	if err != nil {
@@ -118,16 +128,35 @@ var releaseWindowPage = shellPage("release-window-approval", `{{if .SignIn}}<for
 <button type="submit" name="decision" value="approve">Approve this window</button>
 <button type="submit" name="decision" value="reject" class="secondary">Reject</button></form>{{end}}`)
 
+var releaseWindowRemovalPage = shellPage("release-window-removal-approval", `{{if .SignIn}}<form class="actions" method="post" action="{{.SignIn.Action}}">
+<input type="hidden" name="approval_ref" value="{{.SignIn.ApprovalRef}}">
+<button type="submit">Sign in to review this window removal</button></form>{{end}}
+{{if .Decide}}<form class="actions" method="post" action="{{.Decide.Action}}">
+<input type="hidden" name="challenge" value="{{.Decide.Challenge}}">
+<input type="hidden" name="csrf" value="{{.Decide.CSRF}}">
+<button type="submit" name="decision" value="approve">Approve removing this window</button>
+<button type="submit" name="decision" value="reject" class="secondary">Reject</button></form>{{end}}`)
+
 // renderPage works on a nil receiver, for the "not enabled" page.
 func (d *windowDecider) renderPage(w http.ResponseWriter, status int, title string, lines []string, p releasePageData) {
+	d.renderPageFor(w, status, title, lines, p, false)
+}
+
+// renderPageFor is renderPage with the template of an addition or a removal;
+// they differ only in the button labels.
+func (d *windowDecider) renderPageFor(w http.ResponseWriter, status int, title string, lines []string, p releasePageData, removal bool) {
 	formAction := "'self'"
 	if d != nil {
 		if u, err := url.Parse(d.opts.Issuer); err == nil && u.Scheme == "https" && u.Host != "" {
 			formAction += " https://" + u.Host
 		}
 	}
+	tpl := releaseWindowPage
+	if removal {
+		tpl = releaseWindowRemovalPage
+	}
 	renderShellPage(w, status, "default-src 'none'; style-src 'unsafe-inline'; form-action "+formAction+"; frame-ancestors 'none'; base-uri 'none'",
-		releaseWindowPage, shellData{Title: title, Lines: lines, Links: p.Links, Wide: true, Page: p})
+		tpl, shellData{Title: title, Lines: lines, Links: p.Links, Wide: true, Page: p})
 }
 
 func (d *windowDecider) failed(w http.ResponseWriter, status int, msg string) {
@@ -170,6 +199,26 @@ func (h *Handlers) handleReleaseWindowApprovalPage(w http.ResponseWriter, r *htt
 		"Sign in to ZITADEL as yourself, with your second factor, to see the window and approve or reject it. Only the release owner can see or decide it.",
 		"Approving is your decision that this one deny window is added to one Argo CD project: a pull request for it is queued for merge into main, and no person reviews or merges it after you. It changes nothing by itself.",
 	}, releasePageData{SignIn: &struct{ Action, ApprovalRef string }{Action: releaseWindowStartPath, ApprovalRef: ref}})
+}
+
+// handleReleaseWindowRemovalApprovalPage: GET /release/window-removal-approvals/{approval_ref}.
+// Reads and changes nothing. It only words the consent for a removal; the
+// approval itself is read after sign-in and decided by its own kind.
+func (h *Handlers) handleReleaseWindowRemovalApprovalPage(w http.ResponseWriter, r *http.Request) {
+	d, ok := h.releaseWindowPageDecider(w)
+	if !ok {
+		return
+	}
+	ref := chi.URLParam(r, "approval_ref")
+	if !basketApprovalRefRe.MatchString(ref) {
+		d.failed(w, http.StatusBadRequest, "This approval link is malformed.")
+		return
+	}
+	d.renderPageFor(w, http.StatusOK, "Review a release window removal", []string{
+		"Approval: " + ref,
+		"Sign in to ZITADEL as yourself, with your second factor, to see the window and approve or reject its removal. Only the release owner can see or decide it.",
+		"Approving is your decision that this one deny window is removed from one Argo CD project: a pull request that deletes it is queued for merge into main, and no person reviews or merges it after you. It changes nothing by itself.",
+	}, releasePageData{SignIn: &struct{ Action, ApprovalRef string }{Action: releaseWindowStartPath, ApprovalRef: ref}}, true)
 }
 
 // handleReleaseWindowApprovalStart: POST /release/window-approvals/start.
@@ -226,6 +275,9 @@ type windowShown struct {
 	windowID string
 	preview  []windowAppPreview
 	repo     string
+	// removal is true for a release.window.removal row: the same page, the
+	// removal reader, its own texts and its own decide call.
+	removal bool
 }
 
 func (s *windowShown) decidable(now time.Time) bool {
@@ -236,6 +288,14 @@ func (s *windowShown) decidable(now time.Time) bool {
 // request, its args digest and the window hash. A preview is not part of it.
 func (s *windowShown) binding() decisionBinding {
 	return decisionBinding{ApprovalRef: s.approval.ID, ContextDigest: s.approval.ArgsDigest, ContentDigest: s.approval.ArtifactHash}
+}
+
+// noun is what the approval is called in the page's own sentences.
+func (s *windowShown) noun() string {
+	if s.removal {
+		return "release window removal"
+	}
+	return "release window"
 }
 
 func yesNo(b bool) string {
@@ -255,13 +315,17 @@ func (s *windowShown) lines(display string) []string {
 		}
 		requester += ")"
 	}
+	windowLine, idLine, hashLine := "Window: ", "Window id: ", "Window hash: "
+	if s.removal {
+		windowLine, idLine, hashLine = "Window to REMOVE: ", "Removal id: ", "Removal hash: "
+	}
 	out := []string{
 		"Signed in as " + display + ".",
 		"Project: " + w.Project,
 		"Applications (" + strconv.Itoa(len(w.Applications)) + "): " + strings.Join(w.Applications, ", "),
-		"Window: deny, cron \"" + w.Schedule + "\" (UTC), duration " + w.Duration,
-		"Window id: " + s.windowID,
-		"Window hash: " + s.approval.ArtifactHash,
+		windowLine + "deny, cron \"" + w.Schedule + "\" (UTC), duration " + w.Duration,
+		idLine + s.windowID,
+		hashLine + s.approval.ArtifactHash,
 		"Base commit: " + w.BaseSHA,
 	}
 	if len(s.preview) > 0 {
@@ -329,16 +393,33 @@ func (h *Handlers) readReleaseWindowApproval(r *http.Request, d *windowDecider, 
 		return nil, releaseWindowNotFound("no such approval")
 	case err != nil:
 		return nil, &releasePageRefusal{status: http.StatusServiceUnavailable, msg: "The approval cannot be read right now; try again later.", audit: "approval read failed"}
-	case a.ActionKind != workitems.ActionKindReleaseWindow:
+	case a.ActionKind != workitems.ActionKindReleaseWindow && a.ActionKind != workitems.ActionKindReleaseWindowRemoval:
 		return nil, releaseWindowNotFound("not a release window approval")
 	}
-	win, err := workitems.ReleaseWindowOf(a)
+	removal := a.ActionKind == workitems.ActionKindReleaseWindowRemoval
+	var win workitems.ReleaseWindow
+	if removal {
+		win, err = workitems.ReleaseWindowRemovalOf(a)
+	} else {
+		win, err = workitems.ReleaseWindowOf(a)
+	}
 	if err != nil {
 		return nil, &releasePageRefusal{status: http.StatusConflict, msg: "This approval record is inconsistent; nothing can be decided on it.", audit: "inconsistent record"}
 	}
-	id, _ := win.ReleaseWindowID()
-	shown := &windowShown{approval: a, window: win, windowID: id, repo: h.opts.ReleaseWindows.Repository}
+	var id string
+	if removal {
+		id, _ = win.ReleaseWindowRemovalID()
+	} else {
+		id, _ = win.ReleaseWindowID()
+	}
+	shown := &windowShown{approval: a, window: win, windowID: id, repo: h.opts.ReleaseWindows.Repository, removal: removal}
 	if !shown.decidable(d.now()) {
+		return shown, nil
+	}
+	// A removal lifts a block, so an Application that has since gone must not
+	// stop its window from being lifted, and the sync preview is about adding
+	// a block: none is read. The workflow checks the window against main.
+	if removal {
 		return shown, nil
 	}
 	preview, refusal := h.windowPreview(win.Project, win.Applications)
@@ -446,11 +527,11 @@ func (h *Handlers) handleReleaseWindowApprovalCallback(w http.ResponseWriter, r 
 		return
 	}
 	if !shown.decidable(d.now()) {
-		title := "This release window approval is " + basketStateWord(shown.approval.State)
+		title := "This " + shown.noun() + " approval is " + basketStateWord(shown.approval.State)
 		if shown.approval.State == workitems.ApprovalPending {
-			title = "This release window approval has expired"
+			title = "This " + shown.noun() + " approval has expired"
 		}
-		d.renderPage(w, http.StatusOK, title, append(shown.lines(display), "There is nothing to decide here."), releasePageData{Links: shown.links()})
+		d.renderPageFor(w, http.StatusOK, title, append(shown.lines(display), "There is nothing to decide here."), releasePageData{Links: shown.links()}, shown.removal)
 		return
 	}
 	evidence := workitems.ReleaseEvidence{Schema: workitems.ReleaseEvidenceSchema, ArgsDigest: shown.approval.ArgsDigest,
@@ -476,9 +557,13 @@ func (h *Handlers) handleReleaseWindowApprovalCallback(w http.ResponseWriter, r 
 		d.storeDown(w, err)
 		return
 	}
-	d.renderPage(w, http.StatusOK, "Approve or reject this release window", append(shown.lines(display),
-		"Approving is your decision that this exact window goes into main and is applied by Argo CD. When the requester makes the second call, a pull request is opened and queued for merge, and no person reviews or merges it after you. Until that call, nothing is added to Git and nothing is synced."),
-		releasePageData{Links: shown.links(), Decide: &struct{ Action, Challenge, CSRF string }{Action: releaseWindowConfirmPath, Challenge: challenge, CSRF: csrf}})
+	title, consent := "Approve or reject this release window", "Approving is your decision that this exact window goes into main and is applied by Argo CD. When the requester makes the second call, a pull request is opened and queued for merge, and no person reviews or merges it after you. Until that call, nothing is added to Git and nothing is synced."
+	if shown.removal {
+		title = "Approve or reject removing this release window"
+		consent = "Approving is your decision that this exact window is removed from main and from Argo CD. When the requester makes the second call, a pull request that deletes it is opened and queued for merge, and no person reviews or merges it after you. Once it has merged and Argo CD has synced it, the listed Applications may sync during that time again. Until that call, nothing is changed in Git and nothing is synced."
+	}
+	d.renderPageFor(w, http.StatusOK, title, append(shown.lines(display), consent),
+		releasePageData{Links: shown.links(), Decide: &struct{ Action, Challenge, CSRF string }{Action: releaseWindowConfirmPath, Challenge: challenge, CSRF: csrf}}, shown.removal)
 }
 
 // handleReleaseWindowApprovalConfirm: POST /release/window-approvals/confirm.
@@ -543,10 +628,16 @@ func (h *Handlers) handleReleaseWindowApprovalConfirm(w http.ResponseWriter, r *
 			return
 		}
 	}
-	decided, err := h.opts.WorkItems.DecideReleaseWindowApproval(r.Context(), workitems.ReleaseWindowDecisionInput{
+	decideIn := workitems.ReleaseWindowDecisionInput{
 		ID: c.ApprovalRef, DecidedBy: principalOf(user), DecidedByPrincipalID: user.PrincipalID(),
 		Approve: decision == "approve", Evidence: c.Evidence,
-	})
+	}
+	var decided *workitems.ActionApprovalRequest
+	if shown.removal {
+		decided, err = h.opts.WorkItems.DecideReleaseWindowRemovalApproval(r.Context(), decideIn)
+	} else {
+		decided, err = h.opts.WorkItems.DecideReleaseWindowApproval(r.Context(), decideIn)
+	}
 	if err != nil {
 		code := actionApprovalRefusalCode(err)
 		if code == "" {
@@ -561,11 +652,17 @@ func (h *Handlers) handleReleaseWindowApprovalConfirm(w http.ResponseWriter, r *
 		map[string]string{"surface": releaseWindowPageAuditOp, "amr": strings.Join(c.Evidence.AMR, ",")})
 	h.auditReleaseWindowPage(r, user, id, c.ApprovalRef, "succeeded", decision)
 	title, outcome := "Release window approved", "Your approval of exactly this window is recorded. It changes nothing by itself: no pull request exists yet. When the requester makes the second call of mctl_propose_release_window, a pull request is opened and queued for merge; no person reviews or merges it after you, and once it merges Argo CD applies the window. A failing check leaves the pull request open and the window off. This page opened nothing."
+	if shown.removal {
+		title, outcome = "Release window removal approved", "Your approval of removing exactly this window is recorded. It changes nothing by itself: no pull request exists yet. When the requester makes the second call of mctl_propose_window_removal, a pull request that deletes the window is opened and queued for merge; no person reviews or merges it after you, and once it merges Argo CD applies the removal. A failing check leaves the pull request open and the window in place. This page opened nothing."
+	}
 	if decision == "reject" {
 		title, outcome = "Release window rejected", "Your rejection of exactly this window is recorded. No pull request will be opened for it; a new window needs a new request and a new approval."
+		if shown.removal {
+			title, outcome = "Release window removal rejected", "Your rejection of removing exactly this window is recorded. No pull request will be opened for it and the window stays. Lifting it later needs a new request and a new approval."
+		}
 	}
 	shown.approval = decided
-	d.renderPage(w, http.StatusOK, title, append(shown.lines(id.Display), outcome), releasePageData{Links: shown.links()})
+	d.renderPageFor(w, http.StatusOK, title, append(shown.lines(id.Display), outcome), releasePageData{Links: shown.links()}, shown.removal)
 }
 
 // auditReleaseWindowPage records what the page itself decided. Ids only.

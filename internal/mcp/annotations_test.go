@@ -101,6 +101,7 @@ var recordedHints = map[string]hints{
 	"mctl_list_agent_assets":                 {readOnly: true, destructive: false, idempotent: false},
 	"mctl_get_sync_windows":                  {readOnly: true, destructive: false, idempotent: false},
 	"mctl_propose_release_window":            {readOnly: false, destructive: false, idempotent: false},
+	"mctl_propose_window_removal":            {readOnly: false, destructive: false, idempotent: false},
 	"mctl_get_agent_preflight":               {readOnly: true, destructive: false, idempotent: false},
 	"mctl_list_domains":                      {readOnly: true, destructive: false, idempotent: false},
 	"mctl_list_incidents":                    {readOnly: true, destructive: false, idempotent: false},

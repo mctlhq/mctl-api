@@ -127,6 +127,15 @@ var Policies = PolicySet{
 		Reasons:    []string{workitems.ReleaseWindowPolicyRuleID},
 		SideEffect: "write",
 	},
+	// The owner approves the removal of one deny sync window from one
+	// AppProject, by a pull request (mctl-gitops sync-window write path,
+	// section 6). Its own rule: an add approval is not a removal approval.
+	workitems.ReleaseWindowRemovalPolicyRuleID: {
+		Version:    workitems.ReleaseWindowRemovalPolicyVersion,
+		Decision:   "require_approval",
+		Reasons:    []string{workitems.ReleaseWindowRemovalPolicyRuleID},
+		SideEffect: "write",
+	},
 }
 
 // Policy status values returned by Check.

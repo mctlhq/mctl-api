@@ -175,6 +175,10 @@ var governedAgentTools = toolSet(
 	// Requests one deny sync window, then spends the owner's approval to open
 	// a gitops pull request; an agent needs a receipt for either call.
 	"mctl_propose_release_window",
+	// Requests the removal of one deny sync window, then spends the owner's
+	// approval to open a gitops pull request; an agent needs a receipt for
+	// either call.
+	"mctl_propose_window_removal",
 	"mctl_add_custom_domain",
 	"mctl_approve_dev_loop",
 	"mctl_bind_agent_release",

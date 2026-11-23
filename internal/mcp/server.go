@@ -446,6 +446,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolListAgentAssets())
 	srv.AddTool(s.toolGetSyncWindows())
 	srv.AddTool(s.toolProposeReleaseWindow())
+	srv.AddTool(s.toolProposeWindowRemoval())
 	srv.AddTool(s.toolGetAgentPreflight())
 	srv.AddTool(s.toolPromoteAgent())
 	srv.AddTool(s.toolRollbackAgent())
