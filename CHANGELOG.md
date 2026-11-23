@@ -1,5 +1,22 @@
 # Changelog
 
+## [4.176.0](https://github.com/mctlhq/mctl-api/compare/4.175.0...4.176.0) (2026-11-23)
+
+
+### Features
+
+* **glovo:** MFA decision page and admin list for access requests ([2bc9bd3](https://github.com/mctlhq/mctl-api/commit/2bc9bd3c8e72e0817ca2b05ad2fc786bdfac0035))
+* **glovo:** MFA decision page and admin list for access requests ([d009085](https://github.com/mctlhq/mctl-api/commit/d0090851022b0f905bf64d41c456aafa7513a502))
+* **glovo:** require approved access for the glovo:c2 grant when the flag is on ([22ab256](https://github.com/mctlhq/mctl-api/commit/22ab256db159c7b76d7d7722ebe0ef5f1b9c6852))
+* **glovo:** require approved access for the glovo:c2 grant when the flag is on ([6e99077](https://github.com/mctlhq/mctl-api/commit/6e99077d40d9499a20647407d389aa95c55eddfc))
+
+
+### Bug Fixes
+
+* **deps:** bump opentelemetry to 1.47.0 (GO-2026-6974) ([467204f](https://github.com/mctlhq/mctl-api/commit/467204f7ae1bdc5c04e6f1ffe1ba7829ca1ed3f2))
+* **deps:** bump opentelemetry to 1.47.0 (GO-2026-6974) ([2e4a39c](https://github.com/mctlhq/mctl-api/commit/2e4a39c0dd8992824286b6cc5539efdc51f74987))
+* **glovo:** refuse a self-rejection on the access page, fix lint ([92c838e](https://github.com/mctlhq/mctl-api/commit/92c838e468c3905e4a218241dd3431c49c8757f6))
+
 ## [4.175.0](https://github.com/mctlhq/mctl-api/compare/4.174.0...4.175.0) (2026-11-23)
 
 
