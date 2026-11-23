@@ -41,6 +41,10 @@ type ReleaseWindowDecisionInput struct {
 // and must still carry the args digest the decider was shown; both an approval
 // and a rejection record the evidence of the sign-in that made them.
 func (s *Store) DecideReleaseWindowApproval(ctx context.Context, in ReleaseWindowDecisionInput) (*ActionApprovalRequest, error) {
+	return s.decideWindow(ctx, in, windowAddSpec)
+}
+
+func (s *Store) decideWindow(ctx context.Context, in ReleaseWindowDecisionInput, spec windowKindSpec) (*ActionApprovalRequest, error) {
 	if in.DecidedByPrincipalID == "" {
 		return nil, fmt.Errorf("%w: %s", ErrApprovalDeciderUnresolved, in.ID)
 	}
@@ -64,10 +68,10 @@ func (s *Store) DecideReleaseWindowApproval(ctx context.Context, in ReleaseWindo
 		if err != nil {
 			return err
 		}
-		if cur.ActionKind != ActionKindReleaseWindow {
+		if cur.ActionKind != spec.kind {
 			return fmt.Errorf("%w: %s", ErrApprovalKindNotSpendable, cur.ID)
 		}
-		if _, err := ReleaseWindowOf(cur); err != nil {
+		if _, err := spec.of(cur); err != nil {
 			return err
 		}
 		if cur.ArgsDigest != in.Evidence.ArgsDigest {
@@ -85,8 +89,8 @@ func (s *Store) DecideReleaseWindowApproval(ctx context.Context, in ReleaseWindo
 			SET state=$2, decided_by=$3, decided_at=$4, reason=$5, decided_by_principal_id=$6,
 			    decided_context_digest=$7, authority_basis=$8
 			WHERE id=$1 AND state='pending' AND action_kind=$9 RETURNING `+actionApprovalColumns,
-			cur.ID, to, in.DecidedBy, now, reason, in.DecidedByPrincipalID, digest, ReleaseWindowAuthorityBasis,
-			ActionKindReleaseWindow), now)
+			cur.ID, to, in.DecidedBy, now, reason, in.DecidedByPrincipalID, digest, spec.basis,
+			spec.kind), now)
 		if err != nil {
 			return fmt.Errorf("workitems: decide release window approval: %w", err)
 		}
@@ -104,14 +108,18 @@ func (s *Store) DecideReleaseWindowApproval(ctx context.Context, in ReleaseWindo
 // digest of this row, and the authority basis must be the window one. A
 // pending row has no decision (nil, nil).
 func ReleaseWindowDecisionOf(a *ActionApprovalRequest) (*ReleaseEvidence, error) {
-	if _, err := ReleaseWindowOf(a); err != nil {
+	return windowDecisionOf(a, windowAddSpec)
+}
+
+func windowDecisionOf(a *ActionApprovalRequest, spec windowKindSpec) (*ReleaseEvidence, error) {
+	if _, err := spec.of(a); err != nil {
 		return nil, err
 	}
 	if a.State == ApprovalPending || (a.State == ApprovalExpired && a.DecidedAt == nil) {
 		return nil, nil
 	}
-	if a.AuthorityBasis != ReleaseWindowAuthorityBasis {
-		return nil, invalid("release window %s was not decided under %s", a.ID, ReleaseWindowAuthorityBasis)
+	if a.AuthorityBasis != spec.basis {
+		return nil, invalid("release window %s was not decided under %s", a.ID, spec.basis)
 	}
 	dec := json.NewDecoder(bytes.NewReader([]byte(a.Reason)))
 	dec.DisallowUnknownFields()
@@ -133,3 +141,18 @@ func ReleaseWindowDecisionOf(a *ActionApprovalRequest) (*ReleaseEvidence, error)
 	}
 	return &e, nil
 }
+
+// windowKindSpec is what differs between the two window kinds, so that the
+// decide, claim and settle paths are one body each and cannot drift apart: the
+// kind it accepts, the authority basis its decision records, and the reader
+// that proves a row is self-consistent for that kind.
+type windowKindSpec struct {
+	kind  string
+	basis string
+	of    func(*ActionApprovalRequest) (ReleaseWindow, error)
+}
+
+var (
+	windowAddSpec     = windowKindSpec{kind: ActionKindReleaseWindow, basis: ReleaseWindowAuthorityBasis, of: ReleaseWindowOf}
+	windowRemovalSpec = windowKindSpec{kind: ActionKindReleaseWindowRemoval, basis: ReleaseWindowRemovalAuthorityBasis, of: ReleaseWindowRemovalOf}
+)

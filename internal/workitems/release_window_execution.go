@@ -45,6 +45,10 @@ const ReleaseWindowReclaimAfter = 10 * time.Minute
 // refusal the row is read back to name the reason; the refusal itself never
 // depends on that read. A request of another requester reads as not found.
 func (s *Store) ClaimReleaseWindowApproval(ctx context.Context, id, caller, intentHash string, reclaimAfter time.Duration) (*ActionApprovalRequest, error) {
+	return s.claimWindow(ctx, id, caller, intentHash, reclaimAfter, windowAddSpec)
+}
+
+func (s *Store) claimWindow(ctx context.Context, id, caller, intentHash string, reclaimAfter time.Duration, spec windowKindSpec) (*ActionApprovalRequest, error) {
 	if err := checkText("intent_hash", intentHash, MaxApprovalFieldBytes, true); err != nil {
 		return nil, err
 	}
@@ -60,7 +64,7 @@ func (s *Store) ClaimReleaseWindowApproval(ctx context.Context, id, caller, inte
 		WHERE id=$1 AND action_kind=$5 AND requested_by=$2 AND intent_hash=$3
 		  AND expires_at > $4 AND (fresh_until IS NULL OR fresh_until > $4)
 		  AND (state='approved' OR (state='in_flight' AND reserved_at < $6))
-		RETURNING `+actionApprovalColumns, id, caller, intentHash, now, ActionKindReleaseWindow, now.Add(-reclaimAfter)), now)
+		RETURNING `+actionApprovalColumns, id, caller, intentHash, now, spec.kind, now.Add(-reclaimAfter)), now)
 	if err == nil {
 		return out, nil
 	}
@@ -74,7 +78,7 @@ func (s *Store) ClaimReleaseWindowApproval(ctx context.Context, id, caller, inte
 	if cur.RequestedBy != caller {
 		return nil, fmt.Errorf("workitems: action approval %s: %w", id, ErrApprovalNotFound)
 	}
-	if cur.ActionKind != ActionKindReleaseWindow {
+	if cur.ActionKind != spec.kind {
 		return nil, fmt.Errorf("%w: %s", ErrApprovalKindNotSpendable, id)
 	}
 	// An in-flight claim past its request's expiry can never be claimed again
@@ -111,14 +115,18 @@ func (s *Store) ClaimReleaseWindowApproval(ctx context.Context, id, caller, inte
 // A row that is not that claim is ErrApprovalNotConsumed (or
 // ErrApprovalExecuted), and is left as it is.
 func (s *Store) SettleReleaseWindowApproval(ctx context.Context, claim *ActionApprovalRequest, succeeded bool) (*ActionApprovalRequest, error) {
-	if claim == nil || claim.ReservedAt == nil || claim.ActionKind != ActionKindReleaseWindow || claim.State != ApprovalInFlight {
+	return s.settleWindow(ctx, claim, succeeded, windowAddSpec)
+}
+
+func (s *Store) settleWindow(ctx context.Context, claim *ActionApprovalRequest, succeeded bool, spec windowKindSpec) (*ActionApprovalRequest, error) {
+	if claim == nil || claim.ReservedAt == nil || claim.ActionKind != spec.kind || claim.State != ApprovalInFlight {
 		return nil, invalid("a settle needs the in-flight claim it ends")
 	}
 	now := s.now()
 	q := `UPDATE action_approval_requests SET state='approved', consumed_at=NULL, reserved_at=NULL
 		WHERE id=$1 AND state='in_flight' AND requested_by=$2 AND action_kind=$3 AND reserved_at=$4
 		RETURNING ` + actionApprovalColumns
-	args := []any{claim.ID, claim.RequestedBy, ActionKindReleaseWindow, *claim.ReservedAt}
+	args := []any{claim.ID, claim.RequestedBy, spec.kind, *claim.ReservedAt}
 	if succeeded {
 		q = `UPDATE action_approval_requests SET state='executed', executed_at=$5
 			WHERE id=$1 AND state='in_flight' AND requested_by=$2 AND action_kind=$3 AND reserved_at=$4
