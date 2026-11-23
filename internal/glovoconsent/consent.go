@@ -28,6 +28,7 @@ package glovoconsent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -90,16 +91,56 @@ type GrantSource interface {
 	HasGrant(ctx context.Context, principalID, grant string) (bool, error)
 }
 
+// AccessSource reads a principal's access request state. It is the PostgresStore
+// AccessState method: an error is never AccessNone.
+type AccessSource interface {
+	AccessState(ctx context.Context, principalID string) (AccessStatus, error)
+}
+
 // ConsentGrants is the GrantSource backed by the consent table: a
 // principal holds GrantC2 while it has an active consent to Version, which
 // it could only record by claiming a slot under the capacity cap. There is
 // no list to maintain and no per-user step. It holds no other grant.
+//
+// Access, when set (GLOVO_ACCESS_REQUIRED on), adds a second condition read
+// at every check: the principal's access must be approved right now. Nil is
+// the behaviour before access existed, byte for byte. The access check is a
+// present-tense condition like the consent being active, and nothing is
+// cached: revoking access refuses the very next check, and approving access
+// again (an explicit owner decision) lifts the refusal for a grant that is
+// still bound to the same, unchanged consent. Approval can never create or
+// back-date a grant: HeldSince still compares the consent time with the
+// grant time, and PersonalGrantAllowed asks it before a grant is created.
 type ConsentGrants struct {
-	Store Store
+	Store  Store
+	Access AccessSource
+}
+
+// accessApproved reports whether the access gate passes. With no source it
+// always does. Fail closed: a read error and an unknown status are errors,
+// never a grant and never "no access"; only the documented states none,
+// pending, rejected and revoked are a definite no.
+func (g ConsentGrants) accessApproved(ctx context.Context, principalID string) (bool, error) {
+	if g.Access == nil {
+		return true, nil
+	}
+	st, err := g.Access.AccessState(ctx, principalID)
+	if err != nil {
+		return false, fmt.Errorf("glovoconsent: read access: %w", err)
+	}
+	switch st {
+	case AccessApproved:
+		return true, nil
+	case AccessNone, AccessPending, AccessRejected, AccessRevoked:
+		return false, nil
+	default:
+		return false, fmt.Errorf("glovoconsent: unknown access status %q", st)
+	}
 }
 
 // HasGrant implements GrantSource. Only the documented absence
 // (ErrNoConsent) is "no"; any other failure is an error, never a grant.
+// With an access source the access must also be approved.
 func (g ConsentGrants) HasGrant(ctx context.Context, principalID, grant string) (bool, error) {
 	if g.Store == nil {
 		return false, errors.New("glovoconsent: no consent store")
@@ -116,16 +157,20 @@ func (g ConsentGrants) HasGrant(ctx context.Context, principalID, grant string) 
 	case rec.PrincipalID != principalID || !rec.Active():
 		return false, errors.New("glovoconsent: inconsistent consent row")
 	}
-	return rec.Version == Version, nil
+	if rec.Version != Version {
+		return false, nil
+	}
+	return g.accessApproved(ctx, principalID)
 }
 
 // HeldSince reports whether the principal holds GrantC2 through one active
-// consent to Version that was recorded at or before at. A personal Glovo
+// consent to Version that was recorded at or before at, and, with an access
+// source, whose access is approved now. A personal Glovo
 // grant created at at is valid only while that holds: withdrawing the
 // consent ends the grant, and consenting again records a new consent that
-// is later than the grant, so it never revives one. Only the documented
-// absence (ErrNoConsent) is "no"; any other failure is an error, never a
-// grant.
+// is later than the grant, so it never revives one. Revoking access ends it
+// the same way, at the next check. Only the documented absence
+// (ErrNoConsent) is "no"; any other failure is an error, never a grant.
 func (g ConsentGrants) HeldSince(ctx context.Context, principalID string, at time.Time) (bool, error) {
 	if g.Store == nil {
 		return false, errors.New("glovoconsent: no consent store")
@@ -139,5 +184,8 @@ func (g ConsentGrants) HeldSince(ctx context.Context, principalID string, at tim
 	case rec.PrincipalID != principalID || !rec.Active():
 		return false, errors.New("glovoconsent: inconsistent consent row")
 	}
-	return rec.Version == Version && !rec.RecordedAt.After(at), nil
+	if rec.Version != Version || rec.RecordedAt.After(at) {
+		return false, nil
+	}
+	return g.accessApproved(ctx, principalID)
 }

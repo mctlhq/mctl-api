@@ -184,6 +184,33 @@ func TestGlovoAccessOnlyAHumanActingDirectly(t *testing.T) {
 	if !seen["glovo.access_request.open"] || !seen["glovo.access_request.withdraw"] {
 		t.Fatalf("refusals not audited: %v", seen)
 	}
+	// Refusals of the access operations carry the principal only; the consent
+	// route's refusal keeps its consent_version.
+	if rec := e.call("PUT", "/api/v1/glovo/link-consent", "agent", ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("agent consent PUT = %d", rec.Code)
+	}
+	var accessRefusals, consentRefusals int
+	for _, en := range e.audit.List(500) {
+		if en.Status != "refused" {
+			continue
+		}
+		_, has := en.Parameters["consent_version"]
+		switch {
+		case strings.HasPrefix(en.Operation, "glovo.access_request."):
+			accessRefusals++
+			if has {
+				t.Errorf("%s refusal params = %v, want principal only", en.Operation, en.Parameters)
+			}
+		case en.Operation == "glovo.link_consent.record":
+			consentRefusals++
+			if !has {
+				t.Errorf("consent refusal lost consent_version: %v", en.Parameters)
+			}
+		}
+	}
+	if accessRefusals == 0 || consentRefusals == 0 {
+		t.Fatalf("refusals seen: access=%d consent=%d", accessRefusals, consentRefusals)
+	}
 }
 
 func TestGlovoAccessLifecycle(t *testing.T) {

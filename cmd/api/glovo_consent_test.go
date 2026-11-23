@@ -158,7 +158,12 @@ func TestConfigureGlovoConsentAccessRequired(t *testing.T) {
 		"GLOVO_CONSENT_SERVICE_SUBJECT":  "system:serviceaccount:glovo:mctl-glovo",
 		"AUDIT_DB_URL":                   "postgres://u@db.example/mctl",
 	}
-	for raw, want := range map[string]bool{"<unset>": false, "": false, "false": false} {
+	// A slice, not a map: gocritic's mapKey flags the padded " true " key.
+	for _, tc := range []struct {
+		raw  string
+		want bool
+	}{{"<unset>", false}, {"", false}, {"false", false}, {"true", true}, {" true ", true}} {
+		raw, want := tc.raw, tc.want
 		env := map[string]string{}
 		for k, v := range base {
 			env[k] = v
@@ -176,13 +181,12 @@ func TestConfigureGlovoConsentAccessRequired(t *testing.T) {
 			t.Errorf("GLOVO_ACCESS_REQUIRED %q: routes=%v err=%v required=%v, want %v", raw, r != nil, err, got, want)
 		}
 	}
-	for _, bad := range []string{"yes", "true", " true "} {
+	for _, bad := range []string{"yes", "TRUE", "1", "on"} {
 		checkAccessRefused(t, base, bad)
 	}
 }
 
-// A malformed value, and true until the grant source gates on approved
-// access, must leave consent off and never open the store.
+// A malformed value must leave consent off and never open the store.
 func checkAccessRefused(t *testing.T, base map[string]string, bad string) {
 	t.Helper()
 	env := map[string]string{"GLOVO_ACCESS_REQUIRED": bad}
@@ -197,5 +201,91 @@ func checkAccessRefused(t *testing.T, base map[string]string, bad string) {
 		})
 	if err == nil || r != nil || opened {
 		t.Fatalf("GLOVO_ACCESS_REQUIRED %q = %v %v opened=%v, want an error and no store", bad, r, err, opened)
+	}
+}
+
+// accessConsentStore is a consent store with the access side, as the
+// Postgres store is.
+type accessConsentStore struct {
+	nopConsentStore
+	api.GlovoAccessStore
+	state glovoconsent.AccessStatus
+}
+
+func (a accessConsentStore) AccessState(context.Context, string) (glovoconsent.AccessStatus, error) {
+	return a.state, nil
+}
+
+// GLOVO_ACCESS_REQUIRED=true reaches the store opener with required=true and
+// wires the access gate into both grant consumers (the OAuth server and the
+// Glovo resolver); false wires them with no access source (consent alone).
+func TestGlovoAccessRequiredWiresTheGrantGate(t *testing.T) {
+	base := map[string]string{
+		"GLOVO_CONSENT_ENABLED":          "true",
+		"GLOVO_CONSENT_SERVICE_PROVIDER": "k8s-glovo",
+		"GLOVO_CONSENT_SERVICE_SUBJECT":  "system:serviceaccount:glovo:mctl-glovo",
+		"AUDIT_DB_URL":                   "postgres://u@db.example/mctl",
+	}
+	boot := func(t *testing.T, flag string, st glovoconsent.Store) (*auth.OAuthServer, *api.GlovoRoutes, bool, bool) {
+		t.Helper()
+		env := map[string]string{}
+		for k, v := range base {
+			env[k] = v
+		}
+		if flag != "<unset>" {
+			env["GLOVO_ACCESS_REQUIRED"] = flag
+		}
+		var gotRequired bool
+		consent, err := configureGlovoConsent(context.Background(), func(k string) (string, bool) { v, ok := env[k]; return v, ok },
+			func(_ context.Context, _ string, required bool) (glovoconsent.Store, error) {
+				gotRequired = required
+				return st, nil
+			})
+		if err != nil || consent == nil {
+			t.Fatalf("flag %q: %v %v", flag, consent, err)
+		}
+		o := &auth.OAuthServer{}
+		routes := &api.GlovoRoutes{Enabled: true, Resolver: &scope.Resolver{}}
+		wired := wireGlovoPersonalGrants(o, routes, consent)
+		return o, routes, gotRequired, wired
+	}
+	gateOf := func(t *testing.T, o *auth.OAuthServer, r *api.GlovoRoutes) (oauthHas, resolverHas bool) {
+		t.Helper()
+		og, ok1 := o.GlovoConsent.(glovoconsent.ConsentGrants)
+		rg, ok2 := r.Resolver.Consent.(glovoconsent.ConsentGrants)
+		if !ok1 || !ok2 {
+			t.Fatalf("grant sources are %T and %T, want ConsentGrants", o.GlovoConsent, r.Resolver.Consent)
+		}
+		return og.Access != nil, rg.Access != nil
+	}
+
+	st := accessConsentStore{state: glovoconsent.AccessNone}
+	o, r, required, wired := boot(t, "true", st)
+	if !required || !wired {
+		t.Fatalf("true: required=%v wired=%v", required, wired)
+	}
+	if a, b := gateOf(t, o, r); !a || !b {
+		t.Fatalf("true: access gate on OAuth=%v resolver=%v, want both", a, b)
+	}
+	// The wired gate really answers from the access store.
+	if ok, err := o.GlovoConsent.(glovoconsent.ConsentGrants).Access.AccessState(context.Background(), "prn_x"); err != nil || ok != glovoconsent.AccessNone {
+		t.Fatalf("gate reads %v %v", ok, err)
+	}
+
+	for _, flag := range []string{"<unset>", "false"} {
+		o, r, required, wired := boot(t, flag, st)
+		if required || !wired {
+			t.Fatalf("%s: required=%v wired=%v", flag, required, wired)
+		}
+		if a, b := gateOf(t, o, r); a || b {
+			t.Fatalf("%s: access gate on OAuth=%v resolver=%v, want none (consent alone)", flag, a, b)
+		}
+	}
+
+	// Fail closed: the flag on with a store that has no access side wires no
+	// personal grant at all rather than an ungated one.
+	o, r, required, wired = boot(t, "true", nopConsentStore{})
+	if !required || wired || o.GlovoConsent != nil || r.Resolver.Consent != nil {
+		t.Fatalf("true without an access side: required=%v wired=%v", required, wired)
 	}
 }
