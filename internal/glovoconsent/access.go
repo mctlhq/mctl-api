@@ -252,6 +252,27 @@ func (s *PostgresStore) AccessState(ctx context.Context, principalID string) (Ac
 	return a.effective(s.now()), nil
 }
 
+// GetAccess is the principal's access row as a reader sees it: Status is the
+// effective state (a lapsed pending request is AccessNone), and the times are
+// those of the row. With no row the answer is AccessNone and zero times. A
+// read that fails is an error, never AccessNone.
+func (s *PostgresStore) GetAccess(ctx context.Context, principalID string) (Access, error) {
+	if !prnPattern.MatchString(principalID) {
+		return Access{}, ErrInvalid
+	}
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	a, found, err := readAccess(ctx, s.pool, principalID)
+	if err != nil {
+		return Access{}, err
+	}
+	if !found {
+		return Access{PrincipalID: principalID, Status: AccessNone}, nil
+	}
+	a.Status = a.effective(s.now())
+	return a, nil
+}
+
 // RequestAccess opens a request for the principal, expiring after
 // AccessRequestTTL. A live pending request is returned as it is (created
 // false). Approved access is refused with ErrAccessApproved. A rejected,

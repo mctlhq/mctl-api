@@ -1482,9 +1482,9 @@ func main() {
 	// Glovo link consent (mctl-glovo epic #11, C2-1c): dark unless
 	// GLOVO_CONSENT_ENABLED and every dependency is there.
 	consentInitCtx, cancelConsentInit := context.WithTimeout(rootCtx, storeInitBudget)
-	glovoConsentRoutes, gcErr := configureGlovoConsent(consentInitCtx, os.LookupEnv, func(_ context.Context, dbURL string) (glovoconsent.Store, error) {
+	glovoConsentRoutes, gcErr := configureGlovoConsent(consentInitCtx, os.LookupEnv, func(_ context.Context, dbURL string, accessRequired bool) (glovoconsent.Store, error) {
 		st, err := initStore(consentInitCtx, storeFailures, "glovo link consent", func(ctx context.Context) (*glovoconsent.PostgresStore, error) {
-			return glovoconsent.NewStore(ctx, dbURL)
+			return glovoconsent.NewStore(ctx, dbURL, glovoconsent.WithAccessRequired(accessRequired))
 		})
 		if err != nil {
 			return nil, err

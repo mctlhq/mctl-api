@@ -546,3 +546,33 @@ func TestPGBackfillRunsOnlyWhenAccessRequired(t *testing.T) {
 	defer on.Close()
 	mustState(t, s, pidA, AccessApproved)
 }
+
+// GetAccess answers the effective state with the row's times, and a failed
+// read is an error, never none.
+func TestPGGetAccess(t *testing.T) {
+	s, clock := newAccessStore(t, false)
+	ctx := context.Background()
+	if a, err := s.GetAccess(ctx, pidA); err != nil || a.Status != AccessNone || !a.RequestedAt.IsZero() {
+		t.Fatalf("no row = %+v %v", a, err)
+	}
+	req, _, err := s.RequestAccess(ctx, pidA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := s.GetAccess(ctx, pidA)
+	if err != nil || a.Status != AccessPending || !a.RequestedAt.Equal(req.RequestedAt) || !a.ExpiresAt.Equal(req.ExpiresAt) {
+		t.Fatalf("pending = %+v %v", a, err)
+	}
+	*clock = req.ExpiresAt.Add(time.Second)
+	if a, err := s.GetAccess(ctx, pidA); err != nil || a.Status != AccessNone {
+		t.Fatalf("lapsed = %+v %v, want none", a, err)
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if a, err := s.GetAccess(cctx, pidA); err == nil || a.Status == AccessNone {
+		t.Fatalf("cancelled read = %+v %v", a, err)
+	}
+	if _, err := s.GetAccess(ctx, "bad"); err == nil {
+		t.Fatal("invalid principal accepted")
+	}
+}

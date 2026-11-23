@@ -37,10 +37,16 @@ import (
 // that is set but wrong is an error for the boot log and leaves the routes
 // unmounted (404); it never mounts with a default and never stops the boot.
 //
+// GLOVO_ACCESS_REQUIRED (default false) will switch slot accounting to approved
+// access requests (mctl-glovo#82). Today only "" and false are accepted: true
+// is refused at boot (consent stays off) until the grant source requires
+// approved access; anything else is a boot-log error and leaves consent off.
+// The access routes work either way.
+//
 // GLOVO_C2_CAPACITY caps the active consents. Unset, 0 or malformed is
 // closed, logged at boot: the routes still mount, consent can be read and
 // withdrawn, but no new one is recorded (409 capacity_reached).
-func configureGlovoConsent(ctx context.Context, lookup func(string) (string, bool), openStore func(context.Context, string) (glovoconsent.Store, error)) (*api.GlovoConsentRoutes, error) {
+func configureGlovoConsent(ctx context.Context, lookup func(string) (string, bool), openStore func(ctx context.Context, dbURL string, accessRequired bool) (glovoconsent.Store, error)) (*api.GlovoConsentRoutes, error) {
 	v, _ := lookup("GLOVO_CONSENT_ENABLED")
 	switch strings.TrimSpace(v) {
 	case "", "false":
@@ -48,6 +54,20 @@ func configureGlovoConsent(ctx context.Context, lookup func(string) (string, boo
 	case "true":
 	default:
 		return nil, fmt.Errorf("GLOVO_CONSENT_ENABLED %q must be true or false; glovo consent stays off", v)
+	}
+	rawAccess, _ := lookup("GLOVO_ACCESS_REQUIRED")
+	accessRequired := false
+	switch strings.TrimSpace(rawAccess) {
+	case "", "false":
+	case "true":
+		// Fail closed: with the flag on, Record stops capping consents, but
+		// ConsentGrants still grants glovo:c2 on an active consent alone and
+		// no approve route exists yet, so flipping it would give uncapped,
+		// unapproved personal grants. Lift this once the grant source
+		// requires approved access.
+		return nil, errors.New("GLOVO_ACCESS_REQUIRED=true is refused until approved access gates the glovo:c2 grant; glovo consent stays off")
+	default:
+		return nil, fmt.Errorf("GLOVO_ACCESS_REQUIRED %q must be true or false; glovo consent stays off", rawAccess)
 	}
 	provider, _ := lookup("GLOVO_CONSENT_SERVICE_PROVIDER")
 	subject, _ := lookup("GLOVO_CONSENT_SERVICE_SUBJECT")
@@ -66,7 +86,7 @@ func configureGlovoConsent(ctx context.Context, lookup func(string) (string, boo
 	if dbURL == "" {
 		return nil, errors.New("GLOVO_CONSENT_ENABLED=true requires GLOVO_CONSENT_DB_URL or AUDIT_DB_URL; glovo consent stays off")
 	}
-	store, err := openStore(ctx, dbURL)
+	store, err := openStore(ctx, dbURL, accessRequired)
 	if err != nil {
 		return nil, fmt.Errorf("glovo consent store: %w; glovo consent stays off", err)
 	}
@@ -77,8 +97,15 @@ func configureGlovoConsent(ctx context.Context, lookup func(string) (string, boo
 	} else {
 		slog.Info("glovo link consent capacity", "capacity", capacity)
 	}
-	return &api.GlovoConsentRoutes{Enabled: true, Store: store, Capacity: capacity,
-		ServiceProvider: provider, ServiceSubject: subject}, nil
+	slog.Info("glovo access required", "enabled", accessRequired)
+	routes := &api.GlovoConsentRoutes{Enabled: true, Store: store, Capacity: capacity,
+		ServiceProvider: provider, ServiceSubject: subject}
+	// The Postgres store carries the access side too. A store without it
+	// leaves the access routes and the `access` field off.
+	if as, ok := store.(api.GlovoAccessStore); ok {
+		routes.Access = as
+	}
+	return routes, nil
 }
 
 // glovoC2Capacity parses GLOVO_C2_CAPACITY: a positive decimal integer of at

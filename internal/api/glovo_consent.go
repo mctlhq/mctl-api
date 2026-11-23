@@ -99,6 +99,9 @@ type GlovoConsentRoutes struct {
 	// shows (GET ...?include=masked_identity). Nil: that request is 503, a
 	// label that cannot be built is never omitted silently.
 	Identity glovoconsent.IdentitySource
+	// Access serves the self-service access routes and the `access` field of
+	// the service read (mctl-glovo#82). Nil: no access routes, no field.
+	Access GlovoAccessStore
 
 	once     sync.Once
 	perPrinc *httprate.RateLimiter
@@ -349,6 +352,10 @@ type GlovoConsentReadResponse struct {
 	State          string     `json:"state"`
 	ConsentVersion string     `json:"consent_version,omitempty"`
 	RecordedAt     *time.Time `json:"recorded_at,omitempty"`
+	// Access is none|pending|approved|rejected|revoked: the principal's
+	// access request state (mctl-glovo#82). Present whenever the access
+	// store is wired; a failed access read is a 503, never a missing field.
+	Access string `json:"access,omitempty"`
 	// MaskedIdentity is present only when the caller asked for it
 	// (include=masked_identity) and the state is active: a provider prefix,
 	// the first character of the readable name and "***".
@@ -385,8 +392,12 @@ func (h *Handlers) ReadGlovoLinkConsent(w http.ResponseWriter, r *http.Request) 
 	rec, err := g.Store.Active(r.Context(), pid)
 	switch {
 	case errors.Is(err, glovoconsent.ErrNoConsent):
+		access, ok := h.serviceAccess(w, r, g, pid)
+		if !ok {
+			return
+		}
 		glovoConsentEvents.WithLabelValues("service_read", "none").Inc()
-		writeJSON(w, http.StatusOK, GlovoConsentReadResponse{PrincipalID: pid, State: gcStateNone})
+		writeJSON(w, http.StatusOK, GlovoConsentReadResponse{PrincipalID: pid, State: gcStateNone, Access: access})
 	case err != nil:
 		glovoConsentEvents.WithLabelValues("service_read", "store_error").Inc()
 		writeErrorCode(w, http.StatusServiceUnavailable, gcCodeUnavailable, "the consent record could not be read", nil)
@@ -396,8 +407,12 @@ func (h *Handlers) ReadGlovoLinkConsent(w http.ResponseWriter, r *http.Request) 
 		glovoConsentEvents.WithLabelValues("service_read", "store_inconsistent").Inc()
 		writeErrorCode(w, http.StatusServiceUnavailable, gcCodeUnavailable, "the consent record could not be read", nil)
 	default:
+		access, ok := h.serviceAccess(w, r, g, pid)
+		if !ok {
+			return
+		}
 		at := rec.RecordedAt.UTC()
-		out := GlovoConsentReadResponse{PrincipalID: pid, State: gcStateActive, ConsentVersion: rec.Version, RecordedAt: &at}
+		out := GlovoConsentReadResponse{PrincipalID: pid, State: gcStateActive, ConsentVersion: rec.Version, RecordedAt: &at, Access: access}
 		if r.URL.Query().Get("include") == gcIncludeMaskedIdentity {
 			label, err := h.glovoMaskedIdentity(r, g, pid)
 			if err != nil {
