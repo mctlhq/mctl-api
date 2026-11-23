@@ -158,7 +158,12 @@ func TestConfigureGlovoConsentAccessRequired(t *testing.T) {
 		"GLOVO_CONSENT_SERVICE_SUBJECT":  "system:serviceaccount:glovo:mctl-glovo",
 		"AUDIT_DB_URL":                   "postgres://u@db.example/mctl",
 	}
-	for raw, want := range map[string]bool{"<unset>": false, "": false, "false": false, "true": true, " true ": true} {
+	// A slice, not a map: gocritic's mapKey flags the padded " true " key.
+	for _, tc := range []struct {
+		raw  string
+		want bool
+	}{{"<unset>", false}, {"", false}, {"false", false}, {"true", true}, {" true ", true}} {
+		raw, want := tc.raw, tc.want
 		env := map[string]string{}
 		for k, v := range base {
 			env[k] = v
