@@ -1093,6 +1093,11 @@ func NewRouter(opts Options) http.Handler {
 				r.Put(glovoConsentHumanPath, h.PutGlovoLinkConsent)
 				r.Delete(glovoConsentHumanPath, h.DeleteGlovoLinkConsent)
 				r.Get(glovoConsentMount+"/principals/{principal_id}", h.ReadGlovoLinkConsent)
+				if opts.GlovoConsent.accessMounted() {
+					r.Get(glovoAccessHumanPath, h.GetGlovoAccessRequest)
+					r.Put(glovoAccessHumanPath, h.PutGlovoAccessRequest)
+					r.Delete(glovoAccessHumanPath, h.DeleteGlovoAccessRequest)
+				}
 			}
 
 			// Glovo pilot allowlist: per (tenant, principal), human admins only.

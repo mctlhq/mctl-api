@@ -58,9 +58,12 @@ func TestConfigureGlovoConsent(t *testing.T) {
 		return m
 	}
 	opened := 0
-	open := func(context.Context, string) (glovoconsent.Store, error) { opened++; return nopConsentStore{}, nil }
-	failOpen := func(context.Context, string) (glovoconsent.Store, error) { return nil, errors.New("db down") }
-	cfg := func(env map[string]string, o func(context.Context, string) (glovoconsent.Store, error)) (bool, error) {
+	open := func(context.Context, string, bool) (glovoconsent.Store, error) {
+		opened++
+		return nopConsentStore{}, nil
+	}
+	failOpen := func(context.Context, string, bool) (glovoconsent.Store, error) { return nil, errors.New("db down") }
+	cfg := func(env map[string]string, o func(context.Context, string, bool) (glovoconsent.Store, error)) (bool, error) {
 		r, err := configureGlovoConsent(context.Background(), func(k string) (string, bool) { v, ok := env[k]; return v, ok }, o)
 		return r != nil, err
 	}
@@ -84,7 +87,7 @@ func TestConfigureGlovoConsent(t *testing.T) {
 	}
 	for name, c := range map[string]struct {
 		env     map[string]string
-		open    func(context.Context, string) (glovoconsent.Store, error)
+		open    func(context.Context, string, bool) (glovoconsent.Store, error)
 		wantErr bool
 	}{
 		"unset":            {with("GLOVO_CONSENT_ENABLED", "<unset>"), open, false},
@@ -143,5 +146,47 @@ func TestWireGlovoPersonalGrants(t *testing.T) {
 		if wireGlovoPersonalGrants(o, r, c) || o.GlovoConsent != nil || routes.Resolver.Consent != nil {
 			t.Errorf("%s: personal grants wired", name)
 		}
+	}
+}
+
+// GLOVO_ACCESS_REQUIRED defaults to false, reaches the store opener, and a
+// malformed value leaves consent off.
+func TestConfigureGlovoConsentAccessRequired(t *testing.T) {
+	base := map[string]string{
+		"GLOVO_CONSENT_ENABLED":          "true",
+		"GLOVO_CONSENT_SERVICE_PROVIDER": "k8s-glovo",
+		"GLOVO_CONSENT_SERVICE_SUBJECT":  "system:serviceaccount:glovo:mctl-glovo",
+		"AUDIT_DB_URL":                   "postgres://u@db.example/mctl",
+	}
+	for raw, want := range map[string]bool{"<unset>": false, "": false, "false": false, "true": true, " true ": true} {
+		env := map[string]string{}
+		for k, v := range base {
+			env[k] = v
+		}
+		if raw != "<unset>" {
+			env["GLOVO_ACCESS_REQUIRED"] = raw
+		}
+		var got *bool
+		r, err := configureGlovoConsent(context.Background(), func(k string) (string, bool) { v, ok := env[k]; return v, ok },
+			func(_ context.Context, _ string, required bool) (glovoconsent.Store, error) {
+				got = &required
+				return nopConsentStore{}, nil
+			})
+		if err != nil || r == nil || got == nil || *got != want {
+			t.Errorf("GLOVO_ACCESS_REQUIRED %q: routes=%v err=%v required=%v, want %v", raw, r != nil, err, got, want)
+		}
+	}
+	env := map[string]string{"GLOVO_ACCESS_REQUIRED": "yes"}
+	for k, v := range base {
+		env[k] = v
+	}
+	opened := false
+	r, err := configureGlovoConsent(context.Background(), func(k string) (string, bool) { v, ok := env[k]; return v, ok },
+		func(context.Context, string, bool) (glovoconsent.Store, error) {
+			opened = true
+			return nopConsentStore{}, nil
+		})
+	if err == nil || r != nil || opened {
+		t.Fatalf("malformed value = %v %v opened=%v, want an error and no store", r, err, opened)
 	}
 }
