@@ -1,5 +1,23 @@
 # Changelog
 
+## [4.174.0](https://github.com/mctlhq/mctl-api/compare/4.173.1...4.174.0) (2026-11-23)
+
+
+### Features
+
+* **agents:** issue-1158-fix-contract-reconcile-automation-v1-wit ([e61c835](https://github.com/mctlhq/mctl-api/commit/e61c835691a9b6170045abf7c1ed0147b42600a0))
+* **agents:** issue-1158-fix-contract-reconcile-automation-v1-wit ([da8bba3](https://github.com/mctlhq/mctl-api/commit/da8bba38cc7bb2891c92f8ecb62a4a8d29417f6b))
+* **mcp:** expose the sync-window tools on the shared portal ([64ce2c6](https://github.com/mctlhq/mctl-api/commit/64ce2c61034b388bd3d35646441e634cb96d8713))
+* **mcp:** expose the sync-window tools on the shared portal ([41b91c1](https://github.com/mctlhq/mctl-api/commit/41b91c1ad932ecbcf828e552e5b2bc95e4612111))
+* **release-window:** consent surfaces say the approval queues the PR for merge ([0517b63](https://github.com/mctlhq/mctl-api/commit/0517b63aaa258b54eb2643ecb95f1ccea5f9b1a5))
+* **release-window:** say on the consent surfaces that the approval queues the PR for merge ([7aca28e](https://github.com/mctlhq/mctl-api/commit/7aca28e320303df67a2eff3dbab7ec1e8887d19e))
+
+
+### Bug Fixes
+
+* **automation:** accurate nolint rationale, golden event-key test ([27c064f](https://github.com/mctlhq/mctl-api/commit/27c064f8071669a679c545b24606837cab8575c7))
+* **automation:** satisfy gosec G115 and staticcheck SA4000 in contract package ([9408c6d](https://github.com/mctlhq/mctl-api/commit/9408c6d9e1bb68f4bbd6330b6aee3e8720684290))
+
 ## [4.173.1](https://github.com/mctlhq/mctl-api/compare/4.173.0...4.173.1) (2026-11-22)
 
 
