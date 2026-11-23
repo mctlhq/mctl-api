@@ -629,6 +629,7 @@ func NewRouter(opts Options) http.Handler {
 			r.Get(releaseWindowCallbackPath, h.handleReleaseWindowApprovalCallback)
 			r.Post(releaseWindowConfirmPath, h.handleReleaseWindowApprovalConfirm)
 			r.Get(releaseWindowPagePrefix+"{approval_ref}", h.handleReleaseWindowApprovalPage)
+			r.Get(releaseWindowRemovalPagePrefix+"{approval_ref}", h.handleReleaseWindowRemovalApprovalPage)
 		}
 	})
 	r.Group(func(r chi.Router) {
@@ -823,6 +824,8 @@ func NewRouter(opts Options) http.Handler {
 				r.Post("/release/windows", h.RequestReleaseWindow)
 				r.Get("/release/windows", h.ListReleaseWindows)
 				r.Post("/release/windows/{approval_id}/execute", h.ExecuteReleaseWindow)
+				r.Post("/release/window-removals", h.RequestReleaseWindowRemoval)
+				r.Post("/release/window-removals/{approval_id}/execute", h.ExecuteReleaseWindowRemoval)
 			}
 			r.Get("/deploy/deployments/{id}", h.GetDeployment)
 			r.Get("/status/{team}/{app}", h.GetServiceStatus)

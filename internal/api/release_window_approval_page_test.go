@@ -73,6 +73,9 @@ func (a *windowArgoFake) set(project, app string, w *argocd.AppSyncWindows, err 
 type windowPageEnv struct {
 	*releasePageEnv
 	argo *windowArgoFake
+	// removalLink makes signIn open the removal link page instead of the
+	// addition's; the rest of the flow is the same.
+	removalLink bool
 }
 
 func newWindowPageEnv(t *testing.T) *windowPageEnv {
@@ -89,7 +92,8 @@ func newWindowPageEnv(t *testing.T) *windowPageEnv {
 	t.Cleanup(func() {
 		ctx := context.Background()
 		if pool, err := pgxpool.New(ctx, r.connStr); err == nil {
-			_, _ = pool.Exec(ctx, `DELETE FROM action_approval_requests WHERE action_kind=$1 AND execution_id LIKE 'abab%'`, workitems.ActionKindReleaseWindow)
+			_, _ = pool.Exec(ctx, `DELETE FROM action_approval_requests WHERE action_kind = ANY($1) AND execution_id LIKE 'abab%'`,
+				[]string{workitems.ActionKindReleaseWindow, workitems.ActionKindReleaseWindowRemoval})
 			pool.Close()
 		}
 	})
@@ -106,6 +110,7 @@ func windowRouter(h *Handlers) http.Handler {
 	r.Get(releaseWindowCallbackPath, h.handleReleaseWindowApprovalCallback)
 	r.Post(releaseWindowConfirmPath, h.handleReleaseWindowApprovalConfirm)
 	r.Get(releaseWindowPagePrefix+"{approval_ref}", h.handleReleaseWindowApprovalPage)
+	r.Get(releaseWindowRemovalPagePrefix+"{approval_ref}", h.handleReleaseWindowRemovalApprovalPage)
 	return r
 }
 
@@ -139,7 +144,11 @@ func (e *windowPageEnv) pendingWindow() (string, workitems.ReleaseWindow) {
 
 func (e *windowPageEnv) signIn(ref string, claims map[string]any) (*httptest.ResponseRecorder, *http.Cookie, url.Values) {
 	e.t.Helper()
-	page := e.send(http.MethodGet, releaseWindowPagePrefix+ref, nil, nil)
+	link := releaseWindowPagePrefix
+	if e.removalLink {
+		link = releaseWindowRemovalPagePrefix
+	}
+	page := e.send(http.MethodGet, link+ref, nil, nil)
 	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `action="`+releaseWindowStartPath+`"`) {
 		e.t.Fatalf("link page = %d %s", page.Code, page.Body.String())
 	}

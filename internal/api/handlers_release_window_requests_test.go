@@ -38,8 +38,11 @@ func (f *fakeWindowHead) Head(context.Context) (string, error) {
 type windowArgo struct {
 	fakeArgoCD
 	known map[string]bool // "<project>/<app>"
-	err   error
-	calls []string
+	// assigned is what Argo reports as assigned to "<project>/<app>"; a removal
+	// request checks that a window like its own is there.
+	assigned map[string][]argocd.AppSyncWindow
+	err      error
+	calls    []string
 }
 
 func (a *windowArgo) GetProjectSyncWindows(string) (*argocd.ProjectSyncWindows, error) {
@@ -54,7 +57,7 @@ func (a *windowArgo) GetAppSyncWindows(project, app string) (*argocd.AppSyncWind
 	if !a.known[project+"/"+app] {
 		return nil, argocd.ErrNotFound
 	}
-	return &argocd.AppSyncWindows{Application: app, CanSync: true}, nil
+	return &argocd.AppSyncWindows{Application: app, CanSync: true, AssignedWindows: a.assigned[project+"/"+app]}, nil
 }
 
 // recordingDispatcher records what would have been dispatched. delay holds
@@ -138,7 +141,8 @@ func newWindowFixtureWith(t *testing.T, fo windowFixtureOpts) *windowFixture {
 	}
 	clean := func() {
 		if pool, err := pgxpool.New(ctx, dsn); err == nil {
-			_, _ = pool.Exec(ctx, `DELETE FROM action_approval_requests WHERE action_kind = $1`, workitems.ActionKindReleaseWindow)
+			_, _ = pool.Exec(ctx, `DELETE FROM action_approval_requests WHERE action_kind = ANY($1)`,
+				[]string{workitems.ActionKindReleaseWindow, workitems.ActionKindReleaseWindowRemoval})
 			pool.Close()
 		}
 	}
@@ -146,6 +150,7 @@ func newWindowFixtureWith(t *testing.T, fo windowFixtureOpts) *windowFixture {
 	t.Cleanup(func() { clean(); wi.Close() })
 	f := &windowFixture{wi: wi, head: &fakeWindowHead{sha: rwTestBase}, argo: &windowArgo{known: map[string]bool{
 		"apps/labs-mctl-web": true, "apps/labs-mctl-telegram": true, "platform/admins-mctl-api": true,
+		"apps/labs-portfolio": true,
 	}}}
 	opts := mctlapi.Options{
 		Registry: operations.NewRegistry(), GitReader: &fakeGitReader{}, ArgoCD: f.argo,
