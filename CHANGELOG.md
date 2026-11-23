@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.175.0](https://github.com/mctlhq/mctl-api/compare/4.174.0...4.175.0) (2026-11-23)
+
+
+### Features
+
+* **api:** glovo access-request routes and access field (dark) ([6971b2e](https://github.com/mctlhq/mctl-api/commit/6971b2e5d67de04a7f64ad685292ffe349994cae))
+* **api:** glovo access-request routes and access field (dark) ([35d1d30](https://github.com/mctlhq/mctl-api/commit/35d1d308e6b96771889ac637384d007321b4ae96))
+* **glovoconsent:** per-principal Glovo access request store ([6d01897](https://github.com/mctlhq/mctl-api/commit/6d01897380d1654113602e46f1d40ff137de3b18))
+
+
+### Bug Fixes
+
+* **glovoconsent:** take the access backfill only when AccessRequired is on ([0dd1b65](https://github.com/mctlhq/mctl-api/commit/0dd1b65a29aff81ca4c854a379c5a4dad50e1744))
+* **glovo:** refuse GLOVO_ACCESS_REQUIRED=true until the grant source gates on access ([b43c389](https://github.com/mctlhq/mctl-api/commit/b43c389e53238052e746968b85be2e76814e28d3))
+
 ## [4.174.0](https://github.com/mctlhq/mctl-api/compare/4.173.1...4.174.0) (2026-11-23)
 
 
