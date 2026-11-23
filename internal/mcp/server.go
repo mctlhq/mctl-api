@@ -3727,7 +3727,7 @@ func (s *Server) toolGetSyncWindows() (mcplib.Tool, server.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("Get Sync Windows"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithDescription(`Read-only Argo CD sync windows of one AppProject (kind allow or deny, schedule, duration, time zone, applications, namespaces, clusters, manualSync) and, when application is given, whether that application may sync right now (canSync) with its active and assigned windows. A project with no windows returns an empty list; a read Argo CD refused or could not answer is an error, never an empty list. Admin-only. Windows are changed only by a gitops pull request on the AppProject (spec.syncWindows); this tool cannot change them.`),
+		mcplib.WithDescription(`Read-only Argo CD sync windows CONFIGURED in one AppProject, its spec.syncWindows, whether open or closed right now (kind allow or deny, schedule, duration, time zone, applications, namespaces, clusters, manualSync) and, when application is given, whether that application may sync right now (canSync) with its active and assigned windows. A project whose spec has no syncWindows returns an empty list; a read Argo CD refused or could not answer is an error, never an empty list. Admin-only. Windows are changed only by a gitops pull request on the AppProject (spec.syncWindows); this tool cannot change them.`),
 		mcplib.WithString("project",
 			mcplib.Required(),
 			mcplib.Description("Argo CD AppProject name, e.g. default, admins, labs"),

@@ -37,15 +37,21 @@ func swServer(t *testing.T, status int, body string, gotPath, gotQuery *string) 
 	return NewClient(srv.URL, "token")
 }
 
-func TestGetProjectSyncWindowsReadsWindows(t *testing.T) {
+func projectBody(name, spec string) string {
+	return `{"metadata":{"name":"` + name + `"},"spec":` + spec + `}`
+}
+
+// The windows come from the project's spec.syncWindows, not from the
+// /syncwindows endpoint, which answers only the windows in effect right now.
+func TestGetProjectSyncWindowsReadsConfiguredWindows(t *testing.T) {
 	var path string
-	c := swServer(t, 200, `{"windows":[{"kind":"deny","schedule":"0 22 * * *","duration":"8h","timeZone":"UTC","applications":["admins-*"],"manualSync":true}]}`, &path, nil)
+	c := swServer(t, 200, projectBody("default", `{"sourceRepos":["*"],"syncWindows":[{"kind":"deny","schedule":"0 22 * * *","duration":"8h","timeZone":"UTC","applications":["admins-*"],"manualSync":true}]}`), &path, nil)
 	got, err := c.GetProjectSyncWindows("default")
 	if err != nil {
 		t.Fatalf("GetProjectSyncWindows: %v", err)
 	}
-	if path != "/api/v1/projects/default/syncwindows" {
-		t.Errorf("path = %q", path)
+	if path != "/api/v1/projects/default" {
+		t.Errorf("path = %q, want the project itself, not its /syncwindows", path)
 	}
 	if got.Project != "default" || len(got.Windows) != 1 {
 		t.Fatalf("got %+v", got)
@@ -56,26 +62,46 @@ func TestGetProjectSyncWindowsReadsWindows(t *testing.T) {
 	}
 }
 
-// A project with no windows answers 200 with the key absent (omitempty) or
-// null: that is empty, and must come back as [] rather than nil.
+// The case that was wrong: a window configured and closed right now. The old
+// endpoint answered `[]`; the project holds it.
+func TestGetProjectSyncWindowsSeesAClosedWindow(t *testing.T) {
+	got, err := swServer(t, 200, projectBody("apps", `{"syncWindows":[{"kind":"deny","schedule":"0 3 * * 0","duration":"1h","applications":["labs-portfolio"]}]}`), nil, nil).GetProjectSyncWindows("apps")
+	if err != nil || len(got.Windows) != 1 || got.Windows[0].Applications[0] != "labs-portfolio" || got.Windows[0].Schedule != "0 3 * * 0" {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+}
+
+// A project whose spec carries no syncWindows (key absent or null, as Argo CD
+// omits it) has none configured: [] rather than nil.
 func TestGetProjectSyncWindowsEmptyIsEmptyList(t *testing.T) {
-	for _, body := range []string{`{}`, `{"windows":null}`, `{"windows":[]}`} {
-		got, err := swServer(t, 200, body, nil, nil).GetProjectSyncWindows("default")
+	for _, spec := range []string{`{}`, `{"sourceRepos":["*"]}`, `{"syncWindows":null}`, `{"syncWindows":[]}`} {
+		got, err := swServer(t, 200, projectBody("default", spec), nil, nil).GetProjectSyncWindows("default")
 		if err != nil {
-			t.Fatalf("%s: %v", body, err)
+			t.Fatalf("%s: %v", spec, err)
 		}
 		if got.Windows == nil || len(got.Windows) != 0 {
-			t.Errorf("%s: Windows = %#v, want empty non-nil", body, got.Windows)
+			t.Errorf("%s: Windows = %#v, want empty non-nil", spec, got.Windows)
 		}
 	}
 }
 
-// Could not observe is never observed absent: a body that is not the
-// expected object, or a windows value that is not a list, is an error.
+// Could not observe is never observed absent: a body that is not the project
+// asked for, has no spec, or has syncWindows that is not a list is an error.
 func TestGetProjectSyncWindowsBadBodyIsError(t *testing.T) {
-	for _, body := range []string{``, `<html>502</html>`, `[]`, `{"windows":"none"}`, `{"windows":{"a":1}}`} {
+	for name, body := range map[string]string{
+		"empty":                ``,
+		"html":                 `<html>502</html>`,
+		"a list":               `[]`,
+		"no metadata":          `{"spec":{}}`,
+		"another project":      projectBody("platform", `{}`),
+		"no spec":              `{"metadata":{"name":"default"}}`,
+		"null spec":            `{"metadata":{"name":"default"},"spec":null}`,
+		"windows is a string":  projectBody("default", `{"syncWindows":"none"}`),
+		"windows is an object": projectBody("default", `{"syncWindows":{"a":1}}`),
+		"the old answer shape": `{"windows":[]}`,
+	} {
 		if _, err := swServer(t, 200, body, nil, nil).GetProjectSyncWindows("default"); err == nil {
-			t.Errorf("body %q: want an error, got none", body)
+			t.Errorf("%s (%q): want an error, got none", name, body)
 		}
 	}
 }
