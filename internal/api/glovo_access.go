@@ -35,7 +35,14 @@ import (
 //     withdraws their own access request. Same caller rules as the consent
 //     routes (glovoConsentCaller).
 //   - the `access` field of the service read.
-const glovoAccessHumanPath = "/glovo/access-request"
+//   - GET /api/v1/admin/glovo/access-requests: the live pending requests for
+//     a direct human administrator, each with its decide-page link.
+//   - the decide page (glovo_access_page.go): the only approve, reject and
+//     revoke path.
+const (
+	glovoAccessHumanPath = "/glovo/access-request"
+	glovoAccessAdminPath = "/admin/glovo/access-requests"
+)
 
 // Access route error codes.
 const (
@@ -51,8 +58,15 @@ type GlovoAccessStore interface {
 	// AccessState is the effective state; an error is never none.
 	AccessState(ctx context.Context, principalID string) (glovoconsent.AccessStatus, error)
 	RequestAccess(ctx context.Context, principalID string) (glovoconsent.Access, bool, error)
-	// RejectAccess withdraws a pending request when the actor is its owner.
+	// RejectAccess rejects a live pending request: the requester's own
+	// withdrawal, or the owner's decision on the decide page.
 	RejectAccess(ctx context.Context, principalID, actor, reason string) (glovoconsent.Access, error)
+	// ApproveAccess, RevokeAccess and ListPendingAccess are the owner side:
+	// reached only through the MFA decide page (glovo_access_page.go) and the
+	// admin list; no bearer or token route decides.
+	ApproveAccess(ctx context.Context, principalID, actor, reason string, capacity int) (glovoconsent.Access, error)
+	RevokeAccess(ctx context.Context, principalID, actor, reason string) (glovoconsent.Access, error)
+	ListPendingAccess(ctx context.Context) ([]glovoconsent.Access, error)
 }
 
 // glovoAccessWithdrawReason is the reason recorded on a requester's own
@@ -227,4 +241,46 @@ func (h *Handlers) serviceAccess(w http.ResponseWriter, r *http.Request, g *Glov
 		}
 	}
 	return string(st), true
+}
+
+// glovoAccessListItem is one pending request in the admin list.
+type glovoAccessListItem struct {
+	PrincipalID string    `json:"principal_id"`
+	RequestedAt time.Time `json:"requested_at"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	// DecideURL is the MFA decide page; absent when the page is not mounted.
+	DecideURL string `json:"decide_url,omitempty"`
+}
+
+// ListGlovoAccessRequests handles GET /api/v1/admin/glovo/access-requests:
+// the live pending requests, oldest first. A direct human platform
+// administrator only. A failed or inconsistent read is a 503, never an empty
+// list: an empty queue that cannot be told from a broken one hides requests.
+func (h *Handlers) ListGlovoAccessRequests(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if !directHumanAdmin(auth.UserFromContext(r.Context())) {
+		writeError(w, http.StatusForbidden, "direct human platform administrator required")
+		return
+	}
+	rows, err := h.opts.GlovoConsent.Access.ListPendingAccess(r.Context())
+	if err != nil || rows == nil {
+		glovoConsentEvents.WithLabelValues("access_list", "store_error").Inc()
+		accessUnavailable(w, "the pending access requests could not be read")
+		return
+	}
+	items := make([]glovoAccessListItem, 0, len(rows))
+	for _, a := range rows {
+		if !validAccessOf(a, a.PrincipalID) || !auth.ValidPrincipalID(a.PrincipalID) || a.Status != glovoconsent.AccessPending {
+			glovoConsentEvents.WithLabelValues("access_list", "store_error").Inc()
+			accessUnavailable(w, "the pending access requests could not be read")
+			return
+		}
+		it := glovoAccessListItem{PrincipalID: a.PrincipalID, RequestedAt: a.RequestedAt.UTC(), ExpiresAt: a.ExpiresAt.UTC()}
+		if h.glovoAccessApproval != nil {
+			it.DecideURL = h.glovoAccessApproval.decideURL(a.PrincipalID)
+		}
+		items = append(items, it)
+	}
+	glovoConsentEvents.WithLabelValues("access_list", "ok").Inc()
+	writeJSON(w, http.StatusOK, map[string]any{"requests": items})
 }

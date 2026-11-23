@@ -482,6 +482,9 @@ type Handlers struct {
 	deployApproval *deployDecider
 	// releaseApproval is the release approval page; nil when not mounted.
 	releaseApproval *releaseDecider
+	// glovoAccessApproval is the Glovo access decision page; nil when not
+	// mounted.
+	glovoAccessApproval *glovoAccessDecider
 	// releaseWindowApproval is the release window approval page; nil when not mounted.
 	releaseWindowApproval *windowDecider
 }
@@ -506,6 +509,11 @@ func NewRouter(opts Options) http.Handler {
 	}
 	if opts.ReleaseApproval.enabled() && opts.ReleaseGrants.enabled() && opts.WorkItems != nil {
 		h.releaseApproval = newReleaseDecider(opts.ReleaseApproval)
+	}
+	// The Glovo access page shares the release page's configuration too and
+	// needs the access store.
+	if opts.ReleaseApproval.enabled() && opts.GlovoConsent.accessMounted() {
+		h.glovoAccessApproval = newGlovoAccessDecider(opts.ReleaseApproval)
 	}
 	// The window page shares the release page's configuration (client,
 	// deciders, required amr) and needs the window routes as well.
@@ -621,6 +629,14 @@ func NewRouter(opts Options) http.Handler {
 			r.Get(releaseCallbackPath, h.handleReleaseApprovalCallback)
 			r.Post(releaseConfirmPath, h.handleReleaseApprovalConfirm)
 			r.Get(releasePagePrefix+"{approval_ref}", h.handleReleaseApprovalPage)
+		}
+		// Glovo access decision page (mctl-glovo#82 stage B): dark unless
+		// configured. Own callback path, cookie and flow kinds.
+		if h.glovoAccessApproval != nil {
+			r.Post(glovoAccessStartPath, h.handleGlovoAccessStart)
+			r.Get(glovoAccessCallbackPath, h.handleGlovoAccessCallback)
+			r.Post(glovoAccessConfirmPath, h.handleGlovoAccessConfirm)
+			r.Get(glovoAccessPagePrefix+"{principal_id}", h.handleGlovoAccessPage)
 		}
 		// Release window approval page (sync-window write path, S2): dark
 		// unless configured. Own callback path, cookie and flow kinds.
@@ -788,6 +804,9 @@ func NewRouter(opts Options) http.Handler {
 			r.Post("/admin/signup/capacity", h.SetSignupCapacity)
 			if opts.GlovoC2KillSwitch.mounted() {
 				r.Post(glovoC2KillSwitchPath, h.SetGlovoC2KillSwitch)
+			}
+			if opts.GlovoConsent.accessMounted() {
+				r.Get(glovoAccessAdminPath, h.ListGlovoAccessRequests)
 			}
 			r.Post("/surface-principals/signup-claim", h.ClaimSignup)
 			r.Post("/internal/customer-deletions/{tenant}/{principal}/cancel", h.CancelCustomerDeletion)

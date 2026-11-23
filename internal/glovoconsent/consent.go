@@ -106,11 +106,17 @@ type AccessSource interface {
 // at every check: the principal's access must be approved right now. Nil is
 // the behaviour before access existed, byte for byte. The access check is a
 // present-tense condition like the consent being active, and nothing is
-// cached: revoking access refuses the very next check, and approving access
-// again (an explicit owner decision) lifts the refusal for a grant that is
-// still bound to the same, unchanged consent. Approval can never create or
-// back-date a grant: HeldSince still compares the consent time with the
-// grant time, and PersonalGrantAllowed asks it before a grant is created.
+// cached: revoking access refuses the very next check. While access stays
+// revoked, a tool request is refused at the scope resolver (not authorized)
+// and the grant is left as it is, so approving access again before any
+// refresh lifts that refusal for a grant still bound to the same, unchanged
+// consent. The first refresh made while access is revoked is different: it
+// gets a definite no from PersonalGrantAllowed, and glovoRefreshAccept then
+// destroys the grant and its token family (ErrTeamGrantInvalid). After that
+// re-approval does not revive them: the person signs in and links again.
+// Approval can never create or back-date a grant: HeldSince still compares
+// the consent time with the grant time, and PersonalGrantAllowed asks it
+// before a grant is created.
 type ConsentGrants struct {
 	Store  Store
 	Access AccessSource

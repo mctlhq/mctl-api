@@ -39,6 +39,12 @@ type memAccessStore struct {
 	rejectErr                   error
 	reqCalls, rejectCalls       int
 	lastRejectActor, lastReason string
+	// Owner side (glovo_access_page_test.go).
+	approveErr, revokeErr, listErr error
+	approveCalls, revokeCalls      int
+	lastCapacity                   int
+	// listNil makes ListPendingAccess answer (nil, nil): a faulty store.
+	listNil bool
 }
 
 func newMemAccessStore() *memAccessStore {
@@ -112,6 +118,59 @@ func (m *memAccessStore) RejectAccess(_ context.Context, pid, actor, reason stri
 	a.Status, a.DecidedBy = glovoconsent.AccessRejected, actor
 	m.rows[pid] = a
 	return a, nil
+}
+
+func (m *memAccessStore) ApproveAccess(_ context.Context, pid, actor, reason string, capacity int) (glovoconsent.Access, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.approveCalls++
+	m.lastCapacity = capacity
+	if m.approveErr != nil {
+		return glovoconsent.Access{}, m.approveErr
+	}
+	a, ok := m.rows[pid]
+	if !ok || a.Status != glovoconsent.AccessPending || reason == "" || actor == "" {
+		return glovoconsent.Access{}, glovoconsent.ErrAccessNotPending
+	}
+	now := time.Now().UTC()
+	a.Status, a.DecidedBy, a.Reason, a.DecidedAt = glovoconsent.AccessApproved, actor, reason, &now
+	m.rows[pid] = a
+	return a, nil
+}
+
+func (m *memAccessStore) RevokeAccess(_ context.Context, pid, actor, reason string) (glovoconsent.Access, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.revokeCalls++
+	if m.revokeErr != nil {
+		return glovoconsent.Access{}, m.revokeErr
+	}
+	a, ok := m.rows[pid]
+	if !ok || a.Status != glovoconsent.AccessApproved || reason == "" || actor == "" {
+		return glovoconsent.Access{}, glovoconsent.ErrAccessNotApproved
+	}
+	now := time.Now().UTC()
+	a.Status, a.DecidedBy, a.Reason, a.DecidedAt = glovoconsent.AccessRevoked, actor, reason, &now
+	m.rows[pid] = a
+	return a, nil
+}
+
+func (m *memAccessStore) ListPendingAccess(context.Context) ([]glovoconsent.Access, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
+	if m.listNil {
+		return nil, nil
+	}
+	out := []glovoconsent.Access{}
+	for _, a := range m.rows {
+		if a.Status == glovoconsent.AccessPending && !time.Now().After(a.ExpiresAt) {
+			out = append(out, a)
+		}
+	}
+	return out, nil
 }
 
 func accessEnv(t *testing.T, users map[string]*auth.User) (*consentEnv, *memConsentStore, *memAccessStore) {
