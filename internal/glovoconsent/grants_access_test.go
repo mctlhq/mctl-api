@@ -162,7 +162,7 @@ func TestConsentGrantsAccessGateTable(t *testing.T) {
 // the consent is refused whatever the access says.
 func TestHeldSinceFollowsAccessRevocation(t *testing.T) {
 	ctx := context.Background()
-	s, _ := newAccessStore(t, true)
+	s, clock := newAccessStore(t, true)
 	rec, _, err := s.Record(ctx, pidA, "github:a", testCap)
 	if err != nil {
 		t.Fatal(err)
@@ -202,6 +202,7 @@ func TestHeldSinceFollowsAccessRevocation(t *testing.T) {
 	if _, err := s.Revoke(ctx, pidA, "github:a"); err != nil {
 		t.Fatal(err)
 	}
+	*clock = clock.Add(time.Hour)
 	if _, _, err := s.Record(ctx, pidA, "github:a", testCap); err != nil {
 		t.Fatal(err)
 	}
