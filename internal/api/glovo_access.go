@@ -20,9 +20,11 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/mctlhq/mctl-api/internal/audit"
 	"github.com/mctlhq/mctl-api/internal/auth"
 	"github.com/mctlhq/mctl-api/internal/glovo"
 	"github.com/mctlhq/mctl-api/internal/glovoconsent"
+	"github.com/mctlhq/mctl-api/internal/operations"
 )
 
 // Self-service access (mctl-glovo#82, design section 4). Dark: the routes
@@ -69,12 +71,23 @@ type glovoAccessView struct {
 }
 
 func accessView(a glovoconsent.Access) glovoAccessView {
+	if withdrawnByRequester(a) {
+		return glovoAccessView{Status: string(glovoconsent.AccessNone)}
+	}
 	v := glovoAccessView{Status: string(a.Status)}
 	if a.Status != glovoconsent.AccessNone && !a.RequestedAt.IsZero() {
 		req, exp := a.RequestedAt.UTC(), a.ExpiresAt.UTC()
 		v.RequestedAt, v.ExpiresAt = &req, &exp
 	}
 	return v
+}
+
+// withdrawnByRequester: a withdrawal is stored as a rejection decided by the
+// requester themselves (the events CHECK has no withdrawn event). It is shown
+// as none, so nobody is told they were rejected for withdrawing their own
+// request; an owner's rejection has another decided_by and stays rejected.
+func withdrawnByRequester(a glovoconsent.Access) bool {
+	return a.Status == glovoconsent.AccessRejected && a.DecidedBy != "" && a.DecidedBy == a.PrincipalID
 }
 
 // validAccessOf reports whether a store answer is a usable state of pid: a
@@ -92,7 +105,14 @@ func validAccessOf(a glovoconsent.Access, pid string) bool {
 }
 
 func (h *Handlers) auditGlovoAccess(r *http.Request, user *auth.User, op, status, pid, refusal string) {
-	h.auditGlovoConsent(r, user, op, status, pid, nil, refusal)
+	h.logAudit(r, audit.Entry{
+		UserID:      user.ID,
+		Operation:   op,
+		Parameters:  map[string]string{"principal": pid},
+		Status:      status,
+		RiskLevel:   string(operations.RiskMedium),
+		RefusalCode: refusal,
+	})
 }
 
 func accessUnavailable(w http.ResponseWriter, msg string) {
@@ -194,6 +214,17 @@ func (h *Handlers) serviceAccess(w http.ResponseWriter, r *http.Request, g *Glov
 		glovoConsentEvents.WithLabelValues("service_read", "access_error").Inc()
 		accessUnavailable(w, "the access state could not be read")
 		return "", false
+	}
+	if st == glovoconsent.AccessRejected {
+		full, err := g.Access.GetAccess(r.Context(), pid)
+		if err != nil || !validAccessOf(full, pid) {
+			glovoConsentEvents.WithLabelValues("service_read", "access_error").Inc()
+			accessUnavailable(w, "the access state could not be read")
+			return "", false
+		}
+		if withdrawnByRequester(full) {
+			return string(glovoconsent.AccessNone), true
+		}
 	}
 	return string(st), true
 }

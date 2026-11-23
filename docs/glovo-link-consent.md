@@ -87,7 +87,7 @@ The code default stays closed.
 | `GLOVO_CONSENT_ENABLED` | `true` mounts the routes; anything but `""`, `false`, `true` is a boot-log error and leaves them off |
 | `GLOVO_CONSENT_SERVICE_PROVIDER`, `GLOVO_CONSENT_SERVICE_SUBJECT` | the mctl-glovo federated service identity (an `MCTL_OIDC_PROVIDERS` entry of kind service) |
 | `GLOVO_C2_CAPACITY` | the slot cap, a positive integer (at most seven digits, no sign or leading zero); unset, `0` or malformed is closed. Not a secret: a plain value is fine |
-| `GLOVO_ACCESS_REQUIRED` | `true` makes approved access requests hold the slots instead of active consents (mctl-glovo#82); default `false` leaves capacity accounting as above. Anything but `""`, `false`, `true` is a boot-log error and leaves consent off. The access routes (`/api/v1/glovo/access-request`) and the `access` field of the service read work either way |
+| `GLOVO_ACCESS_REQUIRED` | Will make approved access requests hold the slots instead of active consents (mctl-glovo#82). Default `false` leaves capacity accounting as above. `true` is REFUSED at boot (a boot-log error, consent stays off) until the `glovo:c2` grant source requires approved access: with the flag on `Record` stops capping consents, so enabling it earlier would give uncapped, unapproved grants. Anything else but `""` or `false` is also a boot-log error. The access routes (`/api/v1/glovo/access-request`) and the `access` field of the service read work either way |
 | `GLOVO_CONSENT_DB_URL` | the store's database, else `AUDIT_DB_URL` |
 
 ## What mctl-glovo needs next

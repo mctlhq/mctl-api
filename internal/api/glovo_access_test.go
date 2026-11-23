@@ -20,6 +20,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -108,7 +109,7 @@ func (m *memAccessStore) RejectAccess(_ context.Context, pid, actor, reason stri
 	if !ok || a.Status != glovoconsent.AccessPending {
 		return glovoconsent.Access{}, glovoconsent.ErrAccessNotPending
 	}
-	a.Status = glovoconsent.AccessRejected
+	a.Status, a.DecidedBy = glovoconsent.AccessRejected, actor
 	m.rows[pid] = a
 	return a, nil
 }
@@ -208,16 +209,16 @@ func TestGlovoAccessLifecycle(t *testing.T) {
 	if rec := e.call("GET", accessURL, "bob", ""); decodeAccess(t, rec).Status != "none" {
 		t.Fatalf("bob sees %s", rec.Body.String())
 	}
-	// Withdraw: acts as the requester, then the state is rejected and a new
-	// request can open.
-	if rec := e.call("DELETE", accessURL, "alice", ""); rec.Code != 200 || decodeAccess(t, rec).Status != "rejected" {
+	// Withdraw: acts as the requester, then the state reads none (not
+	// rejected: the person withdrew it) and a new request can open.
+	if rec := e.call("DELETE", accessURL, "alice", ""); rec.Code != 200 || decodeAccess(t, rec).Status != "none" {
 		t.Fatalf("withdraw = %d %s", rec.Code, rec.Body.String())
 	}
 	if as.lastRejectActor != consentPIDA || as.lastReason != glovoAccessWithdrawReason {
 		t.Fatalf("withdraw actor/reason = %q %q", as.lastRejectActor, as.lastReason)
 	}
 	// Withdrawing again changes nothing and still answers the state.
-	if rec := e.call("DELETE", accessURL, "alice", ""); rec.Code != 200 || decodeAccess(t, rec).Status != "rejected" {
+	if rec := e.call("DELETE", accessURL, "alice", ""); rec.Code != 200 || decodeAccess(t, rec).Status != "none" {
 		t.Fatalf("second withdraw = %d %s", rec.Code, rec.Body.String())
 	}
 	if rec := e.call("PUT", accessURL, "alice", ""); rec.Code != http.StatusCreated {
@@ -347,6 +348,54 @@ func TestGlovoAccessServiceReadStaysServiceOnly(t *testing.T) {
 	for _, who := range []string{"alice", "bob"} {
 		if rec := e.call("GET", consentReadURL(consentPIDA), who, ""); rec.Code != http.StatusUnauthorized {
 			t.Errorf("%s read = %d", who, rec.Code)
+		}
+	}
+}
+
+// A withdrawal is stored as a rejection decided by the requester. It reads as
+// none on the person's own GET and on the service read; an owner's rejection
+// stays rejected on both. The audit entries of the access routes carry the
+// principal and nothing about a consent version.
+func TestGlovoAccessWithdrawnReadsNoneOwnerRejectionStays(t *testing.T) {
+	e, _, as := accessEnv(t, standardConsentUsers(t))
+	as.set(consentPIDA, glovoconsent.AccessRejected)
+	as.mu.Lock()
+	row := as.rows[consentPIDA]
+	row.DecidedBy = consentPIDA
+	as.rows[consentPIDA] = row
+	as.mu.Unlock()
+	if rec := e.call("GET", accessURL, "alice", ""); decodeAccess(t, rec).Status != "none" {
+		t.Fatalf("own GET after withdrawal = %s", rec.Body.String())
+	}
+	if got := readState(t, e.call("GET", consentReadURL(consentPIDA), "svc", "")); got.Access != "none" {
+		t.Fatalf("service read after withdrawal = %q, want none", got.Access)
+	}
+	as.mu.Lock()
+	row.DecidedBy = "owner"
+	as.rows[consentPIDA] = row
+	as.mu.Unlock()
+	if rec := e.call("GET", accessURL, "alice", ""); decodeAccess(t, rec).Status != "rejected" {
+		t.Fatalf("own GET after an owner rejection = %s", rec.Body.String())
+	}
+	if got := readState(t, e.call("GET", consentReadURL(consentPIDA), "svc", "")); got.Access != "rejected" {
+		t.Fatalf("service read after an owner rejection = %q, want rejected", got.Access)
+	}
+	// A failed full read behind a rejected state is a 503, not a guess.
+	as.mu.Lock()
+	as.getErr = errors.New("boom")
+	as.mu.Unlock()
+	if rec := e.call("GET", consentReadURL(consentPIDA), "svc", ""); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("service read with a failed row read = %d, want 503", rec.Code)
+	}
+	as.mu.Lock()
+	as.getErr = nil
+	as.mu.Unlock()
+	e.call("PUT", accessURL, "alice", "")
+	for _, en := range e.audit.List(100) {
+		if strings.HasPrefix(en.Operation, "glovo.access_request.") {
+			if _, has := en.Parameters["consent_version"]; has || en.Parameters["principal"] == "" {
+				t.Fatalf("%s params = %v, want principal only", en.Operation, en.Parameters)
+			}
 		}
 	}
 }

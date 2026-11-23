@@ -37,9 +37,11 @@ import (
 // that is set but wrong is an error for the boot log and leaves the routes
 // unmounted (404); it never mounts with a default and never stops the boot.
 //
-// GLOVO_ACCESS_REQUIRED (default false) switches slot accounting to approved
-// access requests (mctl-glovo#82); anything but "", false or true is a boot-log
-// error and leaves consent off. The access routes work either way.
+// GLOVO_ACCESS_REQUIRED (default false) will switch slot accounting to approved
+// access requests (mctl-glovo#82). Today only "" and false are accepted: true
+// is refused at boot (consent stays off) until the grant source requires
+// approved access; anything else is a boot-log error and leaves consent off.
+// The access routes work either way.
 //
 // GLOVO_C2_CAPACITY caps the active consents. Unset, 0 or malformed is
 // closed, logged at boot: the routes still mount, consent can be read and
@@ -58,7 +60,12 @@ func configureGlovoConsent(ctx context.Context, lookup func(string) (string, boo
 	switch strings.TrimSpace(rawAccess) {
 	case "", "false":
 	case "true":
-		accessRequired = true
+		// Fail closed: with the flag on, Record stops capping consents, but
+		// ConsentGrants still grants glovo:c2 on an active consent alone and
+		// no approve route exists yet, so flipping it would give uncapped,
+		// unapproved personal grants. Lift this once the grant source
+		// requires approved access.
+		return nil, errors.New("GLOVO_ACCESS_REQUIRED=true is refused until approved access gates the glovo:c2 grant; glovo consent stays off")
 	default:
 		return nil, fmt.Errorf("GLOVO_ACCESS_REQUIRED %q must be true or false; glovo consent stays off", rawAccess)
 	}

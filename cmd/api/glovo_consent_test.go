@@ -158,7 +158,7 @@ func TestConfigureGlovoConsentAccessRequired(t *testing.T) {
 		"GLOVO_CONSENT_SERVICE_SUBJECT":  "system:serviceaccount:glovo:mctl-glovo",
 		"AUDIT_DB_URL":                   "postgres://u@db.example/mctl",
 	}
-	for raw, want := range map[string]bool{"<unset>": false, "": false, "false": false, "true": true, " true ": true} {
+	for raw, want := range map[string]bool{"<unset>": false, "": false, "false": false} {
 		env := map[string]string{}
 		for k, v := range base {
 			env[k] = v
@@ -176,7 +176,16 @@ func TestConfigureGlovoConsentAccessRequired(t *testing.T) {
 			t.Errorf("GLOVO_ACCESS_REQUIRED %q: routes=%v err=%v required=%v, want %v", raw, r != nil, err, got, want)
 		}
 	}
-	env := map[string]string{"GLOVO_ACCESS_REQUIRED": "yes"}
+	for _, bad := range []string{"yes", "true", " true "} {
+		checkAccessRefused(t, base, bad)
+	}
+}
+
+// A malformed value, and true until the grant source gates on approved
+// access, must leave consent off and never open the store.
+func checkAccessRefused(t *testing.T, base map[string]string, bad string) {
+	t.Helper()
+	env := map[string]string{"GLOVO_ACCESS_REQUIRED": bad}
 	for k, v := range base {
 		env[k] = v
 	}
@@ -187,6 +196,6 @@ func TestConfigureGlovoConsentAccessRequired(t *testing.T) {
 			return nopConsentStore{}, nil
 		})
 	if err == nil || r != nil || opened {
-		t.Fatalf("malformed value = %v %v opened=%v, want an error and no store", r, err, opened)
+		t.Fatalf("GLOVO_ACCESS_REQUIRED %q = %v %v opened=%v, want an error and no store", bad, r, err, opened)
 	}
 }
