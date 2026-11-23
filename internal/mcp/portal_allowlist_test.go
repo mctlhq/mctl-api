@@ -115,7 +115,7 @@ var mutatingOnPortal = map[string]string{
 	"mctl_erpact_create_site":               "a site, its database and disk on tenant erpact's shared bench; owner-only, capped at 10",
 	"mctl_grant_repo_access":                "repository authorization for a tenant",
 	"mctl_promote_agent":                    "which agent version tenants resolve to",
-	"mctl_propose_release_window":           "asks for an Argo CD deny sync window and, once the owner approved it on an MFA page, opens (never merges) a gitops pull request for it",
+	"mctl_propose_release_window":           "asks for an Argo CD deny sync window and, once the owner approved it on an MFA page, opens a gitops pull request and queues it for merge",
 	"mctl_provision_database":               "creates persistent state and wires credentials",
 	"mctl_publish_agent_version":            "makes an agent version runnable",
 	"mctl_publish_platform_skill":           "offers a skill to every tenant",

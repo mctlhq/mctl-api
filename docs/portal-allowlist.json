@@ -307,7 +307,7 @@
     {
       "name": "mctl_propose_release_window",
       "enabled": true,
-      "reason": "Admin-only request and execution of one Argo CD deny sync window: the owner decides on an MFA page, the execute call opens a gitops pull request and merges nothing, so a caller here can ask for a window but cannot approve or merge it. Enabled on the shared portal by owner decision 2026-11-22: the owner is the only user of the portal, and the mctl API's own role check, MFA approval and receipt gate are the access control."
+      "reason": "Admin-only request and execution of one Argo CD deny sync window: the owner decides on an MFA page, the execute call opens a gitops pull request and queues it for merge, so a caller here can ask for a window but cannot approve it, and the owner's approval is the only review. Enabled on the shared portal by owner decision 2026-11-22: the owner is the only user of the portal, and the mctl API's own role check, MFA approval and receipt gate are the access control."
     },
     {
       "name": "mctl_list_agent_versions",

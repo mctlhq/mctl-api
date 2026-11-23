@@ -168,7 +168,7 @@ func (h *Handlers) handleReleaseWindowApprovalPage(w http.ResponseWriter, r *htt
 	d.renderPage(w, http.StatusOK, "Review a release window", []string{
 		"Approval: " + ref,
 		"Sign in to ZITADEL as yourself, with your second factor, to see the window and approve or reject it. Only the release owner can see or decide it.",
-		"Approving records your decision that this one deny window may be added to one Argo CD project by a pull request. It changes nothing by itself.",
+		"Approving is your decision that this one deny window is added to one Argo CD project: a pull request for it is queued for merge into main, and no person reviews or merges it after you. It changes nothing by itself.",
 	}, releasePageData{SignIn: &struct{ Action, ApprovalRef string }{Action: releaseWindowStartPath, ApprovalRef: ref}})
 }
 
@@ -477,7 +477,7 @@ func (h *Handlers) handleReleaseWindowApprovalCallback(w http.ResponseWriter, r 
 		return
 	}
 	d.renderPage(w, http.StatusOK, "Approve or reject this release window", append(shown.lines(display),
-		"Approving records your decision. It changes nothing by itself: nothing is added to Git and nothing is synced until the pull request is opened and merged."),
+		"Approving is your decision that this exact window goes into main and is applied by Argo CD. When the requester makes the second call, a pull request is opened and queued for merge, and no person reviews or merges it after you. Until that call, nothing is added to Git and nothing is synced."),
 		releasePageData{Links: shown.links(), Decide: &struct{ Action, Challenge, CSRF string }{Action: releaseWindowConfirmPath, Challenge: challenge, CSRF: csrf}})
 }
 
@@ -560,7 +560,7 @@ func (h *Handlers) handleReleaseWindowApprovalConfirm(w http.ResponseWriter, r *
 	h.auditActionApproval(r, user, "action_approval.decision", decided, operations.RiskHigh,
 		map[string]string{"surface": releaseWindowPageAuditOp, "amr": strings.Join(c.Evidence.AMR, ",")})
 	h.auditReleaseWindowPage(r, user, id, c.ApprovalRef, "succeeded", decision)
-	title, outcome := "Release window approved", "Your approval of exactly this window is recorded. It changes nothing by itself: no pull request exists yet. An admin opens it with a second call of mctl_propose_release_window; that pull request is reviewed and merged like any other, and only its merge adds the window. This page opened nothing."
+	title, outcome := "Release window approved", "Your approval of exactly this window is recorded. It changes nothing by itself: no pull request exists yet. When the requester makes the second call of mctl_propose_release_window, a pull request is opened and queued for merge; no person reviews or merges it after you, and once it merges Argo CD applies the window. A failing check leaves the pull request open and the window off. This page opened nothing."
 	if decision == "reject" {
 		title, outcome = "Release window rejected", "Your rejection of exactly this window is recorded. No pull request will be opened for it; a new window needs a new request and a new approval."
 	}

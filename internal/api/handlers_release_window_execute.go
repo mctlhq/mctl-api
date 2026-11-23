@@ -22,9 +22,10 @@ import (
 //
 // Spends ONE approved release.window by ONE dispatch of release-window-pr.yml
 // in mctl-gitops. The workflow opens the pull request release-window/<id> as
-// mctl-gitops-pr; it does not merge it, and nothing here syncs anything. A
-// person reviews that pull request and merges it like any gitops change, and
-// only the merge adds the window.
+// mctl-gitops-pr and queues it for merge; this call itself merges and syncs
+// nothing. The owner's MFA approval is the only review: no person merges the
+// pull request, a failing check leaves it open and the window off, and the
+// window exists once it has merged and Argo CD has synced it.
 //
 // Only the requester may execute (an admin acting directly, not CI), and the
 // execution is addressed by the approval id, not by the window's fields: a
@@ -217,8 +218,9 @@ func (h *Handlers) ExecuteReleaseWindow(w http.ResponseWriter, r *http.Request) 
 		"workflow_runs_url": "https://github.com/" + fullRepo + "/actions/workflows/" + releaseWindowWorkflow,
 		"dispatch_inputs":   inputs,
 		"next": "The workflow opens the pull request " + "release-window/" + windowID + " as mctl-gitops-pr. " +
-			"Review and merge it like any gitops pull request; only its merge adds the window. " +
-			"This call merged and synced nothing, and no run id is returned: GitHub does not give one for a dispatch.",
+			"It queues the pull request for merge; the owner's approval is the only review and no person merges it, " +
+			"and the window exists once it has merged and Argo CD has synced it. A failing check leaves it open and the window off. " +
+			"This call merged and synced nothing itself, and no run id is returned: GitHub does not give one for a dispatch.",
 	}
 	switch {
 	case serr == nil:
