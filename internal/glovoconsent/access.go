@@ -262,7 +262,7 @@ func (s *PostgresStore) RequestAccess(ctx context.Context, principalID string) (
 	}
 	var out Access
 	created := false
-	err := s.withSlotTx(ctx, principalID, func(ctx context.Context, tx pgx.Tx) error {
+	err := s.withPrincipalTx(ctx, principalID, func(ctx context.Context, tx pgx.Tx) error {
 		cur, found, err := readAccess(ctx, tx, principalID)
 		if err != nil {
 			return err
@@ -304,7 +304,13 @@ func (s *PostgresStore) decide(ctx context.Context, principalID, actor, reason s
 		return Access{}, err
 	}
 	var out Access
-	err := s.withSlotTx(ctx, principalID, func(ctx context.Context, tx pgx.Tx) error {
+	// Only an approval under AccessRequired counts slots, so only it takes the
+	// capacity lock; the count runs after the lock and sees committed revokes.
+	run := s.withPrincipalTx
+	if to == AccessApproved && s.accessRequired {
+		run = s.withSlotTx
+	}
+	err := run(ctx, principalID, func(ctx context.Context, tx pgx.Tx) error {
 		cur, found, err := readAccess(ctx, tx, principalID)
 		if err != nil {
 			return err

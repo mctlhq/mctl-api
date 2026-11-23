@@ -94,9 +94,15 @@ func NewStore(ctx context.Context, connStr string, opts ...Option) (*PostgresSto
 	for _, o := range opts {
 		o(st)
 	}
-	if err := st.backfillAccess(ctx); err != nil {
-		pgshared.Release(pool)
-		return nil, err
+	// The backfill is a snapshot taken when the access semantics switch on:
+	// in default mode Record creates no access rows, so running it earlier
+	// would burn the one-shot marker and miss everyone who consents before
+	// the switch.
+	if st.accessRequired {
+		if err := st.backfillAccess(ctx); err != nil {
+			pgshared.Release(pool)
+			return nil, err
+		}
 	}
 	return st, nil
 }

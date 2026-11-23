@@ -17,6 +17,7 @@ package glovoconsent
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -141,7 +142,7 @@ func TestPGAccessTransitionTable(t *testing.T) {
 			}
 			// A refused call, and an idempotent re-request, add no event.
 			wantEvents := 0
-			if tc.want == nil && !(tc.from == AccessPending && tc.op.name == "request") {
+			if tc.want == nil && (tc.from != AccessPending || tc.op.name != "request") {
 				wantEvents = 1
 			}
 			if after-before != wantEvents {
@@ -511,4 +512,37 @@ func TestPGAccessApproveWaitIsBounded(t *testing.T) {
 	_ = holder.Rollback(ctx)
 	s.timeout = dbTimeout
 	mustState(t, s, pidA, AccessPending)
+}
+
+// In default mode Record creates no access rows, so a backfill that ran there
+// would burn its one-shot marker and miss everyone who consents before the
+// switch. NewStore therefore runs it only with AccessRequired, and a store
+// opened later with the flag on takes the snapshot then.
+func TestPGBackfillRunsOnlyWhenAccessRequired(t *testing.T) {
+	s, _ := newAccessStore(t, false)
+	ctx := context.Background()
+	if _, err := s.pool.Exec(ctx, `DELETE FROM glovo_access_meta`); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Record(ctx, pidA, "github:x", testCap); err != nil {
+		t.Fatal(err)
+	}
+	connStr := os.Getenv("TEST_DATABASE_URL")
+	def, err := NewStore(ctx, connStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer def.Close()
+	var n int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM glovo_access_meta`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("default-mode NewStore wrote the backfill marker (%d rows, %v)", n, err)
+	}
+	mustState(t, s, pidA, AccessNone)
+
+	on, err := NewStore(ctx, connStr, WithAccessRequired(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer on.Close()
+	mustState(t, s, pidA, AccessApproved)
 }
