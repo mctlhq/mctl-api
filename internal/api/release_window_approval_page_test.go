@@ -146,6 +146,11 @@ func (e *windowPageEnv) signIn(ref string, claims map[string]any) (*httptest.Res
 	if len(page.Result().Cookies()) != 0 || strings.Contains(page.Body.String(), "sha256:") {
 		e.t.Fatal("the link page set state or showed the window")
 	}
+	// The sign-in page is the first consent surface: it must already say that
+	// approving queues the pull request and that no person merges it.
+	if b := page.Body.String(); !strings.Contains(b, "queued for merge") || !strings.Contains(b, "no person reviews or merges it after you") {
+		e.t.Fatalf("the link page does not say what approving does: %s", b)
+	}
 	start := e.send(http.MethodPost, releaseWindowStartPath, nil, url.Values{"approval_ref": {ref}})
 	if start.Code != http.StatusSeeOther {
 		e.t.Fatalf("start = %d %s", start.Code, start.Body.String())
