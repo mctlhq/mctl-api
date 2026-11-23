@@ -36,7 +36,8 @@ type SyncWindow struct {
 	Description  string   `json:"description,omitempty"`
 }
 
-// ProjectSyncWindows is the answer of GET /api/v1/projects/{name}/syncwindows.
+// ProjectSyncWindows is the windows configured in one AppProject
+// (spec.syncWindows), read from the project itself.
 type ProjectSyncWindows struct {
 	Project string `json:"project"`
 	// Windows is never nil after a successful read: no windows is [].
@@ -60,29 +61,49 @@ type AppSyncWindows struct {
 	AssignedWindows []AppSyncWindow `json:"assignedWindows"`
 }
 
-// GetProjectSyncWindows returns the windows configured in one AppProject.
-// It needs the "projects, get" ArgoCD permission.
+// GetProjectSyncWindows returns the windows CONFIGURED in one AppProject, that
+// is its spec.syncWindows. It reads the project itself (GET /api/v1/projects/
+// {name}), not GET /api/v1/projects/{name}/syncwindows: that endpoint answers
+// the windows in effect right now, so for a project whose windows are all
+// closed at the moment it answers an empty list while spec.syncWindows holds
+// them (observed 2026-11-23 on `apps`). An empty answer from it would read as
+// "no windows configured", which nobody observed. It needs the "projects, get"
+// ArgoCD permission.
 func (c *Client) GetProjectSyncWindows(project string) (*ProjectSyncWindows, error) {
 	if project == "" {
 		return nil, fmt.Errorf("project name is required")
 	}
-	body, err := c.doGet(fmt.Sprintf("%s/api/v1/projects/%s/syncwindows", c.baseURL, neturl.PathEscape(project)))
+	body, err := c.doGet(fmt.Sprintf("%s/api/v1/projects/%s", c.baseURL, neturl.PathEscape(project)))
 	if err != nil {
 		return nil, err
 	}
-	// A project with no windows answers 200 with "windows" absent (the field
-	// is omitempty) or null: Argo CD's own empty signal, returned as []. A
-	// body that is not the expected object, or a "windows" that is not a
-	// list, fails to unmarshal and is an error, never an empty answer.
-	var out ProjectSyncWindows
+	// The body must be the AppProject that was asked for: a metadata.name that
+	// is the project and a spec object. Anything else (an error page, another
+	// kind of object, a spec that is not there) is a failed read, never an
+	// empty list. Within a spec that is there, syncWindows absent or null is
+	// Argo CD's own "none configured" (the field is omitempty): returned as [].
+	var out struct {
+		Metadata struct {
+			Name string `json:"name"`
+		} `json:"metadata"`
+		Spec *struct {
+			SyncWindows []SyncWindow `json:"syncWindows"`
+		} `json:"spec"`
+	}
 	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, fmt.Errorf("parsing argocd syncwindows response: %w", err)
+		return nil, fmt.Errorf("parsing argocd project response: %w", err)
 	}
-	out.Project = project
-	if out.Windows == nil {
-		out.Windows = []SyncWindow{}
+	if out.Metadata.Name != project {
+		return nil, fmt.Errorf("parsing argocd project response: metadata.name %q is not project %q", out.Metadata.Name, project)
 	}
-	return &out, nil
+	if out.Spec == nil {
+		return nil, fmt.Errorf("parsing argocd project response: project %q has no spec", project)
+	}
+	windows := out.Spec.SyncWindows
+	if windows == nil {
+		windows = []SyncWindow{}
+	}
+	return &ProjectSyncWindows{Project: project, Windows: windows}, nil
 }
 
 // GetAppSyncWindows returns the windows that apply to one application and
