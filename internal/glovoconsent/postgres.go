@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS glovo_link_consents (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS glovo_link_consents_one_active
 	ON glovo_link_consents (principal_id) WHERE revoked_at IS NULL;
-`
+` + accessSchema
 
 // Revoke reasons.
 const (
@@ -68,10 +68,20 @@ type PostgresStore struct {
 	// timeout bounds every call, the lock waits inside a transaction
 	// included; dbTimeout unless a test shortens it.
 	timeout time.Duration
+	// accessRequired switches slot accounting to approved access; see the
+	// package comment in access.go. False is the original behaviour.
+	accessRequired bool
 }
 
+// Option configures a PostgresStore.
+type Option func(*PostgresStore)
+
+// WithAccessRequired sets AccessRequired: slots are held by approved access
+// instead of active consents. Default false.
+func WithAccessRequired(v bool) Option { return func(s *PostgresStore) { s.accessRequired = v } }
+
 // NewStore connects and creates the schema.
-func NewStore(ctx context.Context, connStr string) (*PostgresStore, error) {
+func NewStore(ctx context.Context, connStr string, opts ...Option) (*PostgresStore, error) {
 	pool, err := pgshared.Open(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("glovoconsent: connect: %w", err)
@@ -80,7 +90,15 @@ func NewStore(ctx context.Context, connStr string) (*PostgresStore, error) {
 		pgshared.Release(pool)
 		return nil, fmt.Errorf("glovoconsent: create schema: %w", err)
 	}
-	return &PostgresStore{pool: pool, now: func() time.Time { return time.Now().UTC() }, timeout: dbTimeout}, nil
+	st := &PostgresStore{pool: pool, now: func() time.Time { return time.Now().UTC() }, timeout: dbTimeout}
+	for _, o := range opts {
+		o(st)
+	}
+	if err := st.backfillAccess(ctx); err != nil {
+		pgshared.Release(pool)
+		return nil, err
+	}
+	return st, nil
 }
 
 // Close releases the pool.
@@ -191,15 +209,19 @@ func (s *PostgresStore) Record(ctx context.Context, principalID, actor string, c
 		case !errors.Is(err, ErrNoConsent):
 			return err
 		default:
-			if capacity <= 0 {
-				return ErrCapacityReached
-			}
-			var taken int
-			if err := tx.QueryRow(ctx, `SELECT count(*) FROM glovo_link_consents WHERE revoked_at IS NULL`).Scan(&taken); err != nil {
-				return fmt.Errorf("glovoconsent: count slots: %w", err)
-			}
-			if taken >= capacity {
-				return ErrCapacityReached
+			// With AccessRequired a consent holds no slot: the person
+			// consents before asking, and approval claims the slot.
+			if !s.accessRequired {
+				if capacity <= 0 {
+					return ErrCapacityReached
+				}
+				var taken int
+				if err := tx.QueryRow(ctx, `SELECT count(*) FROM glovo_link_consents WHERE revoked_at IS NULL`).Scan(&taken); err != nil {
+					return fmt.Errorf("glovoconsent: count slots: %w", err)
+				}
+				if taken >= capacity {
+					return ErrCapacityReached
+				}
 			}
 		}
 		id, err := newID()
