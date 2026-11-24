@@ -443,9 +443,13 @@ func (s *PostgresStore) EnqueueLapsed(ctx context.Context) (int, error) {
 }
 
 // ExpireNotifications abandons pending rows older than NotifyWindow that no
-// live attempt holds, and returns how many. It also drops decide tokens
-// that were spent or expired more than NotifyWindow ago. They can no longer be sent
-// safely, and closing them makes the loss countable.
+// live attempt holds, and returns how many. They can no longer be sent
+// safely, and closing them makes the loss countable. It also drops decide
+// tokens that were spent or expired more than NotifyWindow ago.
+//
+// The count is of rows already closed, so it is returned even when the token
+// prune fails afterwards: an error here can come with a count above zero,
+// and the caller must count those rows either way.
 func (s *PostgresStore) ExpireNotifications(ctx context.Context) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
@@ -463,7 +467,7 @@ func (s *PostgresStore) ExpireNotifications(ctx context.Context) (int, error) {
 	// refused exactly like a spent or expired one.
 	if _, err := s.pool.Exec(ctx, `DELETE FROM glovo_access_decide_tokens
 		WHERE expires_at < $1 OR (used_at IS NOT NULL AND used_at < $1)`, now.Add(-NotifyWindow)); err != nil {
-		return 0, fmt.Errorf("glovoconsent: prune decide tokens: %w", err)
+		return int(tag.RowsAffected()), fmt.Errorf("glovoconsent: prune decide tokens: %w", err)
 	}
 	return int(tag.RowsAffected()), nil
 }

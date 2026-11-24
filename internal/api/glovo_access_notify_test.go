@@ -475,6 +475,19 @@ func TestGlovoNotify_RoundSweepsAndBounds(t *testing.T) {
 	if len(e.sent) != 1 {
 		t.Fatalf("sent %d after a failed sweep", len(e.sent))
 	}
+	// A sweep that closed rows and then failed still counts them: the store
+	// can return a count together with an error.
+	e = newNotifyEnv(t)
+	e.store.expired, e.store.sweepErr = 3, errors.New("prune failed")
+	before = notifyCount("any", glovoconsent.NotifyOutcomeExpired)
+	failed := notifyCount("any", glovoNotifySweepError)
+	e.n.Round(context.Background())
+	if notifyCount("any", glovoconsent.NotifyOutcomeExpired) != before+3 || notifyCount("any", glovoNotifySweepError) != failed+1 {
+		t.Fatal("rows closed by a sweep that then failed were not counted, or the failure was not")
+	}
+	if !strings.Contains(e.logs.String(), "gave up on undelivered notifications") {
+		t.Fatal("the loss was not logged")
+	}
 }
 
 func TestGlovoNotify_Ready(t *testing.T) {
