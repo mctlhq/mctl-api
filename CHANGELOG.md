@@ -1,5 +1,25 @@
 # Changelog
 
+## [4.177.0](https://github.com/mctlhq/mctl-api/compare/4.176.0...4.177.0) (2026-11-24)
+
+
+### Features
+
+* **glovo:** owner card, decide-link token and access emails ([6b59918](https://github.com/mctlhq/mctl-api/commit/6b59918574a42e1c660f5ce87136b90599354013))
+* **glovo:** owner card, decide-link token and access emails ([25b5788](https://github.com/mctlhq/mctl-api/commit/25b5788b9f388db7571f61c7a54b79c253d02a7a))
+* **glovo:** separate email switch, token-only decide link ([5fb5ef3](https://github.com/mctlhq/mctl-api/commit/5fb5ef3a7b1cf8b31b7325712474845717cba77f))
+* mctl_propose_window_removal (lift one deny sync window) ([030141a](https://github.com/mctlhq/mctl-api/commit/030141a42d9b127365c0c3060018a92a27f2e393))
+* **oauth:** shadow-mode Google-only guard on the Glovo resources ([6793839](https://github.com/mctlhq/mctl-api/commit/6793839460ce13fb1938e47fda65e730d93a7d19))
+* **oauth:** shadow-mode Google-only guard on the Glovo resources ([81a7a28](https://github.com/mctlhq/mctl-api/commit/81a7a2818bce3e0d20bd037b68a91082d22412a8))
+
+
+### Bug Fixes
+
+* **argocd:** mctl_get_sync_windows reads configured windows, not those in effect ([1fd4ed5](https://github.com/mctlhq/mctl-api/commit/1fd4ed5e9308c482bd946399df89a57804eb1807))
+* **argocd:** read the configured sync windows, not the ones in effect ([95cb4d2](https://github.com/mctlhq/mctl-api/commit/95cb4d28df933bb1206303393b1ae8cf47da5120))
+* **glovo:** keep the expired count when the token prune fails ([e307d47](https://github.com/mctlhq/mctl-api/commit/e307d477a7497fabf3c8ce459583e03e33c38cdb))
+* **glovo:** keep the expired count when the token prune fails ([4ff3467](https://github.com/mctlhq/mctl-api/commit/4ff3467abcf493442963dd1afeb9f43f1e0af9ec))
+
 ## [4.176.0](https://github.com/mctlhq/mctl-api/compare/4.175.0...4.176.0) (2026-11-23)
 
 
