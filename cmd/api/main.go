@@ -1569,6 +1569,7 @@ func main() {
 		ReleaseWindows:                 releaseWindows,
 		ReleaseApproval:                releaseApprovalPage,
 		OAuthUpstream:                  cfg.oauthUpstreamMode(),
+		GlovoGoogleOnly:                cfg.glovoGoogleOnlyMode(),
 		OAuthZitadel:                   oauthZitadelOptions(cfg, principalStore, oauthServer),
 		SurfaceZitadel:                 surfaceZitadelOptions(cfg),
 		AlertStore:                     alertStore,
@@ -1891,7 +1892,11 @@ type config struct {
 	// upstream has its own confidential client, not the link client, and
 	// takes its issuer from the MCTL_OIDC_PROVIDERS entry OAuthZitadelProvider
 	// names, the one the link flow writes identities for.
-	OAuthUpstreamRaw         string
+	OAuthUpstreamRaw string
+	// GlovoGoogleOnlyRaw is GLOVO_GOOGLE_ONLY_MODE as read (off, shadow;
+	// empty is off), parsed by validate. "enforce" is refused: the refusing
+	// mode is not implemented.
+	GlovoGoogleOnlyRaw       string
 	OAuthZitadelClientID     string
 	OAuthZitadelClientSecret string
 	OAuthZitadelProvider     string
@@ -2106,6 +2111,7 @@ func loadConfig() config {
 		OAuthGitHubClientID:                 os.Getenv("OAUTH_GITHUB_CLIENT_ID"),
 		OAuthGitHubClientSecret:             os.Getenv("OAUTH_GITHUB_CLIENT_SECRET"),
 		OAuthUpstreamRaw:                    os.Getenv("OAUTH_UPSTREAM"),
+		GlovoGoogleOnlyRaw:                  os.Getenv("GLOVO_GOOGLE_ONLY_MODE"),
 		OAuthZitadelClientID:                os.Getenv("OAUTH_ZITADEL_CLIENT_ID"),
 		OAuthZitadelClientSecret:            os.Getenv("OAUTH_ZITADEL_CLIENT_SECRET"),
 		OAuthZitadelProvider:                envOr("OAUTH_ZITADEL_PROVIDER", "zitadel"),
@@ -2417,6 +2423,9 @@ func (c config) validate() error {
 	if _, err := mctlmcp.ParseAgentReceiptMaxAge(c.AgentReceiptMaxAgeRaw); err != nil {
 		return err
 	}
+	if _, err := mctlapi.ParseGlovoGoogleOnlyMode(c.GlovoGoogleOnlyRaw); err != nil {
+		return err
+	}
 	if _, err := parseLegacyApprover(c.LegacyApproverRaw); err != nil {
 		return err
 	}
@@ -2608,6 +2617,17 @@ func (c config) oauthUpstreamMode() mctlapi.OAuthUpstreamMode {
 	m, err := mctlapi.ParseOAuthUpstreamMode(c.OAuthUpstreamRaw)
 	if err != nil {
 		return mctlapi.OAuthUpstreamGitHub
+	}
+	return m
+}
+
+// glovoGoogleOnlyMode is the parsed GLOVO_GOOGLE_ONLY_MODE. validate has
+// already refused "enforce" and any unknown value, so the fallback is never
+// taken in main; it is off, the mode that does nothing.
+func (c config) glovoGoogleOnlyMode() mctlapi.GlovoGoogleOnlyMode {
+	m, err := mctlapi.ParseGlovoGoogleOnlyMode(c.GlovoGoogleOnlyRaw)
+	if err != nil {
+		return mctlapi.GlovoGoogleOnlyOff
 	}
 	return m
 }

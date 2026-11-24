@@ -376,6 +376,7 @@ func (h *Handlers) handleOAuthGitHubCallback(w http.ResponseWriter, r *http.Requ
 
 	// Issue a mctl authorization code (or, for a CIMD client, ask the human
 	// first).
+	h.observeGlovoGoogleOnly(pending.Resource, glovoSigninGitHubLegacy, principalID)
 	res := h.finishAuthorization(w, r, authzCompletion{
 		Login: login, PrincipalID: principalID, Groups: groups,
 		ClientID: pending.ClientID, RedirectURI: pending.RedirectURI,
