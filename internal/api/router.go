@@ -156,6 +156,10 @@ type Options struct {
 	// OAuthUpstream is where /oauth/authorize signs people in
 	// (OAUTH_UPSTREAM, mctl-api#467); the zero value is GitHub.
 	OAuthUpstream OAuthUpstreamMode
+	// GlovoGoogleOnly is the Google-only guard on the Glovo resources
+	// (GLOVO_GOOGLE_ONLY_MODE, oauth_glovo_google_only.go). The zero value
+	// is off; shadow logs what the guard would decide and refuses nothing.
+	GlovoGoogleOnly GlovoGoogleOnlyMode
 	// OAuthZitadel configures the ZITADEL upstream; nil keeps it off.
 	OAuthZitadel *OAuthZitadelOptions
 	// SurfaceZitadel configures POST /api/v1/surface-principals/zitadel;

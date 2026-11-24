@@ -509,6 +509,9 @@ func (h *Handlers) handleOAuthZitadelCallback(w http.ResponseWriter, r *http.Req
 				return
 			}
 		}
+		// Shadow mode only: it records what the Google-only rule would
+		// decide on a Glovo resource and cannot stop the sign-in.
+		h.observeGlovoGoogleOnly(pending.Resource, zitadelSigninProviderKind(z.opts.CustomersOrgID, id.Customer), principalID)
 		result = h.finishAuthorization(w, r, authzCompletion{
 			Login: login, PrincipalID: principalID, Groups: groups,
 			ClientID: pending.ClientID, RedirectURI: pending.RedirectURI,
