@@ -630,6 +630,46 @@ func TestPGDecideTokensPruned(t *testing.T) {
 	prune(0)
 }
 
+// A failed token prune does not hide the rows that were already closed: the
+// count comes back with the error, so the loss is still counted.
+func TestPGExpireCountSurvivesFailedPrune(t *testing.T) {
+	s, clock := newNotifyStore(t, true)
+	ctx := context.Background()
+	mustRequest(t, s, notifyPRN)
+	*clock = clock.Add(NotifyWindow)
+	// Make only the prune fail: its table is out of the way for one call.
+	const aside = "glovo_access_decide_tokens_aside"
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE glovo_access_decide_tokens RENAME TO `+aside); err != nil {
+		t.Fatal(err)
+	}
+	restored := false
+	restore := func() {
+		if restored {
+			return
+		}
+		restored = true
+		if _, err := s.pool.Exec(ctx, `ALTER TABLE `+aside+` RENAME TO glovo_access_decide_tokens`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(restore)
+	n, err := s.ExpireNotifications(ctx)
+	restore()
+	if err == nil || !strings.Contains(err.Error(), "prune decide tokens") {
+		t.Fatalf("prune error = %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("closed rows reported = %d, want 1", n)
+	}
+	var state string
+	if err := s.pool.QueryRow(ctx, `SELECT state FROM glovo_access_notifications`).Scan(&state); err != nil || state != "abandoned" {
+		t.Fatalf("row %q %v", state, err)
+	}
+	if n, err := s.ExpireNotifications(ctx); err != nil || n != 0 {
+		t.Fatalf("after the prune works again = %d %v", n, err)
+	}
+}
+
 func TestNotifyDeliveryKeyStableAndDistinct(t *testing.T) {
 	at := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
 	base := Notification{PrincipalID: notifyPRN, Kind: NotifyApproved, RequestedAt: at}
