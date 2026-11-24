@@ -63,6 +63,17 @@ import (
 // event; the page also writes one audit row per attempt. Nothing is
 // decided without the reason (mandatory, design 5.4).
 //
+// Decide link (stage C). The owner card links to this page with a one-time
+// token (?t=). The token binds the link to one request: it is checked when
+// the page opens and after the sign-in, and consumed in the same transaction
+// as the decision, so a replayed, expired or stale link decides nothing. It
+// replaces no check above: the sign-in, the second factor and the deciders
+// list apply to a link exactly as they do without one. A link whose token is
+// not valid is refused outright; it never falls back to the token-less page.
+// Opening the page without a token (the admin list's decide_url) keeps
+// working for a decider: revoking has no card and so no token, and the
+// sign-in already proves the person.
+//
 // Dark by default: mounted only when the release approval page options are
 // complete and the access store is wired. The ZITADEL client's redirect URIs
 // must include BaseURL + glovoAccessCallbackPath.
@@ -82,6 +93,10 @@ const (
 	glovoAccessDecisionApprove = "approve"
 	glovoAccessDecisionReject  = "reject"
 	glovoAccessDecisionRevoke  = "revoke"
+
+	// glovoAccessTokenParam is the decide link's query parameter.
+	glovoAccessTokenParam   = "t"
+	glovoAccessLinkDeadText = "This decision link has expired, was already used, or is for an earlier request. Nothing was decided. Open the pending request from the administrator list instead."
 )
 
 // glovoAccessDecider is the release decider's machinery with the access
@@ -99,6 +114,8 @@ type glovoAccessStartEntry struct {
 	StartedAt time.Time `json:"started_at"`
 	Nonce     string    `json:"nonce"`
 	Verifier  string    `json:"verifier"`
+	// TokenHash is the hash of the decide link's token, "" without a link.
+	TokenHash string `json:"token_hash,omitempty"`
 }
 
 // glovoAccessBinding is what the decider was shown. Times are RFC 3339 text so
@@ -116,6 +133,7 @@ type glovoAccessDecideEntry struct {
 	Identity  basketIdentity     `json:"identity"`
 	AMR       []string           `json:"amr"`
 	Shown     glovoAccessBinding `json:"shown"`
+	TokenHash string             `json:"token_hash,omitempty"`
 }
 
 func (d *glovoAccessDecider) oauthConfig(p *oidc.Provider) *oauth2.Config {
@@ -146,6 +164,7 @@ func setGlovoAccessCookie(w http.ResponseWriter, value string, maxAge int) {
 
 var glovoAccessPage = shellPage("glovo-access-approval", `{{if .SignIn}}<form class="actions" method="post" action="{{.SignIn.Action}}">
 <input type="hidden" name="principal" value="{{.SignIn.Principal}}">
+{{if .SignIn.Token}}<input type="hidden" name="token" value="{{.SignIn.Token}}">{{end}}
 <button type="submit">Sign in to review this request</button></form>{{end}}
 {{if .Decide}}<form class="actions" method="post" action="{{.Decide.Action}}">
 <input type="hidden" name="challenge" value="{{.Decide.Challenge}}">
@@ -157,7 +176,7 @@ var glovoAccessPage = shellPage("glovo-access-approval", `{{if .SignIn}}<form cl
 {{if .Decide.Approved}}<button type="submit" name="decision" value="revoke">Revoke access</button>{{end}}</form>{{end}}`)
 
 type glovoAccessPageData struct {
-	SignIn *struct{ Action, Principal string }
+	SignIn *struct{ Action, Principal, Token string }
 	Decide *struct {
 		Action, Challenge, CSRF string
 		Pending, Approved       bool
@@ -280,10 +299,40 @@ func (h *Handlers) handleGlovoAccessPage(w http.ResponseWriter, r *http.Request)
 		d.failed(w, http.StatusBadRequest, "This decision link is malformed.")
 		return
 	}
+	// A link with a token is held to it from the first step: an unusable
+	// token is refused here, before any sign-in, and never downgraded to
+	// the token-less page.
+	token := ""
+	if r.URL.Query().Has(glovoAccessTokenParam) {
+		token = r.URL.Query().Get(glovoAccessTokenParam)
+		live, err := h.glovoAccessLinkLive(r.Context(), pid, glovoconsent.HashDecideToken(token))
+		if err != nil {
+			slog.Warn("glovo access approval: decide link unreadable", "error", err)
+			d.failed(w, http.StatusServiceUnavailable, "The decision link cannot be checked right now; nothing was decided. Try again later.")
+			return
+		}
+		if !live {
+			glovoConsentEvents.WithLabelValues("access_decide", "link_refused").Inc()
+			d.failed(w, http.StatusGone, glovoAccessLinkDeadText)
+			return
+		}
+	}
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	d.renderPage(w, http.StatusOK, "Review a Glovo access request", []string{
 		"Request: " + pid,
 		"Sign in to ZITADEL as yourself, with your second factor, to see the request and approve, reject or revoke it. Only an access decider can see or decide it.",
-	}, glovoAccessPageData{SignIn: &struct{ Action, Principal string }{Action: glovoAccessStartPath, Principal: pid}})
+	}, glovoAccessPageData{SignIn: &struct{ Action, Principal, Token string }{Action: glovoAccessStartPath, Principal: pid, Token: token}})
+}
+
+// glovoAccessLinkLive reports whether tokenHash is a live decide-link token
+// of the principal's current request. An empty hash (a malformed token) and
+// a server without the link store are not live; a failed read is an error.
+func (h *Handlers) glovoAccessLinkLive(ctx context.Context, principal, tokenHash string) (bool, error) {
+	links := h.opts.GlovoConsent.AccessLinks
+	if tokenHash == "" || links == nil {
+		return false, nil
+	}
+	return links.CheckDecideToken(ctx, principal, tokenHash)
 }
 
 // handleGlovoAccessStart: POST /glovo/access-approvals/start.
@@ -302,6 +351,15 @@ func (h *Handlers) handleGlovoAccessStart(w http.ResponseWriter, r *http.Request
 		d.failed(w, http.StatusBadRequest, "This decision link is malformed.")
 		return
 	}
+	// The token itself goes no further than this request: only its hash is
+	// kept in the flow. A malformed one is refused, not dropped.
+	tokenHash := ""
+	if r.PostForm.Has("token") {
+		if tokenHash = glovoconsent.HashDecideToken(r.PostForm.Get("token")); tokenHash == "" {
+			d.failed(w, http.StatusGone, glovoAccessLinkDeadText)
+			return
+		}
+	}
 	prov, err := d.oidcProvider(r.Context())
 	if err != nil {
 		slog.Warn("glovo access approval: ZITADEL discovery failed", "issuer", d.opts.Issuer, "error", err)
@@ -315,7 +373,7 @@ func (h *Handlers) handleGlovoAccessStart(w http.ResponseWriter, r *http.Request
 		d.failed(w, http.StatusInternalServerError, "Internal error.")
 		return
 	}
-	entry := glovoAccessStartEntry{Principal: pid, StartedAt: d.now(), Nonce: nonce, Verifier: oauth2.GenerateVerifier()}
+	entry := glovoAccessStartEntry{Principal: pid, StartedAt: d.now(), Nonce: nonce, Verifier: oauth2.GenerateVerifier(), TokenHash: tokenHash}
 	if err := d.put(r.Context(), glovoAccessKindStart, basketStartKey(state, browser), entry, releaseChallengeTTL); err != nil {
 		d.storeDown(w, err)
 		return
@@ -419,6 +477,21 @@ func (h *Handlers) handleGlovoAccessCallback(w http.ResponseWriter, r *http.Requ
 		d.failed(w, refusal.status, refusal.msg)
 		return
 	}
+	if c.TokenHash != "" {
+		live, err := h.glovoAccessLinkLive(r.Context(), c.Principal, c.TokenHash)
+		if err != nil {
+			slog.Warn("glovo access approval: decide link unreadable", "error", err)
+			h.auditGlovoAccessPage(r, user, id, c.Principal, "denied", "decide link read failed")
+			d.failed(w, http.StatusServiceUnavailable, "The decision link cannot be checked right now; nothing was decided. Try again later.")
+			return
+		}
+		if !live {
+			glovoConsentEvents.WithLabelValues("access_decide", "link_refused").Inc()
+			h.auditGlovoAccessPage(r, user, id, c.Principal, "denied", "decide link not valid")
+			d.failed(w, http.StatusGone, glovoAccessLinkDeadText)
+			return
+		}
+	}
 	now := d.now()
 	if !shown.decidable(now) {
 		d.renderPage(w, http.StatusOK, "This access request is "+string(shown.access.Status), append(shown.lines(now), "There is nothing to decide here."), glovoAccessPageData{})
@@ -435,7 +508,7 @@ func (h *Handlers) handleGlovoAccessCallback(w http.ResponseWriter, r *http.Requ
 		d.failed(w, http.StatusBadRequest, "This decision page expired while ZITADEL was being verified.")
 		return
 	}
-	entry := glovoAccessDecideEntry{Principal: c.Principal, StartedAt: c.StartedAt, Identity: stored, AMR: amr, Shown: shown.binding()}
+	entry := glovoAccessDecideEntry{Principal: c.Principal, StartedAt: c.StartedAt, Identity: stored, AMR: amr, Shown: shown.binding(), TokenHash: c.TokenHash}
 	if err := d.put(r.Context(), glovoAccessKindDecide, basketDecideKey(challenge, csrf, browser), entry, left); err != nil {
 		d.storeDown(w, err)
 		return
@@ -467,9 +540,24 @@ func cleanGlovoAccessReason(raw string) (string, bool) {
 }
 
 // decideGlovoAccess maps a decision to the store call. The decision is
-// already checked against the shown status.
-func (h *Handlers) decideGlovoAccess(ctx context.Context, decision, pid, actor, reason string) (glovoconsent.Access, error) {
+// already checked against the shown status. A decision reached through a
+// decide link (tokenHash set) goes through the link store, which consumes
+// the token with the decision; there is no token-less fallback for it.
+func (h *Handlers) decideGlovoAccess(ctx context.Context, decision, pid, actor, reason, tokenHash string) (glovoconsent.Access, error) {
 	store := h.opts.GlovoConsent.Access
+	if tokenHash != "" {
+		links := h.opts.GlovoConsent.AccessLinks
+		switch {
+		case links == nil:
+			return glovoconsent.Access{}, glovoconsent.ErrDecideTokenInvalid
+		case decision == glovoAccessDecisionApprove:
+			return links.ApproveAccessByLink(ctx, pid, actor, reason, h.opts.GlovoConsent.Capacity, tokenHash)
+		case decision == glovoAccessDecisionReject:
+			return links.RejectAccessByLink(ctx, pid, actor, reason, tokenHash)
+		}
+		// A link is made for a pending request only: it cannot revoke.
+		return glovoconsent.Access{}, glovoconsent.ErrDecideTokenInvalid
+	}
 	switch decision {
 	case glovoAccessDecisionApprove:
 		return store.ApproveAccess(ctx, pid, actor, reason, h.opts.GlovoConsent.Capacity)
@@ -551,8 +639,13 @@ func (h *Handlers) handleGlovoAccessConfirm(w http.ResponseWriter, r *http.Reque
 		d.failed(w, http.StatusConflict, "You cannot reject your own request: it would read as a withdrawal. Nothing was decided.")
 		return
 	}
-	_, err = h.decideGlovoAccess(r.Context(), decision, c.Principal, actor, reason)
+	_, err = h.decideGlovoAccess(r.Context(), decision, c.Principal, actor, reason, c.TokenHash)
 	switch {
+	case errors.Is(err, glovoconsent.ErrDecideTokenInvalid):
+		glovoConsentEvents.WithLabelValues("access_decide", "link_refused").Inc()
+		h.auditGlovoAccessPage(r, user, id, c.Principal, "denied", decision+": decide link not valid")
+		d.failed(w, http.StatusConflict, glovoAccessLinkDeadText)
+		return
 	case errors.Is(err, glovoconsent.ErrAccessNotPending), errors.Is(err, glovoconsent.ErrAccessNotApproved):
 		glovoConsentEvents.WithLabelValues("access_decide", "already_decided").Inc()
 		h.auditGlovoAccessPage(r, user, id, c.Principal, "denied", decision+": already decided")

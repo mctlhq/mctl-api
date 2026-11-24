@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"regexp"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -50,7 +51,7 @@ CREATE TABLE IF NOT EXISTS glovo_link_consents (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS glovo_link_consents_one_active
 	ON glovo_link_consents (principal_id) WHERE revoked_at IS NULL;
-` + accessSchema
+` + accessSchema + notifySchema
 
 // Revoke reasons.
 const (
@@ -71,6 +72,9 @@ type PostgresStore struct {
 	// accessRequired switches slot accounting to approved access; see the
 	// package comment in access.go. False is the original behaviour.
 	accessRequired bool
+	// accessNotify switches the notification outbox on (notify.go). Off by
+	// default; set after boot by SetAccessNotify.
+	accessNotify atomic.Bool
 }
 
 // Option configures a PostgresStore.

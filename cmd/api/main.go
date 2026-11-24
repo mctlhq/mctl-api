@@ -1532,6 +1532,14 @@ func main() {
 	// RELEASE_APPROVAL_UI_ENABLED is true and everything it reads is up.
 	releaseApprovalPage := releaseApprovalOptions(cfg, releaseApprovalUIEnvFromOS(), principalResolver, principalAuthz,
 		oauthFlowStore(oauthServer), workItemsStore != nil, releaseGrants != nil)
+	// Glovo access notifications (mctl-glovo#82 stage C): dark unless
+	// GLOVO_ACCESS_NOTIFY_ENABLED is true and everything they need is up.
+	if n, err := configureGlovoAccessNotify(os.LookupEnv, glovoAccessNotifyDepsFor(cfg, glovoConsentRoutes, principalStore, releaseApprovalPage)); err != nil {
+		slog.Error("glovo access notifications disabled", "error", err)
+	} else if n != nil {
+		slog.Info("glovo access notifications enabled")
+		go n.Run(rootCtx)
+	}
 	router := mctlapi.NewRouter(mctlapi.Options{
 		Signup:                         signup,
 		GlovoC2KillSwitch:              glovoC2Kill,

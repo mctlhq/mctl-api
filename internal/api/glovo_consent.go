@@ -102,6 +102,10 @@ type GlovoConsentRoutes struct {
 	// Access serves the self-service access routes and the `access` field of
 	// the service read (mctl-glovo#82). Nil: no access routes, no field.
 	Access GlovoAccessStore
+	// AccessLinks checks and consumes the one-time token of a decide link
+	// (stage C). Nil: every link carrying a token is refused; the token-less
+	// decision page is unaffected.
+	AccessLinks GlovoAccessLinkStore
 	// AccessRequired mirrors GLOVO_ACCESS_REQUIRED: the glovo:c2 grant
 	// source requires approved access (wired in cmd/api).
 	AccessRequired bool
