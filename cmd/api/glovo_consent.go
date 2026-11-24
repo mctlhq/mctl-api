@@ -99,6 +99,9 @@ func configureGlovoConsent(ctx context.Context, lookup func(string) (string, boo
 	// leaves the access routes and the `access` field off.
 	if as, ok := store.(api.GlovoAccessStore); ok {
 		routes.Access = as
+		if ls, ok := store.(api.GlovoAccessLinkStore); ok {
+			routes.AccessLinks = ls
+		}
 	}
 	return routes, nil
 }

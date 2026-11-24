@@ -66,20 +66,44 @@ func accessRouter(h *Handlers) http.Handler {
 	r.Post(glovoAccessStartPath, h.handleGlovoAccessStart)
 	r.Get(glovoAccessCallbackPath, h.handleGlovoAccessCallback)
 	r.Post(glovoAccessConfirmPath, h.handleGlovoAccessConfirm)
+	r.Get(glovoAccessLinkPath, h.handleGlovoAccessLink)
 	r.Get(glovoAccessPagePrefix+"{principal_id}", h.handleGlovoAccessPage)
 	return r
 }
 
 func (e *accessPageEnv) signIn(pid string, claims map[string]any) (*httptest.ResponseRecorder, *http.Cookie, url.Values) {
 	e.t.Helper()
-	page := e.send(http.MethodGet, glovoAccessPagePrefix+pid, nil, nil)
+	return e.signInLink(pid, "", claims)
+}
+
+// signInLink is signIn through a decide link carrying token ("" for the
+// token-less page).
+func (e *accessPageEnv) signInLink(pid, token string, claims map[string]any) (*httptest.ResponseRecorder, *http.Cookie, url.Values) {
+	e.t.Helper()
+	target, startForm := glovoAccessPagePrefix+pid, url.Values{"principal": {pid}}
+	if token != "" {
+		// A decide link names its request by the token alone.
+		target = glovoAccessLinkPath + "?" + glovoAccessTokenParam + "=" + url.QueryEscape(token)
+		startForm = url.Values{"token": {token}}
+	}
+	page := e.send(http.MethodGet, target, nil, nil)
+	if token != "" && (strings.Contains(page.Body.String(), pid) || strings.Contains(page.Body.String(), `name="principal"`) ||
+		page.Header().Get("Referrer-Policy") != "no-referrer") {
+		e.t.Fatalf("the link page names the principal or leaks a referrer: %s", page.Body.String())
+	}
 	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `action="`+glovoAccessStartPath+`"`) {
 		e.t.Fatalf("link page = %d %s", page.Code, page.Body.String())
 	}
 	if len(page.Result().Cookies()) != 0 {
 		e.t.Fatal("the link page set state")
 	}
-	start := e.send(http.MethodPost, glovoAccessStartPath, nil, url.Values{"principal": {pid}})
+	if has := strings.Contains(page.Body.String(), `name="token"`); has != (token != "") {
+		e.t.Fatalf("token field present = %v for token %q", has, token)
+	}
+	if token != "" && !strings.Contains(page.Body.String(), `name="token" value="`+token+`"`) {
+		e.t.Fatalf("the page does not carry the token on: %s", page.Body.String())
+	}
+	start := e.send(http.MethodPost, glovoAccessStartPath, nil, startForm)
 	if start.Code != http.StatusSeeOther {
 		e.t.Fatalf("start = %d %s", start.Code, start.Body.String())
 	}

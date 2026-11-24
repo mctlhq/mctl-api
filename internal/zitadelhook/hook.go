@@ -812,11 +812,21 @@ func (h *Hook) intentGoogle(ctx context.Context, p intentPayload, info idpInform
 }
 
 func (h *Hook) username(login string) string {
-	return strings.ToLower(login) + "@" + h.cfg.UsernameDomain
+	return GitHubUsername(login, h.cfg.UsernameDomain)
 }
 
 func (h *Hook) googleUsername(sub string) string {
-	return googleUsernamePrefix + sub + "@" + h.cfg.UsernameDomain
+	return GoogleUsername(sub, h.cfg.UsernameDomain)
+}
+
+// GitHubUsername is the IdP username the hook gives a GitHub customer.
+func GitHubUsername(login, domain string) string {
+	return strings.ToLower(login) + "@" + domain
+}
+
+// GoogleUsername is the IdP username the hook gives a Google customer.
+func GoogleUsername(sub, domain string) string {
+	return googleUsernamePrefix + sub + "@" + domain
 }
 
 func metadataEntry(key, value string) map[string]string {

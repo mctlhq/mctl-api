@@ -36,6 +36,9 @@
 // at read time from expires_at: a lapsed request reads as AccessNone and can
 // be neither approved nor rejected. No sweeper is needed for correctness.
 //
+// Stage C adds an outbox of notifications and the one-time decide link; see
+// notify.go. Both are off unless SetAccessNotify(true) was called.
+//
 // Mutating methods take the principal lock, then the capacity lock, the same
 // order as Record. Reads are single statements and take no lock.
 package glovoconsent
@@ -311,7 +314,15 @@ func (s *PostgresStore) RequestAccess(ctx context.Context, principalID string) (
 			return fmt.Errorf("glovoconsent: request access: %w", err)
 		}
 		created = true
-		return addEvent(ctx, tx, principalID, "requested", principalID, "", now)
+		if err := addEvent(ctx, tx, principalID, "requested", principalID, "", now); err != nil {
+			return err
+		}
+		// A new request replaces whatever a decide link was made for, and
+		// (with the outbox on) tells the owner.
+		if err := retireDecideTokens(ctx, tx, principalID, now); err != nil {
+			return err
+		}
+		return s.enqueueNotification(ctx, tx, principalID, NotifyOwnerCard, out.RequestedAt, out.ExpiresAt, now)
 	})
 	if err != nil {
 		return Access{}, false, err
@@ -320,7 +331,9 @@ func (s *PostgresStore) RequestAccess(ctx context.Context, principalID string) (
 }
 
 // decide moves a row from one status to another and appends the event.
-func (s *PostgresStore) decide(ctx context.Context, principalID, actor, reason string, from, to AccessStatus, event string, notFrom error, capacity int) (Access, error) {
+// tokenHash, when set, is a decide-link token consumed in the same
+// transaction: an invalid one decides nothing (ErrDecideTokenInvalid).
+func (s *PostgresStore) decide(ctx context.Context, principalID, actor, reason string, from, to AccessStatus, event string, notFrom error, capacity int, tokenHash string) (Access, error) {
 	if err := validateDecision(principalID, actor, reason); err != nil {
 		return Access{}, err
 	}
@@ -337,7 +350,15 @@ func (s *PostgresStore) decide(ctx context.Context, principalID, actor, reason s
 			return err
 		}
 		now := s.now()
-		if !found || cur.effective(now) != from {
+		if !found {
+			return notFrom
+		}
+		if tokenHash != "" {
+			if err := spendDecideToken(ctx, tx, principalID, tokenHash, cur.RequestedAt, now); err != nil {
+				return err
+			}
+		}
+		if cur.effective(now) != from {
 			return notFrom
 		}
 		if to == AccessApproved && s.accessRequired {
@@ -363,6 +384,19 @@ func (s *PostgresStore) decide(ctx context.Context, principalID, actor, reason s
 		if err := addEvent(ctx, tx, principalID, event, actor, reason, now); err != nil {
 			return err
 		}
+		if from == AccessPending {
+			// The request is decided: every link made for it is dead.
+			if err := retireDecideTokens(ctx, tx, principalID, now); err != nil {
+				return err
+			}
+			// The owner's decision is emailed to the requester. A withdrawal
+			// is a rejection by the requester themselves and sends nothing.
+			if kind := NotifyKind(event); actor != principalID {
+				if err := s.enqueueNotification(ctx, tx, principalID, kind, cur.RequestedAt, cur.ExpiresAt, now); err != nil {
+					return err
+				}
+			}
+		}
 		out = cur
 		out.Status, out.DecidedAt, out.DecidedBy, out.Reason = to, &now, actor, reason
 		return nil
@@ -377,19 +411,19 @@ func (s *PostgresStore) decide(ctx context.Context, principalID, actor, reason s
 // claims a slot atomically or returns ErrCapacityReached (capacity <= 0 is
 // closed). Actor and reason are mandatory.
 func (s *PostgresStore) ApproveAccess(ctx context.Context, principalID, actor, reason string, capacity int) (Access, error) {
-	return s.decide(ctx, principalID, actor, reason, AccessPending, AccessApproved, "approved", ErrAccessNotPending, capacity)
+	return s.decide(ctx, principalID, actor, reason, AccessPending, AccessApproved, "approved", ErrAccessNotPending, capacity, "")
 }
 
 // RejectAccess rejects a live pending request. Actor and reason are
 // mandatory.
 func (s *PostgresStore) RejectAccess(ctx context.Context, principalID, actor, reason string) (Access, error) {
-	return s.decide(ctx, principalID, actor, reason, AccessPending, AccessRejected, "rejected", ErrAccessNotPending, 0)
+	return s.decide(ctx, principalID, actor, reason, AccessPending, AccessRejected, "rejected", ErrAccessNotPending, 0, "")
 }
 
 // RevokeAccess revokes approved access, which frees its slot under
 // AccessRequired. Actor and reason are mandatory.
 func (s *PostgresStore) RevokeAccess(ctx context.Context, principalID, actor, reason string) (Access, error) {
-	return s.decide(ctx, principalID, actor, reason, AccessApproved, AccessRevoked, "revoked", ErrAccessNotApproved, 0)
+	return s.decide(ctx, principalID, actor, reason, AccessApproved, AccessRevoked, "revoked", ErrAccessNotApproved, 0, "")
 }
 
 // ListPendingAccess lists live pending requests, oldest first. Lapsed ones

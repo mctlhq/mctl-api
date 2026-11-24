@@ -69,6 +69,23 @@ type GlovoAccessStore interface {
 	ListPendingAccess(ctx context.Context) ([]glovoconsent.Access, error)
 }
 
+// GlovoAccessLinkStore is the decide-link side of the access store (stage
+// C): the one-time token an owner card's link carries.
+type GlovoAccessLinkStore interface {
+	// DecideTokenPrincipal names the principal whose live request tokenHash
+	// was made for. found false is a token that names nothing; an error is
+	// never "not found".
+	DecideTokenPrincipal(ctx context.Context, tokenHash string) (principalID string, found bool, err error)
+	// CheckDecideToken reports whether tokenHash is a live token of the
+	// principal's current request. It changes nothing; an error is never
+	// false.
+	CheckDecideToken(ctx context.Context, principalID, tokenHash string) (bool, error)
+	// The ByLink decisions consume the token with the decision, atomically;
+	// an invalid token is glovoconsent.ErrDecideTokenInvalid.
+	ApproveAccessByLink(ctx context.Context, principalID, actor, reason string, capacity int, tokenHash string) (glovoconsent.Access, error)
+	RejectAccessByLink(ctx context.Context, principalID, actor, reason, tokenHash string) (glovoconsent.Access, error)
+}
+
 // glovoAccessWithdrawReason is the reason recorded on a requester's own
 // withdrawal, which the store keeps as a rejection by the requester.
 const glovoAccessWithdrawReason = "withdrawn by requester"

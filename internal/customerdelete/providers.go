@@ -286,6 +286,12 @@ func (p *Providers) SignupSite(ctx context.Context, method, path string, body []
 	if !strings.HasPrefix(path, "/api/internal/invitations/") {
 		return nil, fmt.Errorf("invalid invitation bridge path")
 	}
+	return p.siteCall(ctx, method, path, body)
+}
+
+// siteCall is one authenticated call to the Worker's private bridge. Callers
+// fix the path; it is never taken from a request.
+func (p *Providers) siteCall(ctx context.Context, method, path string, body []byte) ([]byte, error) {
 	token, err := p.zitadelToken(ctx)
 	if err != nil {
 		failure := &SignupSiteError{Stage: "service_authentication", Cause: err}

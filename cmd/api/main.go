@@ -1532,6 +1532,19 @@ func main() {
 	// RELEASE_APPROVAL_UI_ENABLED is true and everything it reads is up.
 	releaseApprovalPage := releaseApprovalOptions(cfg, releaseApprovalUIEnvFromOS(), principalResolver, principalAuthz,
 		oauthFlowStore(oauthServer), workItemsStore != nil, releaseGrants != nil)
+	// Glovo access notifications (mctl-glovo#82 stage C): dark unless
+	// GLOVO_ACCESS_NOTIFY_ENABLED is true and everything the owner card
+	// needs is up; the requester's emails need GLOVO_ACCESS_EMAIL_ENABLED on
+	// top. An error can come with a notifier: the card runs, the emails
+	// stay off.
+	glovoNotifier, err := configureGlovoAccessNotify(os.LookupEnv, glovoAccessNotifyDepsFor(cfg, glovoConsentRoutes, principalStore, releaseApprovalPage))
+	if err != nil {
+		slog.Error("glovo access notifications not fully enabled", "error", err, "owner_card", glovoNotifier != nil)
+	}
+	if glovoNotifier != nil {
+		slog.Info("glovo access notifications enabled", "owner_card", true, "emails", glovoNotifier.Recipient != nil)
+		go glovoNotifier.Run(rootCtx)
+	}
 	router := mctlapi.NewRouter(mctlapi.Options{
 		Signup:                         signup,
 		GlovoC2KillSwitch:              glovoC2Kill,

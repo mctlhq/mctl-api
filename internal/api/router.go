@@ -636,6 +636,7 @@ func NewRouter(opts Options) http.Handler {
 			r.Post(glovoAccessStartPath, h.handleGlovoAccessStart)
 			r.Get(glovoAccessCallbackPath, h.handleGlovoAccessCallback)
 			r.Post(glovoAccessConfirmPath, h.handleGlovoAccessConfirm)
+			r.Get(glovoAccessLinkPath, h.handleGlovoAccessLink)
 			r.Get(glovoAccessPagePrefix+"{principal_id}", h.handleGlovoAccessPage)
 		}
 		// Release window approval page (sync-window write path, S2): dark
