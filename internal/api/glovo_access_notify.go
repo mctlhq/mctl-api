@@ -49,7 +49,9 @@ import (
 // glovoconsent.NotifyWindow; after that the row is closed as expired.
 //
 // Dark by default: cmd/api builds a notifier only when
-// GLOVO_ACCESS_NOTIFY_ENABLED is true and every dependency is there.
+// GLOVO_ACCESS_NOTIFY_ENABLED is true and every dependency is there, and
+// gives it a recipient lookup only when GLOVO_ACCESS_EMAIL_ENABLED is true
+// as well. Without the lookup only the owner card is delivered.
 
 // Notification outcomes, the metric's label and the code stored on an
 // abandoned row. A fixed set: no free text.
@@ -67,6 +69,9 @@ const (
 	glovoNotifyReceiptError = "receipt_error"
 	glovoNotifyAckError     = "ack_error"
 	glovoNotifySweepError   = "sweep_error"
+	// glovoNotifyEmailOff closes an email row found while the emails are
+	// switched off: it is not sent, and no address is looked up for it.
+	glovoNotifyEmailOff = "email_off"
 )
 
 var glovoAccessNotifications = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -99,6 +104,8 @@ type GlovoAccessNotifier struct {
 	Identity glovoconsent.IdentitySource
 	// Recipient resolves the requester's email for one attempt.
 	// ErrGlovoNoRecipient means there is none; any other error is retried.
+	// Nil means the emails are switched off: only the owner card is
+	// delivered, and no address is ever asked for.
 	Recipient func(ctx context.Context, principalID string) (string, error)
 	// Bridge posts one notification to the Worker and returns its receipt.
 	Bridge func(ctx context.Context, body []byte) ([]byte, error)
@@ -108,23 +115,24 @@ type GlovoAccessNotifier struct {
 	Interval time.Duration
 }
 
-// Ready reports whether every dependency is set.
+// Ready reports whether every dependency of the owner card is set. The
+// emails need Recipient on top of it.
 func (n *GlovoAccessNotifier) Ready() bool {
-	if n == nil || n.Store == nil || n.Identity == nil || n.Recipient == nil || n.Bridge == nil {
+	if n == nil || n.Store == nil || n.Identity == nil || n.Bridge == nil {
 		return false
 	}
 	u, err := url.Parse(n.PageBaseURL)
 	return err == nil && u.Scheme == "https" && u.Host != "" && (u.Path == "" || u.Path == "/") && u.RawQuery == "" && u.Fragment == ""
 }
 
-// GlovoAccessDecideLink is the decision page link an owner card carries: the
-// page of one principal's request with a one-time token.
-func GlovoAccessDecideLink(base, principalID, token string) string {
+// GlovoAccessDecideLink is the link an owner card carries: the decide link
+// with a one-time token. It names no principal.
+func GlovoAccessDecideLink(base, token string) string {
 	u, err := url.Parse(base)
 	if err != nil {
 		return ""
 	}
-	u.Path = glovoAccessPagePrefix + principalID
+	u.Path = glovoAccessLinkPath
 	u.RawQuery = url.Values{glovoAccessTokenParam: {token}}.Encode()
 	return u.String()
 }
@@ -262,6 +270,10 @@ func (n *GlovoAccessNotifier) deliver(ctx context.Context, row glovoconsent.Noti
 		}
 		body.Card = card
 	} else {
+		if n.Recipient == nil {
+			n.abandon(ctx, row, lease, glovoNotifyEmailOff)
+			return
+		}
 		to, err := n.Recipient(ctx, row.PrincipalID)
 		switch {
 		case errors.Is(err, ErrGlovoNoRecipient):
@@ -319,7 +331,7 @@ func (n *GlovoAccessNotifier) card(ctx context.Context, row glovoconsent.Notific
 	if err != nil {
 		return nil, glovoNotifyTokenError, err
 	}
-	link := GlovoAccessDecideLink(n.PageBaseURL, row.PrincipalID, token)
+	link := GlovoAccessDecideLink(n.PageBaseURL, token)
 	if link == "" || glovoconsent.HashDecideToken(token) == "" {
 		return nil, glovoNotifyTokenError, errors.New("decide link could not be built")
 	}

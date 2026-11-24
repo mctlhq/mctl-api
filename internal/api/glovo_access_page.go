@@ -63,14 +63,16 @@ import (
 // event; the page also writes one audit row per attempt. Nothing is
 // decided without the reason (mandatory, design 5.4).
 //
-// Decide link (stage C). The owner card links to this page with a one-time
-// token (?t=). The token binds the link to one request: it is checked when
-// the page opens and after the sign-in, and consumed in the same transaction
-// as the decision, so a replayed, expired or stale link decides nothing. It
-// replaces no check above: the sign-in, the second factor and the deciders
-// list apply to a link exactly as they do without one. A link whose token is
-// not valid is refused outright; it never falls back to the token-less page.
-// Opening the page without a token (the admin list's decide_url) keeps
+// Decide link (stage C). The owner card links to
+// /glovo/access-approvals/link?t=<token>: a one-time token and nothing else,
+// so the principal id is not in a link that travels through a chat. The
+// token names the request: it is resolved when the link opens, checked again
+// after the sign-in, and consumed in the same transaction as the decision,
+// so a replayed, expired or stale link decides nothing. It replaces no check
+// above: the sign-in, the second factor and the deciders list apply to a
+// link exactly as they do without one. A link whose token is not valid is
+// refused outright; it never falls back to the token-less page. Opening the
+// page of a principal without a token (the admin list's decide_url) keeps
 // working for a decider: revoking has no card and so no token, and the
 // sign-in already proves the person.
 //
@@ -94,7 +96,9 @@ const (
 	glovoAccessDecisionReject  = "reject"
 	glovoAccessDecisionRevoke  = "revoke"
 
-	// glovoAccessTokenParam is the decide link's query parameter.
+	// glovoAccessLinkPath is the decide link: the one-time token in
+	// glovoAccessTokenParam and no principal id.
+	glovoAccessLinkPath     = glovoAccessPagePrefix + "link"
 	glovoAccessTokenParam   = "t"
 	glovoAccessLinkDeadText = "This decision link has expired, was already used, or is for an earlier request. Nothing was decided. Open the pending request from the administrator list instead."
 )
@@ -163,7 +167,7 @@ func setGlovoAccessCookie(w http.ResponseWriter, value string, maxAge int) {
 }
 
 var glovoAccessPage = shellPage("glovo-access-approval", `{{if .SignIn}}<form class="actions" method="post" action="{{.SignIn.Action}}">
-<input type="hidden" name="principal" value="{{.SignIn.Principal}}">
+{{if .SignIn.Principal}}<input type="hidden" name="principal" value="{{.SignIn.Principal}}">{{end}}
 {{if .SignIn.Token}}<input type="hidden" name="token" value="{{.SignIn.Token}}">{{end}}
 <button type="submit">Sign in to review this request</button></form>{{end}}
 {{if .Decide}}<form class="actions" method="post" action="{{.Decide.Action}}">
@@ -299,29 +303,58 @@ func (h *Handlers) handleGlovoAccessPage(w http.ResponseWriter, r *http.Request)
 		d.failed(w, http.StatusBadRequest, "This decision link is malformed.")
 		return
 	}
-	// A link with a token is held to it from the first step: an unusable
-	// token is refused here, before any sign-in, and never downgraded to
-	// the token-less page.
-	token := ""
+	// This is the token-less page. A token belongs on the decide link only;
+	// one that turns up here is refused, never ignored.
 	if r.URL.Query().Has(glovoAccessTokenParam) {
-		token = r.URL.Query().Get(glovoAccessTokenParam)
-		live, err := h.glovoAccessLinkLive(r.Context(), pid, glovoconsent.HashDecideToken(token))
-		if err != nil {
-			slog.Warn("glovo access approval: decide link unreadable", "error", err)
-			d.failed(w, http.StatusServiceUnavailable, "The decision link cannot be checked right now; nothing was decided. Try again later.")
-			return
-		}
-		if !live {
-			glovoConsentEvents.WithLabelValues("access_decide", "link_refused").Inc()
-			d.failed(w, http.StatusGone, glovoAccessLinkDeadText)
-			return
-		}
+		glovoConsentEvents.WithLabelValues("access_decide", "link_refused").Inc()
+		d.failed(w, http.StatusGone, glovoAccessLinkDeadText)
+		return
 	}
-	w.Header().Set("Referrer-Policy", "no-referrer")
 	d.renderPage(w, http.StatusOK, "Review a Glovo access request", []string{
 		"Request: " + pid,
 		"Sign in to ZITADEL as yourself, with your second factor, to see the request and approve, reject or revoke it. Only an access decider can see or decide it.",
-	}, glovoAccessPageData{SignIn: &struct{ Action, Principal, Token string }{Action: glovoAccessStartPath, Principal: pid, Token: token}})
+	}, glovoAccessPageData{SignIn: &struct{ Action, Principal, Token string }{Action: glovoAccessStartPath, Principal: pid}})
+}
+
+// handleGlovoAccessLink opens a decide link. The token must name a live
+// request, or the link is refused before any sign-in. The page it renders
+// names no principal: whoever holds the link learns nothing from it.
+func (h *Handlers) handleGlovoAccessLink(w http.ResponseWriter, r *http.Request) {
+	d, ok := h.glovoAccessPageDecider(w)
+	if !ok {
+		return
+	}
+	token := r.URL.Query().Get(glovoAccessTokenParam)
+	if _, ok := h.glovoAccessLinkPrincipal(w, r, d, glovoconsent.HashDecideToken(token)); !ok {
+		return
+	}
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	d.renderPage(w, http.StatusOK, "Review a Glovo access request", []string{
+		"Sign in to ZITADEL as yourself, with your second factor, to see the request and approve or reject it. Only an access decider can see or decide it.",
+	}, glovoAccessPageData{SignIn: &struct{ Action, Principal, Token string }{Action: glovoAccessStartPath, Token: token}})
+}
+
+// glovoAccessLinkPrincipal resolves a decide-link token to the principal
+// whose live request it names. It answers the refusal itself: 503 when the
+// token cannot be read, 410 when it names nothing (malformed, unknown, used,
+// expired, of an earlier request, or no link store on this server).
+func (h *Handlers) glovoAccessLinkPrincipal(w http.ResponseWriter, r *http.Request, d *glovoAccessDecider, tokenHash string) (string, bool) {
+	links := h.opts.GlovoConsent.AccessLinks
+	pid, found := "", false
+	if tokenHash != "" && links != nil {
+		var err error
+		if pid, found, err = links.DecideTokenPrincipal(r.Context(), tokenHash); err != nil {
+			slog.Warn("glovo access approval: decide link unreadable", "error", err)
+			d.failed(w, http.StatusServiceUnavailable, "The decision link cannot be checked right now; nothing was decided. Try again later.")
+			return "", false
+		}
+	}
+	if !found || !auth.ValidPrincipalID(pid) {
+		glovoConsentEvents.WithLabelValues("access_decide", "link_refused").Inc()
+		d.failed(w, http.StatusGone, glovoAccessLinkDeadText)
+		return "", false
+	}
+	return pid, true
 }
 
 // glovoAccessLinkLive reports whether tokenHash is a live decide-link token
@@ -346,19 +379,24 @@ func (h *Handlers) handleGlovoAccessStart(w http.ResponseWriter, r *http.Request
 		d.failed(w, http.StatusBadRequest, "The request could not be read.")
 		return
 	}
-	pid := r.PostForm.Get("principal")
+	// A decide link names its request by the token alone; the token-less
+	// page names the principal. The two are never mixed. The token itself
+	// goes no further than this request: only its hash is kept in the flow.
+	pid, tokenHash := r.PostForm.Get("principal"), ""
+	if r.PostForm.Has("token") {
+		if r.PostForm.Has("principal") {
+			d.failed(w, http.StatusBadRequest, "This decision link is malformed.")
+			return
+		}
+		tokenHash = glovoconsent.HashDecideToken(r.PostForm.Get("token"))
+		var ok bool
+		if pid, ok = h.glovoAccessLinkPrincipal(w, r, d, tokenHash); !ok {
+			return
+		}
+	}
 	if !auth.ValidPrincipalID(pid) {
 		d.failed(w, http.StatusBadRequest, "This decision link is malformed.")
 		return
-	}
-	// The token itself goes no further than this request: only its hash is
-	// kept in the flow. A malformed one is refused, not dropped.
-	tokenHash := ""
-	if r.PostForm.Has("token") {
-		if tokenHash = glovoconsent.HashDecideToken(r.PostForm.Get("token")); tokenHash == "" {
-			d.failed(w, http.StatusGone, glovoAccessLinkDeadText)
-			return
-		}
 	}
 	prov, err := d.oidcProvider(r.Context())
 	if err != nil {

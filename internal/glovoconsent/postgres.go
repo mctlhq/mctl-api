@@ -75,6 +75,9 @@ type PostgresStore struct {
 	// accessNotify switches the notification outbox on (notify.go). Off by
 	// default; set after boot by SetAccessNotify.
 	accessNotify atomic.Bool
+	// accessEmail switches the requester's emails on, separately from the
+	// owner card (notify.go). Off by default; set by SetAccessEmail.
+	accessEmail atomic.Bool
 }
 
 // Option configures a PostgresStore.

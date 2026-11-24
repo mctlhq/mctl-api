@@ -35,6 +35,26 @@ import (
 type glovoAccessNotifyOutbox interface {
 	api.GlovoAccessNotifyStore
 	SetAccessNotify(bool)
+	SetAccessEmail(bool)
+}
+
+// The two switches. The card is the base; the emails are added to it.
+const (
+	glovoAccessNotifyEnv = "GLOVO_ACCESS_NOTIFY_ENABLED"
+	glovoAccessEmailEnv  = "GLOVO_ACCESS_EMAIL_ENABLED"
+)
+
+// glovoAccessSwitch reads one true/false switch. Unset, empty and false are
+// off; anything but true or false is an error and off.
+func glovoAccessSwitch(lookup func(string) (string, bool), name string) (bool, error) {
+	v, _ := lookup(name)
+	switch strings.TrimSpace(v) {
+	case "", "false":
+		return false, nil
+	case "true":
+		return true, nil
+	}
+	return false, fmt.Errorf("%s %q must be true or false", name, v)
 }
 
 // glovoAccessNotifyDeps is everything configureGlovoAccessNotify reads
@@ -56,22 +76,38 @@ type glovoAccessNotifyDeps struct {
 
 // configureGlovoAccessNotify builds the Glovo access notifier (mctl-glovo#82
 // stage C): the owner's Telegram card with the decide link, and the
-// requester's approved, rejected and lapsed emails.
+// requester's approved, rejected and lapsed emails. Each has a switch, both
+// off by default.
 //
-// GLOVO_ACCESS_NOTIFY_ENABLED is the one switch. Unset or false: nil, and
+// GLOVO_ACCESS_NOTIFY_ENABLED switches the card. Unset or false: nil, and
 // nothing is written or sent, exactly as before. True needs the consent
 // routes with the access store, the decision page, the principal store and
-// the customer-lifecycle machine; anything missing is an error for the boot
-// log and leaves notifications off. Only on success is the store's outbox
-// switched on, so a half-configured server never queues what it cannot send.
+// the customer-lifecycle machine's Worker bridge; anything missing is an
+// error for the boot log and leaves everything off. Only on success is the
+// store's outbox switched on, so a half-configured server never queues what
+// it cannot send.
+//
+// GLOVO_ACCESS_EMAIL_ENABLED adds the emails. They read the requester's
+// address from the IdP at send time, which the card never does, so they stay
+// off until asked for: with this switch off no email is queued, the notifier
+// has no recipient lookup and the IdP is never asked. True needs the card
+// switch, the customers organization and the identity hook's username
+// domain. A bad or incomplete email switch is an error and leaves the emails
+// off; the card, if it is on and complete, is still returned.
 func configureGlovoAccessNotify(lookup func(string) (string, bool), deps glovoAccessNotifyDeps) (*api.GlovoAccessNotifier, error) {
-	v, _ := lookup("GLOVO_ACCESS_NOTIFY_ENABLED")
-	switch strings.TrimSpace(v) {
-	case "", "false":
-		return nil, nil
-	case "true":
-	default:
-		return nil, fmt.Errorf("GLOVO_ACCESS_NOTIFY_ENABLED %q must be true or false; glovo access notifications stay off", v)
+	card, err := glovoAccessSwitch(lookup, glovoAccessNotifyEnv)
+	if err != nil {
+		return nil, fmt.Errorf("%w; glovo access notifications stay off", err)
+	}
+	email, emailErr := glovoAccessSwitch(lookup, glovoAccessEmailEnv)
+	if emailErr != nil {
+		emailErr = fmt.Errorf("%w; glovo access emails stay off", emailErr)
+	}
+	if !card {
+		if email {
+			emailErr = fmt.Errorf("%s=true needs %s=true; glovo access emails stay off", glovoAccessEmailEnv, glovoAccessNotifyEnv)
+		}
+		return nil, emailErr
 	}
 	var missing []string
 	var outbox glovoAccessNotifyOutbox
@@ -90,27 +126,40 @@ func configureGlovoAccessNotify(lookup func(string) (string, bool), deps glovoAc
 	if deps.Identities == nil || deps.Identity == nil {
 		missing = append(missing, "the principal store")
 	}
-	if !deps.Providers.GlovoAccessConfigured() {
-		missing = append(missing, "the customer-lifecycle machine (ZITADEL_CUSTOMER_LIFECYCLE_CLIENT_ID, _CLIENT_SECRET, _PROJECT_ID, the customers organization)")
-	}
-	if strings.TrimSpace(deps.UsernameDomain) == "" {
-		missing = append(missing, "ZITADEL_HOOK_USERNAME_DOMAIN")
+	if !deps.Providers.GlovoAccessBridgeConfigured() {
+		missing = append(missing, "the customer-lifecycle machine (ZITADEL_CUSTOMER_LIFECYCLE_CLIENT_ID, _CLIENT_SECRET, _PROJECT_ID)")
 	}
 	if len(missing) > 0 {
-		return nil, fmt.Errorf("GLOVO_ACCESS_NOTIFY_ENABLED=true is missing: %s; glovo access notifications stay off", strings.Join(missing, "; "))
+		return nil, fmt.Errorf("%s=true is missing: %s; glovo access notifications stay off", glovoAccessNotifyEnv, strings.Join(missing, "; "))
 	}
 	n := &api.GlovoAccessNotifier{
 		Store:       outbox,
 		Identity:    deps.Identity,
-		Recipient:   glovoAccessRecipient(deps.Identities, deps.Providers.CustomerEmail, deps.UsernameDomain),
 		Bridge:      deps.Providers.GlovoAccessSite,
 		PageBaseURL: deps.PageBaseURL,
 	}
 	if !n.Ready() {
-		return nil, errors.New("GLOVO_ACCESS_NOTIFY_ENABLED=true but the decision page origin is not a bare https origin; glovo access notifications stay off")
+		return nil, fmt.Errorf("%s=true but the decision page origin is not a bare https origin; glovo access notifications stay off", glovoAccessNotifyEnv)
+	}
+	if email {
+		missing = nil
+		if !deps.Providers.GlovoAccessConfigured() {
+			missing = append(missing, "the customers organization with its GitHub and Google IdP ids")
+		}
+		if strings.TrimSpace(deps.UsernameDomain) == "" {
+			missing = append(missing, "ZITADEL_HOOK_USERNAME_DOMAIN")
+		}
+		if len(missing) > 0 {
+			email = false
+			emailErr = fmt.Errorf("%s=true is missing: %s; glovo access emails stay off", glovoAccessEmailEnv, strings.Join(missing, "; "))
+		}
+	}
+	if email {
+		n.Recipient = glovoAccessRecipient(deps.Identities, deps.Providers.CustomerEmail, deps.UsernameDomain)
 	}
 	outbox.SetAccessNotify(true)
-	return n, nil
+	outbox.SetAccessEmail(email)
+	return n, emailErr
 }
 
 // glovoAccessRecipient resolves a principal's email for one delivery. The

@@ -27,7 +27,17 @@ var ErrNoCustomerEmail = errors.New("no verified customer email on record")
 // GlovoAccessConfigured reports whether the notify bridge and the email
 // lookup can work at all.
 func (p *Providers) GlovoAccessConfigured() bool {
-	return p != nil && p.Issuer != "" && p.CustomerOrg != "" && p.ClientID != "" && p.ClientSecret != "" &&
+	// verifyCustomer refuses a customer whose provider has no IdP id here, so
+	// a missing one would fail every email of that provider instead of once
+	// at boot.
+	return p.GlovoAccessBridgeConfigured() && p.CustomerOrg != "" && p.GitHubIDP != "" && p.GoogleIDP != ""
+}
+
+// GlovoAccessBridgeConfigured reports whether the Worker bridge alone can
+// work: the machine's credentials and the Worker's audience. It is all the
+// owner card needs; the email lookup needs GlovoAccessConfigured.
+func (p *Providers) GlovoAccessBridgeConfigured() bool {
+	return p != nil && p.Issuer != "" && p.ClientID != "" && p.ClientSecret != "" &&
 		p.SiteBase != "" && p.SessionAudience != ""
 }
 

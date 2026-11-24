@@ -66,6 +66,7 @@ func accessRouter(h *Handlers) http.Handler {
 	r.Post(glovoAccessStartPath, h.handleGlovoAccessStart)
 	r.Get(glovoAccessCallbackPath, h.handleGlovoAccessCallback)
 	r.Post(glovoAccessConfirmPath, h.handleGlovoAccessConfirm)
+	r.Get(glovoAccessLinkPath, h.handleGlovoAccessLink)
 	r.Get(glovoAccessPagePrefix+"{principal_id}", h.handleGlovoAccessPage)
 	return r
 }
@@ -81,10 +82,15 @@ func (e *accessPageEnv) signInLink(pid, token string, claims map[string]any) (*h
 	e.t.Helper()
 	target, startForm := glovoAccessPagePrefix+pid, url.Values{"principal": {pid}}
 	if token != "" {
-		target += "?" + glovoAccessTokenParam + "=" + url.QueryEscape(token)
-		startForm.Set("token", token)
+		// A decide link names its request by the token alone.
+		target = glovoAccessLinkPath + "?" + glovoAccessTokenParam + "=" + url.QueryEscape(token)
+		startForm = url.Values{"token": {token}}
 	}
 	page := e.send(http.MethodGet, target, nil, nil)
+	if token != "" && (strings.Contains(page.Body.String(), pid) || strings.Contains(page.Body.String(), `name="principal"`) ||
+		page.Header().Get("Referrer-Policy") != "no-referrer") {
+		e.t.Fatalf("the link page names the principal or leaks a referrer: %s", page.Body.String())
+	}
 	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `action="`+glovoAccessStartPath+`"`) {
 		e.t.Fatalf("link page = %d %s", page.Code, page.Body.String())
 	}

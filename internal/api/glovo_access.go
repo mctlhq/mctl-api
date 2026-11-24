@@ -72,6 +72,10 @@ type GlovoAccessStore interface {
 // GlovoAccessLinkStore is the decide-link side of the access store (stage
 // C): the one-time token an owner card's link carries.
 type GlovoAccessLinkStore interface {
+	// DecideTokenPrincipal names the principal whose live request tokenHash
+	// was made for. found false is a token that names nothing; an error is
+	// never "not found".
+	DecideTokenPrincipal(ctx context.Context, tokenHash string) (principalID string, found bool, err error)
 	// CheckDecideToken reports whether tokenHash is a live token of the
 	// principal's current request. It changes nothing; an error is never
 	// false.

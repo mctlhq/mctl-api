@@ -221,11 +221,32 @@ func TestGlovoAccessConfigured(t *testing.T) {
 	for _, strip := range []func(*Providers){
 		func(p *Providers) { p.Issuer = "" }, func(p *Providers) { p.CustomerOrg = "" }, func(p *Providers) { p.ClientID = "" },
 		func(p *Providers) { p.ClientSecret = "" }, func(p *Providers) { p.SiteBase = "" }, func(p *Providers) { p.SessionAudience = "" },
+		func(p *Providers) { p.GitHubIDP = "" }, func(p *Providers) { p.GoogleIDP = "" },
 	} {
 		p := glovoProviders("https://idp.example")
 		strip(p)
 		if p.GlovoAccessConfigured() {
 			t.Fatalf("incomplete providers configured: %+v", p)
+		}
+	}
+	// The bridge alone, which is all the owner card needs, does not need
+	// the customers organization or the IdP ids.
+	if none.GlovoAccessBridgeConfigured() || !full.GlovoAccessBridgeConfigured() {
+		t.Fatal("bridge readiness wrong for nil or complete providers")
+	}
+	card := glovoProviders("https://idp.example")
+	card.CustomerOrg, card.GitHubIDP, card.GoogleIDP = "", "", ""
+	if !card.GlovoAccessBridgeConfigured() || card.GlovoAccessConfigured() {
+		t.Fatal("bridge-only providers misjudged")
+	}
+	for _, strip := range []func(*Providers){
+		func(p *Providers) { p.Issuer = "" }, func(p *Providers) { p.ClientID = "" }, func(p *Providers) { p.ClientSecret = "" },
+		func(p *Providers) { p.SiteBase = "" }, func(p *Providers) { p.SessionAudience = "" },
+	} {
+		p := glovoProviders("https://idp.example")
+		strip(p)
+		if p.GlovoAccessBridgeConfigured() {
+			t.Fatalf("incomplete bridge configured: %+v", p)
 		}
 	}
 }

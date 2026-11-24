@@ -79,6 +79,20 @@ func (m *memLinkStore) live(pid, hash string) bool {
 	return st == glovoconsent.AccessPending
 }
 
+func (m *memLinkStore) DecideTokenPrincipal(_ context.Context, hash string) (string, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.checks++
+	if m.checkErr != nil {
+		return "", false, m.checkErr
+	}
+	t, ok := m.tokens[hash]
+	if !ok || !m.live(t.pid, hash) {
+		return "", false, nil
+	}
+	return t.pid, true, nil
+}
+
 func (m *memLinkStore) CheckDecideToken(_ context.Context, pid, hash string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -125,8 +139,8 @@ func newAccessLinkEnv(t *testing.T) (*accessPageEnv, *memLinkStore) {
 	return e, links
 }
 
-func linkTarget(pid, token string) string {
-	return glovoAccessPagePrefix + pid + "?" + glovoAccessTokenParam + "=" + url.QueryEscape(token)
+func linkTarget(token string) string {
+	return glovoAccessLinkPath + "?" + glovoAccessTokenParam + "=" + url.QueryEscape(token)
 }
 
 func TestGlovoAccessLink_DecidesOnceThenIsDead(t *testing.T) {
@@ -154,7 +168,7 @@ func TestGlovoAccessLink_DecidesOnceThenIsDead(t *testing.T) {
 	}
 
 	// Replay of the link: refused at the first step, with no sign-in form.
-	page := e.send(http.MethodGet, linkTarget(accessPagePRN, token), nil, nil)
+	page := e.send(http.MethodGet, linkTarget(token), nil, nil)
 	if page.Code != http.StatusGone || strings.Contains(page.Body.String(), "<form") || !strings.Contains(page.Body.String(), "Nothing was decided") {
 		t.Fatalf("replayed link = %d %s", page.Code, page.Body.String())
 	}
@@ -196,32 +210,45 @@ func TestGlovoAccessLink_NoFallbackToTokenlessDecision(t *testing.T) {
 func TestGlovoAccessLink_BadTokensRefusedBeforeSignIn(t *testing.T) {
 	e, links := newAccessLinkEnv(t)
 	e.acc.set(accessPagePRN, glovoconsent.AccessPending)
-	e.acc.set(basketAdminPRN, glovoconsent.AccessPending)
-	other := links.mint(basketAdminPRN, 'b')
+	e.acc.set(basketAdminPRN, glovoconsent.AccessApproved)
+	decided := links.mint(basketAdminPRN, 'b')
 	used := links.mint(accessPagePRN, 'c')
 	links.spendDirect(used)
 	for name, token := range map[string]string{
 		"empty": "", "malformed": "short", "unknown": strings.Repeat("z", 43),
-		"another principal's": other, "used": used, "padded": strings.Repeat("a", 42) + "=",
+		"a decided request's": decided, "used": used, "padded": strings.Repeat("a", 42) + "=",
 	} {
-		page := e.send(http.MethodGet, linkTarget(accessPagePRN, token), nil, nil)
+		page := e.send(http.MethodGet, linkTarget(token), nil, nil)
 		if page.Code != http.StatusGone || strings.Contains(page.Body.String(), "<form") {
 			t.Fatalf("%s token: page = %d %s", name, page.Code, page.Body.String())
 		}
 	}
-	// The start step refuses a malformed token itself.
-	start := e.send(http.MethodPost, glovoAccessStartPath, nil, url.Values{"principal": {accessPagePRN}, "token": {"short"}})
-	if start.Code != http.StatusGone || len(start.Result().Cookies()) != 0 {
-		t.Fatalf("start with a malformed token = %d", start.Code)
+	// The link without its parameter is as dead as a bad token.
+	if page := e.send(http.MethodGet, glovoAccessLinkPath, nil, nil); page.Code != http.StatusGone {
+		t.Fatalf("link without a token = %d", page.Code)
 	}
-	start = e.send(http.MethodPost, glovoAccessStartPath, nil, url.Values{"principal": {accessPagePRN}, "token": {""}})
-	if start.Code != http.StatusGone {
-		t.Fatalf("start with an empty token = %d", start.Code)
+	// The start step resolves the token itself: a bad one starts no sign-in.
+	for name, token := range map[string]string{"malformed": "short", "empty": "", "unknown": strings.Repeat("z", 43), "used": used} {
+		start := e.send(http.MethodPost, glovoAccessStartPath, nil, url.Values{"token": {token}})
+		if start.Code != http.StatusGone || len(start.Result().Cookies()) != 0 {
+			t.Fatalf("start with a %s token = %d", name, start.Code)
+		}
+	}
+	// A token and a principal are never mixed: not in the start form, and
+	// not on the page of a principal.
+	good := links.mint(accessPagePRN, 'e')
+	start := e.send(http.MethodPost, glovoAccessStartPath, nil, url.Values{"principal": {accessPagePRN}, "token": {good}})
+	if start.Code != http.StatusBadRequest || len(start.Result().Cookies()) != 0 {
+		t.Fatalf("start with a token and a principal = %d", start.Code)
+	}
+	page := e.send(http.MethodGet, glovoAccessPagePrefix+accessPagePRN+"?"+glovoAccessTokenParam+"="+good, nil, nil)
+	if page.Code != http.StatusGone || strings.Contains(page.Body.String(), "<form") {
+		t.Fatalf("token on a principal's page = %d", page.Code)
 	}
 	// Without a link store every token is refused; the token-less page works.
 	e.h.opts.GlovoConsent.AccessLinks = nil
 	live := links.mint(accessPagePRN, 'd')
-	if page := e.send(http.MethodGet, linkTarget(accessPagePRN, live), nil, nil); page.Code != http.StatusGone {
+	if page := e.send(http.MethodGet, linkTarget(live), nil, nil); page.Code != http.StatusGone {
 		t.Fatalf("token with no link store = %d", page.Code)
 	}
 	if page := e.send(http.MethodGet, glovoAccessPagePrefix+accessPagePRN, nil, nil); page.Code != http.StatusOK {
@@ -235,13 +262,14 @@ func TestGlovoAccessLink_RecheckedAfterSignIn(t *testing.T) {
 	e, links := newAccessLinkEnv(t)
 	e.acc.set(accessPagePRN, glovoconsent.AccessPending)
 	token := links.mint(accessPagePRN, 'a')
-	// Forge the start with a well-formed token that is not live: the start
-	// step keeps only the hash, the callback must check it.
-	dead := strings.Repeat("q", 43)
-	start := e.send(http.MethodPost, glovoAccessStartPath, nil, url.Values{"principal": {accessPagePRN}, "token": {dead}})
+	// The token is live when the sign-in starts and dies during it: the
+	// start step keeps only the hash, the callback must check it again.
+	dead := links.mint(accessPagePRN, 'q')
+	start := e.send(http.MethodPost, glovoAccessStartPath, nil, url.Values{"token": {dead}})
 	if start.Code != http.StatusSeeOther {
 		t.Fatalf("start = %d", start.Code)
 	}
+	links.spendDirect(dead)
 	var ck *http.Cookie
 	for _, c := range start.Result().Cookies() {
 		if c.Name == glovoAccessPageCookie {
@@ -268,9 +296,13 @@ func TestGlovoAccessLink_UnreadableTokenIs503(t *testing.T) {
 	e.acc.set(accessPagePRN, glovoconsent.AccessPending)
 	token := links.mint(accessPagePRN, 'a')
 	links.checkErr = errors.New("db down")
-	page := e.send(http.MethodGet, linkTarget(accessPagePRN, token), nil, nil)
+	page := e.send(http.MethodGet, linkTarget(token), nil, nil)
 	if page.Code != http.StatusServiceUnavailable || strings.Contains(page.Body.String(), "<form") {
 		t.Fatalf("page = %d %s", page.Code, page.Body.String())
+	}
+	start := e.send(http.MethodPost, glovoAccessStartPath, nil, url.Values{"token": {token}})
+	if start.Code != http.StatusServiceUnavailable || len(start.Result().Cookies()) != 0 {
+		t.Fatalf("start = %d", start.Code)
 	}
 	if e.status(accessPagePRN) != glovoconsent.AccessPending {
 		t.Fatal("a failed token read decided")

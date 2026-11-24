@@ -117,7 +117,7 @@ func (f *fakeNotifyStore) MintDecideToken(_ context.Context, _ string, _ time.Ti
 	if f.mintErr != nil {
 		return "", f.mintErr
 	}
-	raw := strings.Repeat(string(rune('a'+len(f.minted))), 43)
+	raw := strings.Repeat(string("abcdefghijklmnopqrstuvwxyz"[len(f.minted)%26]), 43)
 	f.minted = append(f.minted, raw)
 	return raw, nil
 }
@@ -192,7 +192,7 @@ func notifyCount(kind, outcome string) float64 {
 	return testutil.ToFloat64(glovoAccessNotifications.WithLabelValues(kind, outcome))
 }
 
-var notifyLink = regexp.MustCompile(`^https://api\.example/glovo/access-approvals/` + notifyTestPRN + `\?t=([A-Za-z0-9_-]{43})$`)
+var notifyLink = regexp.MustCompile(`^https://api\.example/glovo/access-approvals/link\?t=([A-Za-z0-9_-]{43})$`)
 
 func TestGlovoNotify_OwnerCard(t *testing.T) {
 	e := newNotifyEnv(t)
@@ -279,6 +279,36 @@ func TestGlovoNotify_EachEmailKindSendsOnce(t *testing.T) {
 		if logs := e.logs.String(); strings.Contains(logs, notifyTestMail) || strings.Contains(logs, notifyTestPRN) {
 			t.Fatalf("%s: logs leak: %s", kind, logs)
 		}
+	}
+}
+
+// With the emails switched off the notifier has no recipient lookup: an
+// email row is closed unsent and no address is asked for, while the owner
+// card is delivered as usual.
+func TestGlovoNotify_EmailsOffSendOnlyTheCard(t *testing.T) {
+	for kind, status := range map[glovoconsent.NotifyKind]glovoconsent.AccessStatus{
+		glovoconsent.NotifyApproved: glovoconsent.AccessApproved,
+		glovoconsent.NotifyRejected: glovoconsent.AccessRejected,
+		glovoconsent.NotifyLapsed:   glovoconsent.AccessNone,
+	} {
+		e := newNotifyEnv(t)
+		e.n.Recipient = nil
+		row := e.store.add(kind, status)
+		before := notifyCount(string(kind), glovoNotifyEmailOff)
+		e.n.Round(context.Background())
+		if len(e.sent) != 0 || e.recips != 0 || len(e.store.acked) != 0 || e.store.abandoned[row.ID] != glovoNotifyEmailOff {
+			t.Fatalf("%s: sent %v recips %d abandoned %v", kind, e.sent, e.recips, e.store.abandoned)
+		}
+		if notifyCount(string(kind), glovoNotifyEmailOff) != before+1 {
+			t.Fatalf("%s: email_off not counted", kind)
+		}
+	}
+	e := newNotifyEnv(t)
+	e.n.Recipient = nil
+	row := e.store.add(glovoconsent.NotifyOwnerCard, glovoconsent.AccessPending)
+	e.n.Round(context.Background())
+	if !e.n.Ready() || len(e.sent) != 1 || e.sent[0]["kind"] != "owner_card" || e.store.acked[row.ID] == "" || e.recips != 0 {
+		t.Fatalf("card with the emails off: sent %v acked %v", e.sent, e.store.acked)
 	}
 }
 
@@ -465,7 +495,7 @@ func TestGlovoNotify_Ready(t *testing.T) {
 	}
 	for _, strip := range []func(*GlovoAccessNotifier){
 		func(n *GlovoAccessNotifier) { n.Store = nil }, func(n *GlovoAccessNotifier) { n.Identity = nil },
-		func(n *GlovoAccessNotifier) { n.Recipient = nil }, func(n *GlovoAccessNotifier) { n.Bridge = nil },
+		func(n *GlovoAccessNotifier) { n.Bridge = nil }, func(n *GlovoAccessNotifier) { n.PageBaseURL = "" },
 	} {
 		n := *e.n
 		strip(&n)
@@ -473,7 +503,7 @@ func TestGlovoNotify_Ready(t *testing.T) {
 			t.Fatal("incomplete notifier ready")
 		}
 	}
-	if got := GlovoAccessDecideLink("https://api.example/", notifyTestPRN, strings.Repeat("a", 43)); !notifyLink.MatchString(got) {
+	if got := GlovoAccessDecideLink("https://api.example/", strings.Repeat("a", 43)); !notifyLink.MatchString(got) {
 		t.Fatalf("link %q", got)
 	}
 }

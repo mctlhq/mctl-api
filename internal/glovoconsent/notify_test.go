@@ -29,7 +29,7 @@ const (
 )
 
 // newNotifyStore is newAccessStore with the outbox and token tables wiped
-// and the outbox switched as asked.
+// and both switches, the owner card and the emails, set as asked.
 func newNotifyStore(t *testing.T, on bool) (*PostgresStore, *time.Time) {
 	t.Helper()
 	s, clock := newAccessStore(t, false)
@@ -43,6 +43,7 @@ func newNotifyStore(t *testing.T, on bool) (*PostgresStore, *time.Time) {
 	wipe()
 	t.Cleanup(wipe)
 	s.SetAccessNotify(on)
+	s.SetAccessEmail(on)
 	return s, clock
 }
 
@@ -107,8 +108,8 @@ func mustLive(t *testing.T, s *PostgresStore, pid, raw string, want bool) {
 func TestPGNotifyOffWritesNothing(t *testing.T) {
 	s, clock := newNotifyStore(t, false)
 	ctx := context.Background()
-	if s.AccessNotify() {
-		t.Fatal("outbox on by default")
+	if s.AccessNotify() || s.AccessEmail() {
+		t.Fatal("a notification switch is on by default")
 	}
 	mustRequest(t, s, notifyPRN)
 	if _, err := s.ApproveAccess(ctx, notifyPRN, notifyOwner, "ok", 0); err != nil {
@@ -125,6 +126,56 @@ func TestPGNotifyOffWritesNothing(t *testing.T) {
 	}
 	if n := tableCount(t, s, "glovo_access_notifications"); n != 0 {
 		t.Fatalf("%d outbox rows with the switch off", n)
+	}
+}
+
+// The owner card and the emails have a switch each. With only the card on,
+// no email row is ever queued, by a decision or by the lapse sweep; with
+// only the emails on, no card is.
+func TestPGNotifyCardAndEmailSwitchSeparately(t *testing.T) {
+	s, clock := newNotifyStore(t, false)
+	ctx := context.Background()
+	run := func() {
+		t.Helper()
+		mustRequest(t, s, notifyPRN)
+		if _, err := s.ApproveAccess(ctx, notifyPRN, notifyOwner, "ok", 0); err != nil {
+			t.Fatal(err)
+		}
+		mustRequest(t, s, notifyPRN2)
+		if _, err := s.RejectAccess(ctx, notifyPRN2, notifyOwner, "no"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.SetAccessNotify(true)
+	run()
+	if got := notifyKinds(t, s, notifyPRN) + "|" + notifyKinds(t, s, notifyPRN2); got != "owner_card|owner_card" {
+		t.Fatalf("card only: rows %q", got)
+	}
+	mustRequest(t, s, notifyPRN2)
+	start := *clock
+	*clock = start.Add(AccessRequestTTL + time.Hour)
+	if n, err := s.EnqueueLapsed(ctx); err != nil || n != 0 {
+		t.Fatalf("card only: lapsed sweep = %d %v", n, err)
+	}
+	s.SetAccessEmail(true)
+	if n, err := s.EnqueueLapsed(ctx); err != nil || n != 1 {
+		t.Fatalf("emails on: lapsed sweep = %d %v", n, err)
+	}
+
+	*clock = start
+	for _, q := range []string{"DELETE FROM glovo_access_notifications", "DELETE FROM glovo_access_requests WHERE principal_id IN ($1, $2)"} {
+		args := []any{}
+		if strings.Contains(q, "$1") {
+			args = []any{notifyPRN, notifyPRN2}
+		}
+		if _, err := s.pool.Exec(ctx, q, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.SetAccessNotify(false)
+	run()
+	if got := notifyKinds(t, s, notifyPRN) + "|" + notifyKinds(t, s, notifyPRN2); got != "approved|rejected" {
+		t.Fatalf("emails only: rows %q", got)
 	}
 }
 
@@ -265,6 +316,85 @@ func TestPGDecideTokenSingleUse(t *testing.T) {
 	mustState(t, s, notifyPRN, AccessPending)
 	if n := eventCount(t, s, notifyPRN, "approved"); n != 1 {
 		t.Fatalf("%d approved events", n)
+	}
+}
+
+// The decide link names its request by the token alone: the token resolves
+// to its principal exactly while CheckDecideToken would call it live.
+func TestPGDecideTokenPrincipal(t *testing.T) {
+	s, clock := newNotifyStore(t, true)
+	ctx := context.Background()
+	resolve := func(raw, want string) {
+		t.Helper()
+		pid, found, err := s.DecideTokenPrincipal(ctx, HashDecideToken(raw))
+		if err != nil || found != (want != "") || pid != want {
+			t.Fatalf("resolve = %q %v %v, want %q", pid, found, err, want)
+		}
+	}
+	a := mustRequest(t, s, notifyPRN)
+	b := mustRequest(t, s, notifyPRN2)
+	rawA, rawB := mustMint(t, s, a), mustMint(t, s, b)
+	resolve(rawA, notifyPRN)
+	resolve(rawB, notifyPRN2)
+	resolve("short", "")
+	resolve(strings.Repeat("z", 43), "")
+	if _, _, err := s.DecideTokenPrincipal(ctx, "not-a-hash"); err != nil {
+		t.Fatalf("malformed hash = %v", err)
+	}
+	// Decided: the token names nothing, the other request's still does.
+	if _, err := s.RejectAccessByLink(ctx, notifyPRN, notifyOwner, "no", HashDecideToken(rawA)); err != nil {
+		t.Fatal(err)
+	}
+	resolve(rawA, "")
+	resolve(rawB, notifyPRN2)
+	// The request itself must be pending, whatever the token row says: an
+	// unused token of a decided request names nothing.
+	if _, err := s.pool.Exec(ctx, `UPDATE glovo_access_decide_tokens SET used_at = NULL WHERE principal_id = $1`, notifyPRN); err != nil {
+		t.Fatal(err)
+	}
+	resolve(rawA, "")
+	if _, err := s.pool.Exec(ctx, `UPDATE glovo_access_decide_tokens SET used_at = $2 WHERE principal_id = $1`, notifyPRN, *clock); err != nil {
+		t.Fatal(err)
+	}
+	// So does a token of a request whose own expiry passed.
+	if _, err := s.pool.Exec(ctx, `UPDATE glovo_access_requests SET expires_at = $2 WHERE principal_id = $1`, notifyPRN2, b.RequestedAt); err != nil {
+		t.Fatal(err)
+	}
+	*clock = b.RequestedAt.Add(time.Second)
+	resolve(rawB, "")
+	*clock = b.RequestedAt
+	if _, err := s.pool.Exec(ctx, `UPDATE glovo_access_requests SET expires_at = $2 WHERE principal_id = $1`, notifyPRN2, b.ExpiresAt); err != nil {
+		t.Fatal(err)
+	}
+	resolve(rawB, notifyPRN2)
+	// A used token on a request that is pending again names nothing.
+	c := mustRequest(t, s, notifyPRN)
+	if c.RequestedAt.Equal(a.RequestedAt) {
+		resolve(rawA, "")
+	}
+	// Past the expiry it names nothing; so does a token past its own expiry
+	// on a request that is still live.
+	*clock = b.ExpiresAt.Add(time.Second)
+	resolve(rawB, "")
+	*clock = b.RequestedAt
+	resolve(rawB, notifyPRN2)
+	if _, err := s.pool.Exec(ctx, `UPDATE glovo_access_decide_tokens SET expires_at = $1 WHERE principal_id = $2`,
+		b.RequestedAt.Add(-time.Second), notifyPRN2); err != nil {
+		t.Fatal(err)
+	}
+	resolve(rawB, "")
+	// A token left unretired from an earlier request of the same principal
+	// names nothing: it is bound to requested_at, not only to the principal.
+	if _, err := s.pool.Exec(ctx, `UPDATE glovo_access_decide_tokens SET expires_at = $1, used_at = NULL, requested_at = $2 WHERE principal_id = $3`,
+		b.ExpiresAt, b.RequestedAt.Add(-time.Hour), notifyPRN2); err != nil {
+		t.Fatal(err)
+	}
+	resolve(rawB, "")
+	// A failed read is an error, never "names nothing".
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, found, err := s.DecideTokenPrincipal(cctx, HashDecideToken(rawB)); err == nil || found {
+		t.Fatalf("failed read = %v %v", found, err)
 	}
 }
 
@@ -463,6 +593,41 @@ func TestPGNotifyWindow(t *testing.T) {
 	if state != "abandoned" || outcome != NotifyOutcomeExpired {
 		t.Fatalf("row %s %s", state, outcome)
 	}
+}
+
+// Dead decide tokens are dropped a window after they died; a live one, and
+// one that died less than a window ago, are kept.
+func TestPGDecideTokensPruned(t *testing.T) {
+	s, clock := newNotifyStore(t, true)
+	ctx := context.Background()
+	a := mustRequest(t, s, notifyPRN)
+	spent, spare := mustMint(t, s, a), mustMint(t, s, a)
+	b := mustRequest(t, s, notifyPRN2)
+	live := mustMint(t, s, b)
+	if _, err := s.RejectAccessByLink(ctx, notifyPRN, notifyOwner, "no", HashDecideToken(spent)); err != nil {
+		t.Fatal(err)
+	}
+	_ = spare // retired by the decision
+	prune := func(want int) {
+		t.Helper()
+		if _, err := s.ExpireNotifications(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if n := tableCount(t, s, "glovo_access_decide_tokens"); n != want {
+			t.Fatalf("%d tokens, want %d", n, want)
+		}
+	}
+	prune(3)
+	*clock = clock.Add(NotifyWindow - time.Minute)
+	prune(3)
+	*clock = clock.Add(2 * time.Minute)
+	prune(1) // the spent and the retired one are gone, the live one stays
+	mustLive(t, s, notifyPRN2, live, true)
+	mustLive(t, s, notifyPRN, spent, false)
+	*clock = b.ExpiresAt.Add(NotifyWindow - time.Minute)
+	prune(1)
+	*clock = b.ExpiresAt.Add(NotifyWindow + time.Minute)
+	prune(0)
 }
 
 func TestNotifyDeliveryKeyStableAndDistinct(t *testing.T) {

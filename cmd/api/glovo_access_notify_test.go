@@ -35,6 +35,14 @@ type notifyAccessStore struct {
 	api.GlovoAccessNotifyStore
 	api.GlovoAccessLinkStore
 	on, calls int
+	// email is the last value SetAccessEmail got; emailCalls counts them.
+	email      bool
+	emailCalls int
+}
+
+func (s *notifyAccessStore) SetAccessEmail(v bool) {
+	s.emailCalls++
+	s.email = v
 }
 
 func (s *notifyAccessStore) SetAccessNotify(v bool) {
@@ -66,7 +74,7 @@ func notifyDeps() (glovoAccessNotifyDeps, *notifyAccessStore) {
 			return nil, nil
 		},
 		Identity: notifyIdentity{},
-		Providers: &customerdelete.Providers{Issuer: "https://idp.example", CustomerOrg: "customers", ClientID: "c", ClientSecret: "s",
+		Providers: &customerdelete.Providers{Issuer: "https://idp.example", CustomerOrg: "customers", GitHubIDP: "gh", GoogleIDP: "g", ClientID: "c", ClientSecret: "s",
 			SiteBase: "https://site.example", SessionAudience: "aud"},
 		UsernameDomain: "mctl.example",
 		PageBaseURL:    "https://api.example",
@@ -79,6 +87,83 @@ func notifyEnvLookup(v string, set bool) func(string) (string, bool) {
 			return v, true
 		}
 		return "", false
+	}
+}
+
+// notifyEnvBoth sets the card switch and the email switch.
+func notifyEnvBoth(card, email string) func(string) (string, bool) {
+	return func(k string) (string, bool) {
+		switch k {
+		case "GLOVO_ACCESS_NOTIFY_ENABLED":
+			return card, true
+		case "GLOVO_ACCESS_EMAIL_ENABLED":
+			return email, true
+		}
+		return "", false
+	}
+}
+
+// The card alone is the default of the card switch: the emails stay off, the
+// notifier has no recipient lookup, and what only the emails need (the
+// customers organization, the username domain) is not required.
+func TestGlovoAccessNotifyCardWithoutEmails(t *testing.T) {
+	for _, email := range []string{"", "false"} {
+		deps, st := notifyDeps()
+		deps.Providers.CustomerOrg, deps.Providers.GitHubIDP, deps.Providers.GoogleIDP, deps.UsernameDomain = "", "", "", ""
+		n, err := configureGlovoAccessNotify(notifyEnvBoth("true", email), deps)
+		if err != nil || n == nil || !n.Ready() || n.Recipient != nil {
+			t.Fatalf("%q: notifier %v err %v", email, n, err)
+		}
+		if st.on != 1 || st.emailCalls != 1 || st.email {
+			t.Fatalf("%q: card on %d, email set %v in %d calls", email, st.on, st.email, st.emailCalls)
+		}
+	}
+}
+
+func TestGlovoAccessNotifyEmailsOn(t *testing.T) {
+	deps, st := notifyDeps()
+	n, err := configureGlovoAccessNotify(notifyEnvBoth("true", "true"), deps)
+	if err != nil || n == nil || !n.Ready() || n.Recipient == nil || st.on != 1 || !st.email {
+		t.Fatalf("notifier %v err %v card %d email %v", n, err, st.on, st.email)
+	}
+}
+
+// The emails never come on by themselves or half-configured, and a bad
+// email switch does not take the card down with it.
+func TestGlovoAccessNotifyEmailsStayOff(t *testing.T) {
+	// Without the card switch the email switch is an error and nothing runs.
+	for _, card := range []string{"", "false"} {
+		deps, st := notifyDeps()
+		n, err := configureGlovoAccessNotify(notifyEnvBoth(card, "true"), deps)
+		if n != nil || err == nil || st.calls != 0 || st.emailCalls != 0 {
+			t.Fatalf("card %q: notifier %v err %v", card, n, err)
+		}
+	}
+	for name, tc := range map[string]struct {
+		email string
+		strip func(*glovoAccessNotifyDeps)
+	}{
+		"malformed switch":   {"yes", func(*glovoAccessNotifyDeps) {}},
+		"upper case":         {"TRUE", func(*glovoAccessNotifyDeps) {}},
+		"no customers org":   {"true", func(d *glovoAccessNotifyDeps) { d.Providers.CustomerOrg = "" }},
+		"no github idp":      {"true", func(d *glovoAccessNotifyDeps) { d.Providers.GitHubIDP = "" }},
+		"no google idp":      {"true", func(d *glovoAccessNotifyDeps) { d.Providers.GoogleIDP = "" }},
+		"no username domain": {"true", func(d *glovoAccessNotifyDeps) { d.UsernameDomain = " " }},
+	} {
+		deps, st := notifyDeps()
+		tc.strip(&deps)
+		n, err := configureGlovoAccessNotify(notifyEnvBoth("true", tc.email), deps)
+		if err == nil || !strings.Contains(err.Error(), "emails stay off") {
+			t.Fatalf("%s: err %v", name, err)
+		}
+		if n == nil || !n.Ready() || n.Recipient != nil || st.on != 1 || st.email || st.emailCalls != 1 {
+			t.Fatalf("%s: notifier %v card %d email %v", name, n, st.on, st.email)
+		}
+	}
+	// A malformed email switch with the card off is still reported.
+	deps, st := notifyDeps()
+	if n, err := configureGlovoAccessNotify(notifyEnvBoth("false", "yes"), deps); n != nil || err == nil || st.calls != 0 {
+		t.Fatalf("malformed email switch, card off: %v %v", n, err)
 	}
 }
 
@@ -126,7 +211,6 @@ func TestGlovoAccessNotifyOnNeedsEverything(t *testing.T) {
 		"no providers":        func(d *glovoAccessNotifyDeps) { d.Providers = nil },
 		"no machine secret":   func(d *glovoAccessNotifyDeps) { d.Providers.ClientSecret = "" },
 		"no worker audience":  func(d *glovoAccessNotifyDeps) { d.Providers.SessionAudience = "" },
-		"no username domain":  func(d *glovoAccessNotifyDeps) { d.UsernameDomain = " " },
 	} {
 		deps, st := notifyDeps()
 		strip(&deps)
@@ -147,7 +231,7 @@ func TestGlovoAccessRecipient(t *testing.T) {
 	google := principals.ExternalIdentity{Provider: auth.ProviderGoogle, Subject: "112233445566778899001"}
 	github := principals.ExternalIdentity{Provider: auth.ProviderGitHub, Subject: "123", Display: "Alice"}
 	type call struct{ provider, subject, username string }
-	run := func(ids []principals.ExternalIdentity, idErr error, mailErr error) (string, error, []call) {
+	run := func(ids []principals.ExternalIdentity, idErr error, mailErr error) (string, []call, error) {
 		var calls []call
 		f := glovoAccessRecipient(
 			func(_ context.Context, p string) ([]principals.ExternalIdentity, error) {
@@ -164,14 +248,14 @@ func TestGlovoAccessRecipient(t *testing.T) {
 				return mail, nil
 			}, "mctl.example")
 		got, err := f(context.Background(), pid)
-		return got, err, calls
+		return got, calls, err
 	}
 
-	got, err, calls := run([]principals.ExternalIdentity{google}, nil, nil)
+	got, calls, err := run([]principals.ExternalIdentity{google}, nil, nil)
 	if err != nil || got != mail || len(calls) != 1 || calls[0] != (call{"google", google.Subject, "google." + google.Subject + "@mctl.example"}) {
 		t.Fatalf("google = %q %v %v", got, err, calls)
 	}
-	got, err, calls = run([]principals.ExternalIdentity{github}, nil, nil)
+	got, calls, err = run([]principals.ExternalIdentity{github}, nil, nil)
 	if err != nil || got != mail || len(calls) != 1 || calls[0] != (call{"github", "123", "alice@mctl.example"}) {
 		t.Fatalf("github = %q %v %v", got, err, calls)
 	}
@@ -186,24 +270,24 @@ func TestGlovoAccessRecipient(t *testing.T) {
 	for name, ids := range map[string][]principals.ExternalIdentity{
 		"none": nil, "both": {google, github}, "revoked": {gRevoked}, "federated": {gFederated}, "other provider": {other}, "malformed subject": {badSub},
 	} {
-		got, err, calls := run(ids, nil, nil)
+		got, calls, err := run(ids, nil, nil)
 		if !errors.Is(err, api.ErrGlovoNoRecipient) || got != "" || len(calls) != 0 {
 			t.Fatalf("%s = %q %v %v", name, got, err, calls)
 		}
 	}
 	// A revoked second identity does not hide the live one.
-	if got, err, _ := run([]principals.ExternalIdentity{gRevoked, github}, nil, nil); err != nil || got != mail {
+	if got, _, err := run([]principals.ExternalIdentity{gRevoked, github}, nil, nil); err != nil || got != mail {
 		t.Fatalf("revoked + live = %q %v", got, err)
 	}
 
 	// The IdP's documented absence is no recipient; a failure is a failure.
-	if _, err, _ := run([]principals.ExternalIdentity{google}, nil, customerdelete.ErrNoCustomerEmail); !errors.Is(err, api.ErrGlovoNoRecipient) {
+	if _, _, err := run([]principals.ExternalIdentity{google}, nil, customerdelete.ErrNoCustomerEmail); !errors.Is(err, api.ErrGlovoNoRecipient) {
 		t.Fatalf("absent email = %v", err)
 	}
-	if _, err, _ := run([]principals.ExternalIdentity{google}, nil, errors.New("IdP down")); err == nil || errors.Is(err, api.ErrGlovoNoRecipient) {
+	if _, _, err := run([]principals.ExternalIdentity{google}, nil, errors.New("IdP down")); err == nil || errors.Is(err, api.ErrGlovoNoRecipient) {
 		t.Fatalf("IdP failure = %v", err)
 	}
-	if _, err, calls := run(nil, errors.New("db down"), nil); err == nil || errors.Is(err, api.ErrGlovoNoRecipient) || len(calls) != 0 {
+	if _, calls, err := run(nil, errors.New("db down"), nil); err == nil || errors.Is(err, api.ErrGlovoNoRecipient) || len(calls) != 0 {
 		t.Fatalf("unreadable identities = %v", err)
 	}
 }

@@ -18,7 +18,8 @@
 //
 // Dark by default. Nothing here is written unless SetAccessNotify(true) was
 // called: with it off RequestAccess, the decisions and the reads behave
-// exactly as before.
+// exactly as before. The requester's emails have a switch of their own,
+// SetAccessEmail, so the owner card can run without them.
 //
 // With it on, the access methods append an outbox row to
 // glovo_access_notifications in the SAME transaction as the change they
@@ -135,17 +136,35 @@ CREATE INDEX IF NOT EXISTS glovo_access_decide_tokens_request
 	ON glovo_access_decide_tokens (principal_id, requested_at);
 `
 
-// SetAccessNotify switches the notification outbox on or off. Off is the
-// default and writes nothing. Safe to call at any time.
+// SetAccessNotify switches the owner card on or off. Off is the default and
+// queues no card. Safe to call at any time.
 func (s *PostgresStore) SetAccessNotify(v bool) { s.accessNotify.Store(v) }
 
-// AccessNotify reports whether the outbox is on.
+// AccessNotify reports whether the owner card is on.
 func (s *PostgresStore) AccessNotify() bool { return s.accessNotify.Load() }
+
+// SetAccessEmail switches the requester's emails (approved, rejected,
+// lapsed) on or off, separately from the owner card. Off is the default and
+// queues no email, so nothing ever asks for the requester's address. Safe to
+// call at any time.
+func (s *PostgresStore) SetAccessEmail(v bool) { s.accessEmail.Store(v) }
+
+// AccessEmail reports whether the requester's emails are on.
+func (s *PostgresStore) AccessEmail() bool { return s.accessEmail.Load() }
+
+// notifyOn reports whether notifications of kind are queued at all: the
+// owner card and the emails have a switch each.
+func (s *PostgresStore) notifyOn(kind NotifyKind) bool {
+	if kind == NotifyOwnerCard {
+		return s.accessNotify.Load()
+	}
+	return s.accessEmail.Load()
+}
 
 // enqueueNotification appends one outbox row inside the caller's
 // transaction. A second row for the same request and kind is left out.
 func (s *PostgresStore) enqueueNotification(ctx context.Context, tx pgx.Tx, principalID string, kind NotifyKind, requestedAt, expiresAt, now time.Time) error {
-	if !s.accessNotify.Load() {
+	if !s.notifyOn(kind) {
 		return nil
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO glovo_access_notifications (principal_id, kind, requested_at, expires_at, created_at)
@@ -237,6 +256,34 @@ func (s *PostgresStore) CheckDecideToken(ctx context.Context, principalID, token
 		return false, fmt.Errorf("glovoconsent: check decide token: %w", err)
 	}
 	return n == 1, nil
+}
+
+// DecideTokenPrincipal names the principal whose live request tokenHash was
+// made for, under the conditions of CheckDecideToken. found false is a token
+// that names nothing (malformed, unknown, used, expired, or of a request
+// that is no longer the principal's); a failed read is an error.
+func (s *PostgresStore) DecideTokenPrincipal(ctx context.Context, tokenHash string) (string, bool, error) {
+	if !tokenHashPattern.MatchString(tokenHash) {
+		return "", false, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	now := s.now()
+	var pid string
+	err := s.pool.QueryRow(ctx, `SELECT t.principal_id FROM glovo_access_decide_tokens t
+		JOIN glovo_access_requests r ON r.principal_id = t.principal_id AND r.requested_at = t.requested_at
+		WHERE t.token_hash = $1 AND t.used_at IS NULL AND t.expires_at >= $2
+			AND r.status = 'pending' AND r.expires_at >= $2`, tokenHash, now).Scan(&pid)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("glovoconsent: resolve decide token: %w", err)
+	}
+	if !prnPattern.MatchString(pid) {
+		return "", false, fmt.Errorf("glovoconsent: resolve decide token: unusable row")
+	}
+	return pid, true, nil
 }
 
 // spendDecideToken consumes tokenHash for the request made at requestedAt, in
@@ -377,9 +424,9 @@ func (s *PostgresStore) AbandonNotification(ctx context.Context, id int64, lease
 // EnqueueLapsed appends a lapsed notification for every pending request whose
 // expiry passed within NotifyWindow, and returns how many were added. The
 // access row is left as it is: lapsing stays derived at read time. With the
-// outbox off it adds nothing.
+// emails off it adds nothing.
 func (s *PostgresStore) EnqueueLapsed(ctx context.Context) (int, error) {
-	if !s.accessNotify.Load() {
+	if !s.notifyOn(NotifyLapsed) {
 		return 0, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
@@ -396,7 +443,8 @@ func (s *PostgresStore) EnqueueLapsed(ctx context.Context) (int, error) {
 }
 
 // ExpireNotifications abandons pending rows older than NotifyWindow that no
-// live attempt holds, and returns how many. They can no longer be sent
+// live attempt holds, and returns how many. It also drops decide tokens
+// that were spent or expired more than NotifyWindow ago. They can no longer be sent
 // safely, and closing them makes the loss countable.
 func (s *PostgresStore) ExpireNotifications(ctx context.Context) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
@@ -408,6 +456,14 @@ func (s *PostgresStore) ExpireNotifications(ctx context.Context) (int, error) {
 		now, now.Add(-NotifyWindow), NotifyOutcomeExpired)
 	if err != nil {
 		return 0, fmt.Errorf("glovoconsent: expire notifications: %w", err)
+	}
+	// Decide tokens that have been dead for a whole window are dropped: a
+	// card retried against a failing bridge mints one per attempt, and
+	// nothing else removes them. A dropped token reads as unknown, which is
+	// refused exactly like a spent or expired one.
+	if _, err := s.pool.Exec(ctx, `DELETE FROM glovo_access_decide_tokens
+		WHERE expires_at < $1 OR (used_at IS NOT NULL AND used_at < $1)`, now.Add(-NotifyWindow)); err != nil {
+		return 0, fmt.Errorf("glovoconsent: prune decide tokens: %w", err)
 	}
 	return int(tag.RowsAffected()), nil
 }

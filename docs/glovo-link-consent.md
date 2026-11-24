@@ -117,6 +117,19 @@ Dark unless `GLOVO_ACCESS_NOTIFY_ENABLED=true` (below). With the switch off
 nothing in this section happens: no row is written, nothing is sent, and the
 decision page behaves as in stage B.
 
+There are two switches, both off by default:
+
+| Switch | Turns on | Reads the requester's address |
+|---|---|---|
+| `GLOVO_ACCESS_NOTIFY_ENABLED` | the owner card and the decide link | never |
+| `GLOVO_ACCESS_EMAIL_ENABLED` | the approved, rejected and lapsed emails; needs the first one | at send time, from the IdP |
+
+The emails are a personal-data flow the card does not have (an address is read
+from the IdP and handed to the Worker and the mail provider), so the card can
+be turned on without them. With only the card on, no email row is queued, the
+lapse sweep adds nothing, the delivery loop has no recipient lookup and the IdP
+is never asked.
+
 ### Outbox
 
 The access store appends one row to `glovo_access_notifications` in the same
@@ -129,6 +142,10 @@ decision does:
 | the owner approves | `approved` | the requester's email |
 | the owner rejects | `rejected` | the requester's email |
 | a pending request passes its seven days | `lapsed` | the requester's email |
+
+The `owner_card` row is queued only with the card switch on, the three email
+rows only with the email switch on. An email row left over from a time the
+emails were on is closed as `email_off` and not sent.
 
 A withdrawal by the requester sends nothing. **Revoking sends nothing either**:
 the design names a revoke email (5.7) but its Appendix A has no text for one,
@@ -158,7 +175,12 @@ neither the Worker nor the mail provider learns the principal from it.
   organization, held to the same proof a deletion needs (a human of that
   organization with exactly one IdP link, naming the principal's Google subject
   or GitHub id), and must have a verified address. It is passed to the Worker
-  with the mail and is neither stored nor logged here.
+  with the mail and is neither stored nor logged here: no table has a column
+  for it, a failed lookup is logged as a fixed string (the IdP's answer could
+  quote it), and the Worker's receipt holds the kind and the provider's
+  delivery id only.
+- A failed lookup never touches the decision. It is `recipient_error`, retried
+  like any failed send; the IdP's documented absence is `no_recipient`.
 - A principal with no such customer (staff, an agent, one holding both a Google
   and a GitHub identity, a GitHub customer whose login changed since signup) has
   no recipient: the row is closed as `no_recipient`. Only the IdP's own empty
@@ -168,7 +190,8 @@ neither the Worker nor the mail provider learns the principal from it.
   user, which reads as `no_recipient`. Watch that outcome after turning the
   switch on.
 - Observability: `mctl_glovo_access_notifications_total{kind,outcome}` (`sent`,
-  `superseded`, `no_recipient`, `expired`, and one outcome per failing step) and
+  `superseded`, `no_recipient`, `email_off`, `expired`, and one outcome per
+  failing step) and
   one log line per attempt with the row id, kind and outcome. No address,
   principal id, token or link is logged.
 
@@ -181,24 +204,34 @@ glovo.mctl.ai are untouched.
 
 The card is a plain Telegram message to the Worker's review chat (the one the
 invitation requests use): the masked identity (`google:a***`), the request and
-expiry times, and a link to the decision page. It decides nothing. mctl-api has
+expiry times, and the decide link. Nothing else: no email, no name and no
+principal id, in the text or in the link. It decides nothing. mctl-api has
 no channel to mctl-telegram that can send a message, so the card goes through
 the Worker's bot; it is at-least-once like the invitation alert.
 
 ### Decide link
 
-The card's link is `<SELF_URL>/glovo/access-approvals/{principal_id}?t=<token>`.
+The card's link is `<SELF_URL>/glovo/access-approvals/link?t=<token>`. It names
+no principal: the token alone names the request, and the page it opens shows
+nothing about the request before the sign-in.
 
 - The token is 32 random bytes. Only its SHA-256 is stored
   (`glovo_access_decide_tokens`), bound to the principal and to the request
   (its `requested_at`), expiring with the request. Because the raw token is
   never stored, it is minted when the card is sent, not when the request is
   opened; a retried card carries a fresh token.
-- The page checks the token when it opens and again after the sign-in, and the
-  store consumes it in the same transaction as the approval or rejection. A
-  replay, an expired token, another principal's token or a token of an earlier
-  request decides nothing (410 on the way in, 409 at the decision).
+- The token is resolved to its request when the link opens and when the
+  sign-in starts, checked again after the sign-in, and consumed by the store in
+  the same transaction as the approval or rejection. A replay, an expired
+  token, an unknown token or a token of an earlier request decides nothing (410
+  on the way in, 409 at the decision). A token that cannot be read is 503,
+  never "not found".
+- A token and a principal are never mixed: the page of a principal refuses a
+  `t` parameter, and the sign-in form takes one or the other.
 - Every decision and every withdrawal retires all unused tokens of the request.
+- A token that was spent or expired more than 23 hours ago is deleted by the
+  delivery loop's sweep. A deleted token reads as unknown, which is refused
+  like a spent one.
 - The token replaces no check: the fresh sign-in, the second factor and the
   deciders list apply to a link exactly as without one.
 - A link that carries a token is held to it. It never falls back to the
@@ -223,11 +256,20 @@ The card's link is `<SELF_URL>/glovo/access-approvals/{principal_id}?t=<token>`.
    customer-lifecycle machine (`ZITADEL_CUSTOMER_LIFECYCLE_CLIENT_ID`,
    `_CLIENT_SECRET`, `_PROJECT_ID`; the site is `CUSTOMER_DELETION_SITE_URL`,
    default `https://mctl.ai`). Anything missing is one boot-log error and
-   notifications stay off.
+   notifications stay off. This turns on the card only.
+4. For the emails, set `GLOVO_ACCESS_EMAIL_ENABLED` to `true` in the Worker and
+   then in mctl-api. mctl-api additionally needs the customers organization and
+   `ZITADEL_HOOK_USERNAME_DOMAIN`, and the customer-lifecycle machine must be
+   allowed to search users of the customers organization and read their email
+   (`POST /v2/users`). That permission has not been verified against the live
+   IdP: a machine without it gets an empty listing, which reads as
+   `no_recipient`. Send one test decision and check the outcome before relying
+   on the emails. A bad or incomplete email switch is one boot-log error and
+   leaves the emails off; the card keeps running.
 
 Requests that were already pending when the switch is turned on get no card
 (the card is queued when a request is opened); they do get the lapsed email if
-they expire afterwards. They stay in the admin list.
+they expire afterwards and the emails are on. They stay in the admin list.
 
 ## Capacity and the `glovo:c2` grant
 
@@ -266,7 +308,8 @@ The code default stays closed.
 | `GLOVO_CONSENT_SERVICE_PROVIDER`, `GLOVO_CONSENT_SERVICE_SUBJECT` | the mctl-glovo federated service identity (an `MCTL_OIDC_PROVIDERS` entry of kind service) |
 | `GLOVO_C2_CAPACITY` | the slot cap, a positive integer (at most seven digits, no sign or leading zero); unset, `0` or malformed is closed. Not a secret: a plain value is fine |
 | `GLOVO_ACCESS_REQUIRED` | Default `false`: slots are active consents, capacity accounting as above. `true` (mctl-glovo#82) makes approved access requests hold the slots (`Record` stops capping consents) AND makes the `glovo:c2` grant source require `access = approved`, read live at every check, in the OAuth personal-grant paths (code, exchange, refresh, consent page) and in the Glovo scope resolver: revoking access ends the next request, a failed access read or an unknown status is a refusal or 503, never a grant. If the store has no access side the personal grants are not wired at all. Existing consent holders keep working because the one-shot backfill approves every active consent when the flag first flips; a consent recorded afterwards needs an approved access. Anything but `""`, `false` or `true` is a boot-log error and consent stays off. The access routes (`/api/v1/glovo/access-request`) and the `access` field of the service read work either way. Enabling it needs the decision page (above) first, or nobody new gets in |
-| `GLOVO_ACCESS_NOTIFY_ENABLED` | Default `false`: no owner card, no email, no outbox row, no decide token. `true` turns on everything in "Notifications and the decide link" above, if its dependencies are there; otherwise one boot-log error and it stays off. Anything but `""`, `false` or `true` is a boot-log error and stays off |
+| `GLOVO_ACCESS_NOTIFY_ENABLED` | Default `false`: no owner card, no email, no outbox row, no decide token. `true` turns on the owner card and the decide link of "Notifications and the decide link" above, if its dependencies are there; otherwise one boot-log error and it stays off. Anything but `""`, `false` or `true` is a boot-log error and stays off |
+| `GLOVO_ACCESS_EMAIL_ENABLED` | Default `false`: no approved, rejected or lapsed email, and the requester's address is never read. `true` adds the emails; it needs `GLOVO_ACCESS_NOTIFY_ENABLED=true`, the customers organization and `ZITADEL_HOOK_USERNAME_DOMAIN`. A bad value or a missing dependency is a boot-log error and leaves the emails off without touching the card |
 | `GLOVO_CONSENT_DB_URL` | the store's database, else `AUDIT_DB_URL` |
 
 ## What mctl-glovo needs next
