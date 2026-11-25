@@ -29,17 +29,25 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Environ()))
 }
 
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			return entry[len(prefix):]
+		}
+	}
+	return ""
+}
+
 func run(args, baseEnv []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "pgtestexec: missing test binary argument")
 		return 2
 	}
 
-	dbURL := os.Getenv("TEST_DATABASE_URL")
-	altURL := os.Getenv("TEST_DB_URL")
-	adminBase := dbURL
+	adminBase := envValue(baseEnv, "TEST_DATABASE_URL")
 	if adminBase == "" {
-		adminBase = altURL
+		adminBase = envValue(baseEnv, "TEST_DB_URL")
 	}
 	if adminBase == "" {
 		return execChild(args, baseEnv)
@@ -82,7 +90,7 @@ func run(args, baseEnv []string) int {
 }
 
 func execChild(args, env []string) int {
-	// #nosec G204 -- `go test -exec` passes the compiled package test binary and test flags in args.
+	//nolint:gosec // G204,G702: `go test -exec` passes the compiled package test binary and test flags in args.
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Env = env
 	cmd.Stdin = os.Stdin
@@ -148,14 +156,22 @@ func createScratchDB(ctx context.Context, adminURL, dbName string) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = conn.Close(ctx) }()
+	defer func() {
+		cctx, ccancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer ccancel()
+		_ = conn.Close(cctx)
+	}()
 
 	// Serialize CREATE DATABASE across parallel `go test -p N` processes so
 	// PostgreSQL does not fail with SQLSTATE 55006 on shared template1.
 	if _, lerr := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", createDBAdvisoryLockID); lerr != nil {
 		return lerr
 	}
-	defer func() { _, _ = conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", createDBAdvisoryLockID) }()
+	defer func() {
+		uctx, ucancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer ucancel()
+		_, _ = conn.Exec(uctx, "SELECT pg_advisory_unlock($1)", createDBAdvisoryLockID)
+	}()
 
 	stmt := "CREATE DATABASE " + pgx.Identifier{dbName}.Sanitize()
 	// Also retry SQLSTATE 55006 if an external test setup (e.g. glovomigrate)
@@ -186,7 +202,11 @@ func dropScratchDB(ctx context.Context, adminURL, dbName string) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = conn.Close(ctx) }()
+	defer func() {
+		cctx, ccancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer ccancel()
+		_ = conn.Close(cctx)
+	}()
 
 	_, err = conn.Exec(ctx, "DROP DATABASE IF EXISTS "+pgx.Identifier{dbName}.Sanitize()+" WITH (FORCE)")
 	return err

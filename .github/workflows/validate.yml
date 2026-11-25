@@ -26,21 +26,24 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: mctl_api_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     steps:
       - uses: actions/checkout@v7
+
+      - name: Start PostgreSQL 16 (max_connections=400)
+        run: |
+          docker run -d --name mctl-test-pg \
+            -p 5432:5432 \
+            -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_DB=mctl_api_test \
+            postgres:16 -c max_connections=400
+          for i in $(seq 1 30); do
+            if docker exec mctl-test-pg pg_isready -U postgres -d mctl_api_test >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::PostgreSQL did not become ready in time"
+          exit 1
 
       - uses: actions/setup-go@v6
         with:

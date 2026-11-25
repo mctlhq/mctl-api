@@ -11,6 +11,7 @@ func TestWithDBNameAndRewriteEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("withDBName returned error: %v", err)
 	}
+	//nolint:gosec // G101: synthetic local test fixture URL
 	want := "postgres://postgres:postgres@localhost:5432/ci_pkg_0123456789abcdef?sslmode=disable"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -39,6 +40,10 @@ func TestWithDBNameAndRewriteEnv(t *testing.T) {
 	if !slices.Equal(rewritten, wantEnv) {
 		t.Fatalf("rewritten env mismatch:\ngot:  %v\nwant: %v", rewritten, wantEnv)
 	}
+
+	if _, err := rewriteEnv([]string{"TEST_DB_URL=not-a-url"}, "ci_pkg_fedcba9876543210"); err == nil {
+		t.Fatal("expected rewriteEnv to fail on malformed TEST_DB_URL")
+	}
 }
 
 func TestNewDBNameFormat(t *testing.T) {
@@ -65,9 +70,8 @@ func TestRunNoArgsReturns2(t *testing.T) {
 }
 
 func TestRunFailClosedOnUnreachablePostgres(t *testing.T) {
-	t.Setenv("TEST_DATABASE_URL", "postgres://postgres:postgres@127.0.0.1:1/mctl_api_test?sslmode=disable&connect_timeout=1")
-	t.Setenv("TEST_DB_URL", "")
-	// Must fail closed without executing child binary when DB provisioning fails.
+	// Must fail closed without executing child binary when DB provisioning fails,
+	// reading the URL strictly from baseEnv rather than process env.
 	code := run([]string{"/bin/echo", "should-not-run"}, []string{
 		"TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:1/mctl_api_test?sslmode=disable&connect_timeout=1",
 	})
@@ -77,8 +81,6 @@ func TestRunFailClosedOnUnreachablePostgres(t *testing.T) {
 }
 
 func TestRunPassthroughWithoutDBEnv(t *testing.T) {
-	t.Setenv("TEST_DATABASE_URL", "")
-	t.Setenv("TEST_DB_URL", "")
 	code := run([]string{"/bin/sh", "-c", "test \"$TEST_FLAG\" = ok"}, []string{"TEST_FLAG=ok"})
 	if code != 0 {
 		t.Fatalf("expected passthrough exit 0, got %d", code)
