@@ -470,6 +470,11 @@
       "reason": "Admin-only write: moves a published definition or profile version to deprecated or disabled; a disabled version can no longer be bound or restored. Destructive and not recorded readOnly, so it stays off the shared portal."
     },
     {
+      "name": "mctl_stats_dashboard",
+      "enabled": true,
+      "reason": "Read-only aggregate of the caller's own tenants: services, quotas, incidents and, for admins, already-recorded model-usage totals. It changes no platform state and does not call a model."
+    },
+    {
       "name": "mctl_sync_repos",
       "enabled": true,
       "reason": "Re-syncs the repository inventory, rewriting what the platform believes it owns. Enabled on the shared portal by owner decision 2026-09-12 (mctlhq/.github#35): the portal switch is user-blind, so the mctl API's own authentication, team scope and role checks are the access control -- the portal only decides visibility."
