@@ -63,12 +63,14 @@
   button { cursor: pointer; transition: background 0.15s; }
   button:hover { background: var(--bg-hover); }
   button.primary { background: rgba(56,189,248,0.16); border-color: rgba(56,189,248,0.45); color: #7dd3fc; }
-  .tabs { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 20px; border-bottom: 1px solid var(--border); background: var(--bg-elev); }
-  .tab { padding: 6px 12px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: var(--text-muted); font-size: 12px; font-weight: 500; }
+  .tabs { display: flex; flex-wrap: nowrap; gap: 6px; padding: 10px 20px; border-bottom: 1px solid var(--border); background: var(--bg-elev); overflow-x: auto; scrollbar-width: thin; }
+  .tab { flex: 0 0 auto; white-space: nowrap; padding: 6px 12px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: var(--text-muted); font-size: 12px; font-weight: 500; }
   .tab:hover { color: var(--text); background: var(--bg-card); }
   .tab.active { color: #fff; background: var(--bg-card); border-color: var(--border-strong); box-shadow: inset 0 -2px 0 var(--accent); }
-  .main { max-width: 1440px; margin: 0 auto; padding: 18px 20px 40px; }
-  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 18px; }
+  .main { max-width: 1440px; margin: 0 auto; padding: 18px 20px 40px; min-width: 0; }
+  /* Six cards share one row when they fit. Below that, 3 and 2 both divide
+     six, so the last card is never left alone on its own row. */
+  .kpi-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
   .kpi { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
   .kpi-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
   .kpi-val { font-size: 24px; font-weight: 700; margin: 6px 0 4px; font-family: var(--mono); letter-spacing: -0.02em; }
@@ -81,11 +83,12 @@
   .card-note { font-size: 11px; color: var(--text-dim); }
   .banner { border: 1px solid rgba(245, 158, 11, 0.35); background: rgba(245, 158, 11, 0.08); border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 12px; color: #fde68a; }
   .banner.info { border-color: rgba(56,189,248,0.35); background: rgba(56,189,248,0.08); color: #bae6fd; }
-  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table { width: max-content; min-width: 100%; border-collapse: collapse; font-size: 12px; }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
   th { color: var(--text-muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; background: rgba(15,22,35,0.6); }
   tr:hover td { background: rgba(255,255,255,0.02); }
   .num { text-align: right; font-family: var(--mono); white-space: nowrap; }
+  .card, .tab-panel, .table-wrap, .grid-2, .grid-3 { min-width: 0; max-width: 100%; }
   .table-wrap { overflow-x: auto; }
   .bar-row { display: grid; grid-template-columns: 155px 1fr 105px; align-items: center; gap: 10px; margin-bottom: 8px; font-size: 12px; }
   .bar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
@@ -97,6 +100,20 @@
   .empty-box { padding: 14px; border: 1px dashed var(--border-strong); border-radius: 8px; color: var(--text-dim); font-size: 12px; text-align: center; }
   .hidden { display: none; }
   .bridge-log { font-family: var(--mono); font-size: 11px; background: #060910; border: 1px solid var(--border); border-radius: 8px; padding: 10px; max-height: 170px; overflow-y: auto; color: #94a3b8; }
+  .day-labels { display: flex; justify-content: space-between; gap: 8px; margin-top: 6px; font-size: 12px; line-height: 1.3; color: var(--text-muted); font-family: var(--mono); }
+  .day-labels span { white-space: nowrap; }
+  [data-theme="light"] {
+    --bg: #f8fafc; --bg-elev: #f1f5f9; --bg-card: #ffffff; --bg-hover: #e2e8f0;
+    --border: #e2e8f0; --border-strong: #cbd5e1; --text: #0f172a; --text-muted: #475569; --text-dim: #64748b;
+    color-scheme: light;
+  }
+  [data-theme="light"] body, [data-theme="light"] .header { background: var(--bg); color: var(--text); }
+  [data-theme="light"] .tab.active { color: #0f172a; }
+  [data-theme="light"] .bridge-log { background: #f8fafc; color: #475569; }
+  [data-display-mode="fullscreen"] .main { max-width: none; }
+  body { padding: var(--safe-top, 0px) var(--safe-right, 0px) var(--safe-bottom, 0px) var(--safe-left, 0px); }
+  @media (max-width: 1180px) { .kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  @media (max-width: 720px) { .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   @media (max-width: 640px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } .bar-row { grid-template-columns: 110px 1fr 80px; } }
 </style>
 <script>
@@ -108,14 +125,14 @@ window.addEventListener("message", function (ev) {
 </script>
 </head>
 <body>
-<script id="mctl-snapshot" type="application/json">{"meta":{"uri":"ui://mctl-stats/view.html","mimeType":"text/html;profile=mcp-app","apiBase":"","user":"","admin":false,"teams":[],"namespaces":[],"dataAsOf":"встроенный пустой снимок","dataAsOfIso":"","live":false},"tenants":[],"services":[],"incidents":{"available":false,"active":[],"resolvedSummary":{"count":0,"by_severity":{},"by_type":{},"by_source":{},"by_tenant":{},"by_resolver":{},"daily":[],"recent":[]}},"usage":{"available":false,"totals":{"invocations":0,"success":0,"error":0,"interrupted":0,"calculated_cost":0,"provider_reported_cost":null,"invoice_reconciled_cost":null,"input_tokens":0,"output_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"web_search_requests":0},"byAgent":[],"byModel":[],"byStage":[],"byProvider":[],"byRepo":[]},"agents":{"available":false,"registry":[],"profiles":[],"releases":[],"executions":{"count":0,"by_agent":{},"by_repo":{},"by_phase":{},"oldest_cet":"","newest_cet":""},"ownership":{"count":0,"truncated":false,"as_of_cet":"","by_status":{"terminal":0,"released":0,"stuck":0},"stuck":[]},"skillsCount":0,"recentRuns":{"total":0,"succeeded":0,"failed":0}},"epics":[],"readyItems":[],"platform":{"operations":{"count":0,"by_risk":{},"by_scope":{}},"commerce":{"available":false},"domains":[],"syncWindows":{"available":false,"apps":null,"platform":null,"default":null},"signups":[],"events":{},"dataGaps":["Нет связи с MCP Apps host: показан пустой встроенный снимок. Кнопка «Обновить» запрашивает живые данные через клиент."]}}</script>
+<script id="mctl-snapshot" type="application/json">{"meta":{"uri":"ui://mctl-stats/view-2.html","mimeType":"text/html;profile=mcp-app","apiBase":"","user":"","admin":false,"teams":[],"namespaces":[],"dataAsOf":"встроенный пустой снимок","dataAsOfIso":"","live":false},"tenants":[],"services":[],"incidents":{"available":false,"active":[],"resolvedSummary":{"count":0,"by_severity":{},"by_type":{},"by_source":{},"by_tenant":{},"by_resolver":{},"daily":[],"recent":[]}},"usage":{"available":false,"totals":{"invocations":0,"success":0,"error":0,"interrupted":0,"calculated_cost":0,"provider_reported_cost":null,"invoice_reconciled_cost":null,"input_tokens":0,"output_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"web_search_requests":0},"byAgent":[],"byModel":[],"byStage":[],"byProvider":[],"byRepo":[]},"agents":{"available":false,"registry":[],"profiles":[],"releases":[],"executions":{"count":0,"by_agent":{},"by_repo":{},"by_phase":{},"oldest_cet":"","newest_cet":""},"ownership":{"count":0,"truncated":false,"as_of_cet":"","by_status":{"terminal":0,"released":0,"stuck":0},"stuck":[]},"skillsCount":0,"recentRuns":{"total":0,"succeeded":0,"failed":0}},"epics":[],"readyItems":[],"platform":{"operations":{"count":0,"by_risk":{},"by_scope":{}},"commerce":{"available":false},"domains":[],"syncWindows":{"available":false,"apps":null,"platform":null,"default":null},"signups":[],"events":{},"dataGaps":["Нет связи с MCP Apps host: показан пустой встроенный снимок. Кнопка «Обновить» запрашивает живые данные через клиент."]}}</script>
 <header class="header">
   <div class="brand">
     <div class="logo">MC</div>
     <div class="title-block">
       <h1>Консоль статистики платформы MCTL</h1>
       <div class="sub">
-        <span class="mono">ui://mctl-stats/view.html</span><span>·</span>
+        <span class="mono">ui://mctl-stats/view-2.html</span><span>·</span>
         <span id="hdr-user" class="mono"></span><span>·</span>
         <span id="hdr-asof"></span>
       </div>
@@ -209,6 +226,12 @@ window.addEventListener("message", function (ev) {
   let DATA = JSON.parse(document.getElementById("mctl-snapshot").textContent);
   let selectedTeam = "all";
   const fmtInt = (n) => Number(n || 0).toLocaleString("ru-RU");
+  // Quota memory is stored in MiB. Cards and tables share this formatter so
+  // a value is never "Mi" in one place and "GiB" in another.
+  const fmtGiB = (mib) => {
+    const g = num(mib) / 1024;
+    return (Math.abs(g) >= 10 ? g.toFixed(1) : g.toFixed(2)) + " GiB";
+  };
   const fmtUsd = (n) => "$" + Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const fmtTokens = (n) => {
     n = Number(n || 0);
@@ -335,7 +358,7 @@ window.addEventListener("message", function (ev) {
     const roadSub = epics.length ? (epics.length + " эпиков · " + fmtInt(ready) + " готово") : "нет в API";
     const cards = [
       { label: "Сервисы в каталоге", val: fmtInt(svcs.length), sub: synced + " Synced · " + dbCount + " с БД" },
-      { label: "Поды / CPU limits", val: fmtInt(podsU) + " / " + fmtInt(podsA), sub: "CPU " + cpuU.toFixed(2) + "/" + cpuA.toFixed(1) + " · RAM " + (memU / 1024).toFixed(2) + "/" + (memA / 1024).toFixed(1) + " GiB" },
+      { label: "Поды / CPU limits", val: fmtInt(podsU) + " / " + fmtInt(podsA), sub: "CPU " + cpuU.toFixed(2) + "/" + cpuA.toFixed(1) + " · RAM " + fmtGiB(memU) + " / " + fmtGiB(memA) },
       { label: "Активные инциденты", val: incVal, sub: incSub },
       { label: "Модели (оценка)", val: costVal, sub: costSub },
       { label: "Агенты / зависшие", val: agVal, sub: agSub },
@@ -394,28 +417,29 @@ window.addEventListener("message", function (ev) {
   function renderDaily(daily) {
     if (!daily.length) return `<div class="empty-box">В выборке нет закрытых инцидентов.</div>`;
     const maxD = Math.max(1, ...daily.map((d) => num(d[1])));
-    const w = 520, h = 155, padL = 28, padB = 24, padT = 10, padR = 10;
+    const w = 640, h = 168, padL = 36, padB = 8, padT = 12, padR = 8;
     const bw = (w - padL - padR) / daily.length;
-    let svg = `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto;display:block">`;
+    const labelEvery = Math.max(1, Math.ceil(daily.length / 6));
+    let svg = `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto;display:block" role="img" aria-label="Закрытые инциденты по дням">`;
     [0, Math.ceil(maxD / 2), maxD].forEach((tick) => {
       const y = h - padB - (tick / maxD) * (h - padB - padT);
       svg += `<line x1="${padL}" y1="${y}" x2="${w - padR}" y2="${y}" stroke="#1e293b" stroke-dasharray="2,2"/>`;
-      svg += `<text x="${padL - 5}" y="${y + 4}" text-anchor="end" fill="#64748b" font-size="10" font-family="monospace">${tick}</text>`;
+      svg += `<text x="${padL - 6}" y="${y + 4}" text-anchor="end" fill="#64748b" font-size="12" font-family="monospace">${tick}</text>`;
     });
+    const labels = [];
     daily.forEach((pair, idx) => {
       const day = String(pair[0] || "");
       const cnt = num(pair[1]);
       const bh = (cnt / maxD) * (h - padB - padT);
-      const x = padL + idx * bw + 3;
+      const x = padL + idx * bw + 2;
       const y = h - padB - bh;
       const col = cnt >= 10 ? "#f43f5e" : "#38bdf8";
-      svg += `<rect x="${x}" y="${y}" width="${Math.max(6, bw - 6)}" height="${Math.max(bh, 0)}" rx="3" fill="${col}"><title>${esc(day)}: ${cnt}</title></rect>`;
-      if (idx === 0 || idx === daily.length - 1 || idx % 4 === 0) {
-        svg += `<text x="${x + (bw - 6) / 2}" y="${h - 7}" text-anchor="middle" fill="#64748b" font-size="9" font-family="monospace">${esc(day.slice(5))}</text>`;
-      }
+      svg += `<rect x="${x}" y="${y}" width="${Math.max(4, bw - 4)}" height="${Math.max(bh, 0)}" rx="3" fill="${col}"><title>${esc(day)}: ${cnt}</title></rect>`;
+      const nearEnd = daily.length - 1 - idx < labelEvery;
+      if (idx === 0 || idx === daily.length - 1 || (idx % labelEvery === 0 && !nearEnd)) labels.push(day.slice(5));
     });
     svg += `</svg>`;
-    return svg;
+    return svg + `<div class="day-labels">${labels.map((d) => `<span>${esc(d)}</span>`).join("")}</div>`;
   }
 
   function renderQuotasTable(targetId) {
@@ -433,7 +457,7 @@ window.addEventListener("message", function (ev) {
       return `<tr>
         <td><strong>${esc(t.name)}</strong><div style="font-size:11px;color:var(--text-dim)">${esc(t.roles || "")}</div></td>
         <td><span class="mono">${num(q.cpu_lim_u)} / ${num(q.cpu_lim_a)}</span> <span style="color:var(--text-dim)">(${cpu}%)</span><div class="qbar"><span style="width:${Math.min(cpu, 100)}%;background:${qColor(cpu)}"></span></div></td>
-        <td><span class="mono">${num(q.mem_lim_u)} / ${num(q.mem_lim_a)} Mi</span> <span style="color:var(--text-dim)">(${mem}%)</span><div class="qbar"><span style="width:${Math.min(mem, 100)}%;background:${qColor(mem)}"></span></div></td>
+        <td><span class="mono">${fmtGiB(q.mem_lim_u)} / ${fmtGiB(q.mem_lim_a)}</span> <span style="color:var(--text-dim)">(${mem}%)</span><div class="qbar"><span style="width:${Math.min(mem, 100)}%;background:${qColor(mem)}"></span></div></td>
         <td><span class="mono">${num(q.pods_u)} / ${num(q.pods_a)}</span> <span style="color:var(--text-dim)">(${pod}%)</span><div class="qbar"><span style="width:${Math.min(pod, 100)}%;background:${qColor(pod)}"></span></div></td>
         <td class="num">${num(q.svc_u)} / ${num(q.svc_a)}</td>
         <td>${eg.internet ? '<span class="pill warn">Internet</span>' : '<span class="pill ok">Restricted</span>'}</td>
@@ -587,55 +611,279 @@ window.addEventListener("message", function (ev) {
     logEl.prepend(line);
   }
 
-  function extractStructured(msg) {
-    if (!msg || typeof msg !== "object") return null;
-    const params = obj(msg.params);
-    const result = obj(msg.result);
-    const nested = obj(params.result);
-    const fromResult = obj(result.result);
-    return params.structuredContent || nested.structuredContent || result.structuredContent || fromResult.structuredContent || null;
+  // MCP Apps handshake (SEP-1865, stable protocol 2026-01-26). The view is the
+  // client: it sends ui/initialize, applies the host result, then sends
+  // ui/notifications/initialized. That notification is the ready signal hosts
+  // wait on. 2025-11-21 is only a fallback if a host rejects the stable version.
+  // Tool data is independent of the handshake: the embedded snapshot renders
+  // first, and a tool-result may arrive before or after initialized.
+  const APPS_PROTOCOL_VERSIONS = ["2026-01-26", "2025-11-21"];
+  const APP_INFO = { name: "mctl-stats-app", version: "1.1.0" };
+  let rpcId = 1;
+  let initializeAttempts = 0;
+  let initialized = false;
+  let hostContext = {};
+  let hostCapabilities = {};
+  let hostInfo = {};
+  let negotiatedVersion = "";
+  let lastToolInput = {};
+  const pending = {};
+  window.__mctlApps = {
+    protocolVersions: APPS_PROTOCOL_VERSIONS.slice(),
+    protocolVersion: "",
+    initialized: false,
+    hostContext: hostContext,
+    hostCapabilities: hostCapabilities,
+    hostInfo: hostInfo
+  };
+
+  function postToHost(payload, quiet) {
+    if (window.parent && window.parent !== window) {
+      window.parent.postMessage(payload, "*");
+      if (!quiet) logBridge("→ " + (payload.method || ("ответ #" + payload.id)));
+    } else if (!quiet) {
+      logBridge("автономный режим: нет окна MCP Apps host");
+    }
+  }
+  function looksLikeDashboard(v) {
+    return !!v && typeof v === "object" && !Array.isArray(v) && ("meta" in v || "tenants" in v || "services" in v);
+  }
+  function structuredFrom(result) {
+    const r = obj(result);
+    if (typeof r.structuredContent === "string" || looksLikeDashboard(r.structuredContent)) return r.structuredContent;
+    const nested = obj(r.result);
+    if (typeof nested.structuredContent === "string" || looksLikeDashboard(nested.structuredContent)) return nested.structuredContent;
+    return null;
   }
   function applySnapshot(next) {
     if (typeof next === "string") {
       try { next = JSON.parse(next); } catch (e) { logBridge("structuredContent не разобран"); return; }
     }
-    if (!next || typeof next !== "object" || Array.isArray(next)) return;
+    if (!looksLikeDashboard(next)) return;
     DATA = next;
     rebuildTeams();
     renderAll();
     logBridge("Срез обновлён из tool result");
   }
-  function onMessage(ev) {
-    const msg = ev && ev.data;
-    if (!msg || typeof msg !== "object" || msg.jsonrpc !== "2.0") return;
-    if (msg.method === "ui/initialize" && Object.prototype.hasOwnProperty.call(msg, "id")) {
-      postToHost({
-        jsonrpc: "2.0",
-        id: msg.id,
-        result: {
-          protocolVersion: "2025-06-18",
-          appInfo: { name: "mctl-stats-app", version: "1.0.0" },
-          appCapabilities: {}
-        }
+  function applyDocumentTheme(theme) {
+    if (theme !== "light" && theme !== "dark") return;
+    document.documentElement.setAttribute("data-theme", theme);
+    document.documentElement.style.colorScheme = theme;
+  }
+  function applyHostStyleVariables(variables) {
+    const root = document.documentElement;
+    Object.keys(obj(variables)).forEach((key) => {
+      if (key.indexOf("--") !== 0) return;
+      const value = variables[key];
+      if (value === undefined || value === null) return;
+      root.style.setProperty(key, String(value));
+    });
+  }
+  function applyHostFonts(fontCss) {
+    if (!fontCss || document.getElementById("mcp-host-fonts")) return;
+    const style = document.createElement("style");
+    style.id = "mcp-host-fonts";
+    style.textContent = String(fontCss);
+    document.head.appendChild(style);
+  }
+  function applyContainerDimensions(dim) {
+    dim = obj(dim);
+    const root = document.documentElement;
+    if (Object.prototype.hasOwnProperty.call(dim, "height")) {
+      root.style.height = "100vh";
+      root.style.maxHeight = "";
+    } else if (dim.maxHeight) {
+      root.style.maxHeight = Number(dim.maxHeight) + "px";
+      root.style.height = "";
+    }
+    if (Object.prototype.hasOwnProperty.call(dim, "width")) {
+      root.style.width = "100vw";
+      root.style.maxWidth = "";
+    } else if (dim.maxWidth) {
+      root.style.maxWidth = Number(dim.maxWidth) + "px";
+      root.style.width = "";
+    }
+  }
+  function applySafeArea(insets) {
+    insets = obj(insets);
+    const root = document.documentElement;
+    ["top", "right", "bottom", "left"].forEach((side) => {
+      if (insets[side] == null || insets[side] === "") return;
+      root.style.setProperty("--safe-" + side, Number(insets[side]) + "px");
+    });
+  }
+  function applyContextFields(ctx) {
+    ctx = obj(ctx);
+    if (ctx.theme) applyDocumentTheme(ctx.theme);
+    const styles = obj(ctx.styles);
+    if (styles.variables) applyHostStyleVariables(styles.variables);
+    if (obj(styles.css).fonts) applyHostFonts(obj(styles.css).fonts);
+    if (ctx.containerDimensions) applyContainerDimensions(ctx.containerDimensions);
+    if (ctx.safeAreaInsets) applySafeArea(ctx.safeAreaInsets);
+    if (ctx.displayMode) document.documentElement.dataset.displayMode = String(ctx.displayMode);
+    if (ctx.locale) document.documentElement.dataset.locale = String(ctx.locale);
+    if (ctx.platform) document.documentElement.dataset.platform = String(ctx.platform);
+  }
+  function mergeHostContext(partial) {
+    partial = obj(partial);
+    const next = Object.assign({}, hostContext, partial);
+    if (partial.styles) {
+      const prevStyles = obj(hostContext.styles);
+      next.styles = Object.assign({}, prevStyles, obj(partial.styles));
+      if (partial.styles.variables) next.styles.variables = Object.assign({}, obj(prevStyles.variables), obj(partial.styles.variables));
+      if (partial.styles.css) next.styles.css = Object.assign({}, obj(prevStyles.css), obj(partial.styles.css));
+    }
+    if (partial.containerDimensions) next.containerDimensions = Object.assign({}, obj(hostContext.containerDimensions), obj(partial.containerDimensions));
+    if (partial.safeAreaInsets) next.safeAreaInsets = Object.assign({}, obj(hostContext.safeAreaInsets), obj(partial.safeAreaInsets));
+    hostContext = next;
+    window.__mctlApps.hostContext = hostContext;
+    applyContextFields(hostContext);
+  }
+  let sizeWatching = false;
+  function setupSizeChanged() {
+    if (sizeWatching) return;
+    sizeWatching = true;
+    let scheduled = false;
+    let lastWidth = 0;
+    let lastHeight = 0;
+    const publish = () => {
+      if (scheduled) return;
+      scheduled = true;
+      requestAnimationFrame(() => {
+        scheduled = false;
+        const html = document.documentElement;
+        const originalHeight = html.style.height;
+        html.style.height = "max-content";
+        const height = Math.ceil(html.getBoundingClientRect().height);
+        html.style.height = originalHeight;
+        const width = Math.ceil(window.innerWidth);
+        if (!width && !height) return;
+        if (width === lastWidth && height === lastHeight) return;
+        lastWidth = width;
+        lastHeight = height;
+        postToHost({ jsonrpc: "2.0", method: "ui/notifications/size-changed", params: { width: width, height: height } }, true);
       });
-      logBridge("ответ на ui/initialize");
+    };
+    publish();
+    if (typeof ResizeObserver === "function") {
+      const observer = new ResizeObserver(publish);
+      observer.observe(document.documentElement);
+      observer.observe(document.body);
+    }
+  }
+  function sendInitialize(version) {
+    initializeAttempts += 1;
+    const id = rpcId++;
+    pending[String(id)] = { method: "ui/initialize", version: version };
+    postToHost({
+      jsonrpc: "2.0",
+      id: id,
+      method: "ui/initialize",
+      params: { appInfo: APP_INFO, appCapabilities: {}, protocolVersion: version }
+    });
+  }
+  function onInitializeResult(result) {
+    if (initialized) return;
+    result = obj(result);
+    negotiatedVersion = String(result.protocolVersion || "");
+    hostInfo = obj(result.hostInfo);
+    hostCapabilities = obj(result.hostCapabilities);
+    hostContext = obj(result.hostContext);
+    applyContextFields(hostContext);
+    initialized = true;
+    window.__mctlApps.protocolVersion = negotiatedVersion;
+    window.__mctlApps.initialized = true;
+    window.__mctlApps.hostContext = hostContext;
+    window.__mctlApps.hostCapabilities = hostCapabilities;
+    window.__mctlApps.hostInfo = hostInfo;
+    postToHost({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
+    setupSizeChanged();
+    logBridge("initialized · " + (negotiatedVersion || "без версии") + (hostInfo.name ? " · " + hostInfo.name : ""));
+  }
+  function onInitializeError(error, attempted) {
+    const message = String((error && error.message) || "");
+    const data = obj(error && error.data);
+    const offered = arr(data.supported).concat(arr(data.supportedProtocolVersions));
+    let next = "";
+    if (initializeAttempts < 2) {
+      offered.some((version) => {
+        if (APPS_PROTOCOL_VERSIONS.indexOf(version) >= 0 && version !== attempted) { next = version; return true; }
+        return false;
+      });
+      if (!next && /protocol version/i.test(message)) {
+        const idx = APPS_PROTOCOL_VERSIONS.indexOf(attempted);
+        if (idx >= 0 && idx + 1 < APPS_PROTOCOL_VERSIONS.length) next = APPS_PROTOCOL_VERSIONS[idx + 1];
+      }
+    }
+    if (next) {
+      logBridge("повтор ui/initialize · " + next);
+      sendInitialize(next);
       return;
     }
-    const payload = extractStructured(msg);
-    if (payload && (msg.method === "ui/notifications/tool-result" || msg.result)) {
-      applySnapshot(payload);
+    logBridge("ui/initialize отклонён: " + (message || "ошибка"));
+  }
+  function callTool(name, args) {
+    const id = rpcId++;
+    pending[String(id)] = { method: "tools/call", name: name };
+    postToHost({ jsonrpc: "2.0", id: id, method: "tools/call", params: { name: name, arguments: args || {} } });
+  }
+  function onMessage(ev) {
+    if (!ev || (window.parent !== window && ev.source !== window.parent)) return;
+    const msg = ev.data;
+    if (!msg || typeof msg !== "object" || msg.jsonrpc !== "2.0") return;
+    const hasId = Object.prototype.hasOwnProperty.call(msg, "id");
+    if (hasId && (Object.prototype.hasOwnProperty.call(msg, "result") || Object.prototype.hasOwnProperty.call(msg, "error"))) {
+      const call = pending[String(msg.id)];
+      if (call) {
+        delete pending[String(msg.id)];
+        if (msg.error) {
+          if (call.method === "ui/initialize") onInitializeError(msg.error, call.version);
+          else logBridge(call.method + " ошибка");
+          return;
+        }
+        if (call.method === "ui/initialize") { onInitializeResult(msg.result); return; }
+        if (call.method === "tools/call") {
+          const payload = structuredFrom(msg.result);
+          if (payload) applySnapshot(payload);
+          else logBridge("tools/call без structuredContent");
+          return;
+        }
+      }
+    }
+    if (msg.method && hasId) {
+      if (msg.method === "ping" || msg.method === "ui/resource-teardown") {
+        postToHost({ jsonrpc: "2.0", id: msg.id, result: {} });
+        return;
+      }
+      // ui/initialize is sent by the view, never answered by it.
+      if (msg.method !== "ui/initialize") logBridge("← " + msg.method);
+      return;
+    }
+    if (msg.method === "ui/notifications/tool-input" || msg.method === "ui/notifications/tool-input-partial") {
+      lastToolInput = obj(obj(msg.params).arguments);
+      window.__mctlApps.lastToolInput = lastToolInput;
+      if (msg.method === "ui/notifications/tool-input") logBridge("tool-input");
+      return;
+    }
+    if (msg.method === "ui/notifications/tool-result") {
+      const params = obj(msg.params);
+      if (params.isError) { logBridge("tool-result ошибка"); return; }
+      const payload = structuredFrom(params);
+      if (payload) applySnapshot(payload);
+      else logBridge("tool-result без structuredContent");
+      return;
+    }
+    if (msg.method === "ui/notifications/tool-cancelled") {
+      const reason = obj(msg.params).reason;
+      logBridge("tool-cancelled" + (reason ? ": " + reason : ""));
+      return;
+    }
+    if (msg.method === "ui/notifications/host-context-changed") {
+      mergeHostContext(msg.params);
+      logBridge("host-context");
       return;
     }
     if (msg.method) logBridge("← " + msg.method);
-  }
-  let rpcId = 1;
-  function postToHost(payload) {
-    if (window.parent && window.parent !== window) {
-      window.parent.postMessage(payload, "*");
-      logBridge("→ " + (payload.method || ("ответ #" + payload.id)));
-    } else {
-      logBridge("автономный режим: нет окна MCP Apps host");
-    }
   }
   window.__mctlOnMessage = onMessage;
   (window.__mctlQueue || []).splice(0).forEach(onMessage);
@@ -645,17 +893,12 @@ window.addEventListener("message", function (ev) {
     if (selectedTeam && selectedTeam !== "all") args.team = selectedTeam;
     // Keep a namespace filter the host opened with, unless the operator picked a different team.
     if (meta.filterNamespace && (!args.team || args.team === meta.filterTeam)) args.namespace = meta.filterNamespace;
-    postToHost({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name: "mctl_stats_dashboard", arguments: args } });
-  });
-  postToHost({
-    jsonrpc: "2.0",
-    id: rpcId++,
-    method: "ui/initialize",
-    params: { appInfo: { name: "mctl-stats-app", version: "1.0.0" }, appCapabilities: {}, protocolVersion: "2025-06-18" }
+    callTool("mctl_stats_dashboard", args);
   });
   rebuildTeams();
   renderAll();
   logBridge(obj(DATA.meta).live ? "Загружен live-снимок" : "Загружен встроенный снимок");
+  if (window.parent && window.parent !== window) sendInitialize(APPS_PROTOCOL_VERSIONS[0]);
 })();
 </script>
 </body>
