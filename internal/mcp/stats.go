@@ -29,6 +29,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -1545,6 +1546,7 @@ func parseMemoryMiB(raw string) float64 {
 		{"Mi", 1},
 		{"Gi", 1024},
 		{"Ti", 1024 * 1024},
+		{"k", 1000.0 / 1024 / 1024},
 		{"K", 1000.0 / 1024 / 1024},
 		{"M", 1000 * 1000 / 1024 / 1024},
 		{"G", 1000 * 1000 * 1000 / 1024 / 1024},
@@ -2004,10 +2006,17 @@ func clipAPIBody(body []byte) string {
 	if s == "" {
 		return "empty body"
 	}
-	if len(s) > 160 {
-		s = s[:160]
+	const maxClip = 160
+	if len(s) <= maxClip {
+		return s
 	}
-	return s
+	// Cut on a rune boundary so a multi-byte character at the edge is dropped
+	// whole instead of leaving an invalid UTF-8 tail in the gap text.
+	cut := maxClip
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 func statsLocation() *time.Location {

@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
@@ -43,12 +44,34 @@ func TestParseStatsQuantities(t *testing.T) {
 	if got := parseMemoryMiB("128Ki"); math.Abs(got-0.125) > 0.0001 {
 		t.Fatalf("128Ki = %v", got)
 	}
+	kilo := 100 * 1000.0 / 1024 / 1024
+	if got := parseMemoryMiB("100k"); math.Abs(got-kilo) > 0.0001 {
+		t.Fatalf("100k = %v, want %v", got, kilo)
+	}
+	if got := parseMemoryMiB("100K"); math.Abs(got-kilo) > 0.0001 {
+		t.Fatalf("100K = %v, want %v", got, kilo)
+	}
 	q := quotaFromMaps(
 		map[string]string{"limits.cpu": "500m", "limits.memory": "512Mi", "pods": "3"},
 		map[string]string{"limits.cpu": "2", "limits.memory": "1Gi", "pods": "10", "services": "5"},
 	)
 	if math.Abs(q.CPULimU-0.5) > 0.0001 || q.CPULimA != 2 || q.MemLimU != 512 || q.MemLimA != 1024 || q.PodsU != 3 || q.PodsA != 10 || q.SvcA != 5 {
 		t.Fatalf("quota = %+v", q)
+	}
+}
+
+func TestClipAPIBodyKeepsUTF8(t *testing.T) {
+	if got := clipAPIBody([]byte("ошибка")); got != "ошибка" {
+		t.Fatalf("short body = %q", got)
+	}
+	// 159 ASCII bytes plus a two-byte rune. A byte cut at 160 would split it.
+	body := []byte(strings.Repeat("a", 159) + "я")
+	got := clipAPIBody(body)
+	if !utf8.ValidString(got) {
+		t.Fatalf("clipped body is not valid UTF-8: %q", got)
+	}
+	if got != strings.Repeat("a", 159) {
+		t.Fatalf("clipped = %q (len %d)", got, len(got))
 	}
 }
 
@@ -306,13 +329,13 @@ func TestStatsDashboard_NonAdminIsScopedAndSkipsAdminReads(t *testing.T) {
 	}
 	for _, path := range fake.snapshot() {
 		switch {
-		case path == "/api/v1/tenants":
+		case path == "GET /api/v1/tenants":
 			t.Error("non-admin listed every tenant")
-		case strings.HasPrefix(path, "/api/v1/usage"):
+		case strings.HasPrefix(path, "GET /api/v1/usage"):
 			t.Error("non-admin read the usage ledger")
-		case path == "/api/v1/agents" || strings.HasPrefix(path, "/api/v1/agents/"):
+		case path == "GET /api/v1/agents" || strings.HasPrefix(path, "GET /api/v1/agents/"):
 			t.Error("non-admin read the agent registry: " + path)
-		case path == "/api/v1/agent-runs" || strings.HasPrefix(path, "/api/v1/lifecycle"):
+		case path == "GET /api/v1/agent-runs" || strings.HasPrefix(path, "GET /api/v1/lifecycle"):
 			t.Error("non-admin read admin lifecycle data: " + path)
 		case strings.Contains(path, "karabu"):
 			t.Error("non-admin fetched karabu: " + path)
@@ -324,6 +347,68 @@ func TestStatsDashboard_NonAdminIsScopedAndSkipsAdminReads(t *testing.T) {
 	if !denied.IsError || !strings.Contains(toolResultText(t, denied), "access denied") {
 		t.Fatalf("denied = error:%v text:%s", denied.IsError, toolResultText(t, denied))
 	}
+}
+
+func TestStatsDashboard_NonAdminMultipleTeamsFiltersUnscopedLists(t *testing.T) {
+	fake := newStatsFake(t, statsFakeOpts{admin: false, groups: []string{"labs", "karabu"}})
+	srv := fake.server(t)
+	defer srv.Close()
+
+	d := decodeDash(t, callStats(t, srv.URL, nil))
+	if len(d.Tenants) != 2 {
+		t.Fatalf("tenants = %v", namesOf(d))
+	}
+	if len(d.Services) != 2 {
+		t.Fatalf("services = %+v", d.Services)
+	}
+	for _, sv := range d.Services {
+		if sv.Team != "labs" && sv.Team != "karabu" {
+			t.Fatalf("service outside the caller's teams: %+v", sv)
+		}
+	}
+	if len(d.Incidents.Active) != 2 {
+		t.Fatalf("active = %+v", d.Incidents.Active)
+	}
+	for _, inc := range d.Incidents.Active {
+		if inc.Tenant != "labs" && inc.Tenant != "karabu" {
+			t.Fatalf("incident outside the caller's teams: %+v", inc)
+		}
+	}
+	if d.Incidents.ResolvedSummary.Count != 3 || d.Incidents.ResolvedSummary.ByTenant["admins"] != 0 {
+		t.Fatalf("resolved = %+v", d.Incidents.ResolvedSummary)
+	}
+	if d.Usage.Available || d.Agents.Available {
+		t.Fatal("non-admin received admin-only sections")
+	}
+	raw, _ := json.Marshal(d)
+	if strings.Contains(string(raw), "secret-svc") {
+		t.Fatalf("foreign service leaked: %s", raw)
+	}
+
+	var sawServices, sawIncidents bool
+	for _, path := range fake.snapshot() {
+		switch {
+		case path == "GET /api/v1/tenants":
+			t.Error("non-admin listed every tenant")
+		case path == "GET /api/v1/services":
+			sawServices = true
+		case strings.HasPrefix(path, "GET /api/v1/services?"):
+			t.Errorf("multi-team caller used a single-team service query: %s", path)
+		case strings.HasPrefix(path, "GET /api/v1/incidents?"):
+			sawIncidents = true
+			if strings.Contains(path, "tenant=") {
+				t.Errorf("multi-team caller filtered incidents on the server: %s", path)
+			}
+		case strings.HasPrefix(path, "GET /api/v1/usage"), strings.HasPrefix(path, "GET /api/v1/agents"), strings.HasPrefix(path, "GET /api/v1/lifecycle"), path == "GET /api/v1/agent-runs":
+			t.Errorf("non-admin read an admin-only path: %s", path)
+		case strings.Contains(path, "/other/") || strings.Contains(path, "secret-svc"):
+			t.Errorf("fetched a team outside the caller's groups: %s", path)
+		}
+	}
+	if !sawServices || !sawIncidents {
+		t.Fatalf("expected unfiltered service and incident lists, hits=%v", fake.snapshot())
+	}
+	fake.assertGETOnly(t)
 }
 
 func TestStatsDashboard_FilterErrors(t *testing.T) {
@@ -362,6 +447,8 @@ func TestStatsDashboard_QuotaFailureStillReturnsServices(t *testing.T) {
 type statsFakeOpts struct {
 	admin         bool
 	failLabsQuota bool
+	// groups overrides the non-admin whoami teams. Empty means {"labs"}.
+	groups []string
 }
 
 type statsFake struct {
@@ -399,7 +486,11 @@ func (f *statsFake) serve(w http.ResponseWriter, r *http.Request) {
 			writeResp(w, map[string]any{"id": "mashkovd", "groups": []string{"admins", "labs"}, "isAdmin": true, "namespaces": []string{"admins", "labs"}})
 			return
 		}
-		writeResp(w, map[string]any{"id": "dev", "groups": []string{"labs"}, "isAdmin": false, "namespaces": []string{"labs"}})
+		groups := f.opts.groups
+		if len(groups) == 0 {
+			groups = []string{"labs"}
+		}
+		writeResp(w, map[string]any{"id": "dev", "groups": groups, "isAdmin": false, "namespaces": groups})
 	case r.URL.Path == "/api/v1/tenants":
 		writeResp(w, map[string]any{"items": []any{labsTenant(), karabuTenant()}, "count": 2})
 	case strings.HasPrefix(r.URL.Path, "/api/v1/tenants/"):
