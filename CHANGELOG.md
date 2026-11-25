@@ -1,5 +1,15 @@
 # Changelog
 
+## [4.178.2](https://github.com/mctlhq/mctl-api/compare/4.178.1...4.178.2) (2026-11-25)
+
+
+### Bug Fixes
+
+* **api:** ignore rate-limit window end in OAuth shadow comparisons ([e345a13](https://github.com/mctlhq/mctl-api/commit/e345a13653815a40dc6b5411f2a691820334033b))
+* **ci:** probe postgres TCP readiness over 127.0.0.1:5432 ([4d4c08c](https://github.com/mctlhq/mctl-api/commit/4d4c08c48624ed0d7a2c8bf5a65734d299bd1bc2))
+* **mcp:** count closed incidents by resolver and resolution day ([6580206](https://github.com/mctlhq/mctl-api/commit/65802061be46f72ab787dd0fd759479eacfa5fc8))
+* **mcp:** count closed incidents by resolver and resolution day ([754b897](https://github.com/mctlhq/mctl-api/commit/754b8972aa47715ec9caf4de19681bdcb75ff8af))
+
 ## [4.178.1](https://github.com/mctlhq/mctl-api/compare/4.178.0...4.178.1) (2026-11-25)
 
 
