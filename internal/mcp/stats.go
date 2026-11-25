@@ -36,10 +36,12 @@ import (
 )
 
 // statsAppURI is the MCP App resource the statistics console is served from.
-// The HTML is embedded and makes no network requests of its own; live numbers
-// arrive as the structuredContent of mctl_stats_dashboard.
+// Hosts cache UI HTML by this URI (ChatGPT treats it as a cache key), so a
+// change to the handshake or the document publishes a new URI. The HTML is
+// embedded and makes no network requests of its own; live numbers arrive as
+// the structuredContent of mctl_stats_dashboard.
 const (
-	statsAppURI         = "ui://mctl-stats/view.html"
+	statsAppURI         = "ui://mctl-stats/view-2.html"
 	statsAppMIME        = "text/html;profile=mcp-app"
 	statsCollectBudget  = 20 * time.Second
 	statsStatusCap      = 40
@@ -93,9 +95,15 @@ func statsAppMeta() *mcplib.Meta {
 func statsAppMetaMap() map[string]any {
 	return map[string]any{
 		"ui": map[string]any{
+			// Explicit border: hosts otherwise pick their own default.
+			"prefersBorder": true,
+			// Empty domain lists are the secure default (connect-src 'none',
+			// no external scripts, images, or frames). The view only speaks
+			// postMessage with its parent.
 			"csp": map[string]any{
 				"connectDomains":  []string{},
 				"resourceDomains": []string{},
+				"frameDomains":    []string{},
 			},
 		},
 	}
@@ -112,7 +120,7 @@ Read-only aggregate for the caller's own teams: tenants, services with ArgoCD sy
 
 Non-admins only receive their own teams. Pass team or namespace to narrow further; omit both (or pass "all") for every team the caller may see.
 
-The interactive console is the MCP App at ui://mctl-stats/view.html. structuredContent matches that view; the text is a short summary for clients without a UI.`),
+The interactive console is the MCP App at ui://mctl-stats/view-2.html. structuredContent matches that view; the text is a short summary for clients without a UI.`),
 		mcplib.WithString("team",
 			mcplib.Description("Optional team (tenant) filter. Omit or pass \"all\" for every team the caller may see."),
 		),
@@ -121,7 +129,10 @@ The interactive console is the MCP App at ui://mctl-stats/view.html. structuredC
 		),
 	)
 	tool.Meta = &mcplib.Meta{AdditionalFields: map[string]any{
-		"ui": map[string]any{"resourceUri": statsAppURI},
+		// MCP Apps (SEP-1865) linkage. openai/outputTemplate is the legacy
+		// alias ChatGPT still accepts for the same URI.
+		"ui":                    map[string]any{"resourceUri": statsAppURI},
+		"openai/outputTemplate": statsAppURI,
 	}}
 
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {

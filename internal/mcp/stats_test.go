@@ -112,16 +112,29 @@ func TestStatsViewHasNoNetworkAndSpeaksTheBridge(t *testing.T) {
 		}
 	}
 	for _, need := range []string{
+		"ui/notifications/initialized",
+		"ui/notifications/tool-input",
 		"ui/notifications/tool-result",
+		"ui/notifications/size-changed",
+		"ui/notifications/host-context-changed",
+		"2026-01-26",
 		"tools/call",
 		"mctl_stats_dashboard",
 		"connect-src 'none'",
 		"text/html;profile=mcp-app",
-		"ui://mctl-stats/view.html",
+		statsAppURI,
+		"fmtGiB",
+		"day-labels",
 	} {
 		if !strings.Contains(statsViewHTML, need) {
 			t.Errorf("embedded view missing %q", need)
 		}
+	}
+	if strings.Contains(statsViewHTML, "2025-06-18") {
+		t.Error("view must not advertise the MCP core protocol date as the Apps protocol version")
+	}
+	if strings.Contains(statsViewHTML, "ответ на ui/initialize") {
+		t.Error("view must send ui/initialize, not answer it")
 	}
 }
 
@@ -141,12 +154,16 @@ func TestStatsResourceAndToolRegistration(t *testing.T) {
 			t.Errorf("mimeType = %v", res["mimeType"])
 		}
 		meta := metaUI(t, res["_meta"])
+		if meta["prefersBorder"] != true {
+			t.Errorf("prefersBorder = %v", meta["prefersBorder"])
+		}
 		csp := mapField(t, meta, "csp")
 		assertEmptyList(t, csp["connectDomains"])
 		assertEmptyList(t, csp["resourceDomains"])
+		assertEmptyList(t, csp["frameDomains"])
 	}
 	if !found {
-		t.Fatal("ui://mctl-stats/view.html is not registered")
+		t.Fatal(statsAppURI + " is not registered")
 	}
 
 	read := mcpResult(t, srv, "resources/read", map[string]any{"uri": statsAppURI})
@@ -163,12 +180,28 @@ func TestStatsResourceAndToolRegistration(t *testing.T) {
 		t.Fatal("resource text is not the embedded view")
 	}
 	meta := metaUI(t, body["_meta"])
+	if meta["prefersBorder"] != true {
+		t.Errorf("read prefersBorder = %v", meta["prefersBorder"])
+	}
 	assertEmptyList(t, mapField(t, meta, "csp")["connectDomains"])
+	assertEmptyList(t, mapField(t, meta, "csp")["frameDomains"])
+
+	// The console is one concrete document, not a URI template. Hosts discover
+	// it from the tool's resourceUri and read it with resources/read.
+	// resources/templates/list stays available and does not advertise this URI.
+	templates := mcpResult(t, srv, "resources/templates/list", nil)
+	listed, _ := templates["resourceTemplates"].([]any)
+	for _, item := range listed {
+		tpl, _ := item.(map[string]any)
+		if tpl["uriTemplate"] == statsAppURI || tpl["uri"] == statsAppURI {
+			t.Fatalf("static view listed as a template: %#v", tpl)
+		}
+	}
 
 	tools := mcpResult(t, srv, "tools/list", nil)
-	listed, _ := tools["tools"].([]any)
+	toolItems, _ := tools["tools"].([]any)
 	var tool map[string]any
-	for _, item := range listed {
+	for _, item := range toolItems {
 		one, _ := item.(map[string]any)
 		if one["name"] == "mctl_stats_dashboard" {
 			tool = one
@@ -177,9 +210,13 @@ func TestStatsResourceAndToolRegistration(t *testing.T) {
 	if tool == nil {
 		t.Fatal("mctl_stats_dashboard is not registered")
 	}
+	rawMeta, _ := tool["_meta"].(map[string]any)
 	ui := metaUI(t, tool["_meta"])
 	if ui["resourceUri"] != statsAppURI {
 		t.Errorf("resourceUri = %v", ui["resourceUri"])
+	}
+	if rawMeta["openai/outputTemplate"] != statsAppURI {
+		t.Errorf("openai/outputTemplate = %v", rawMeta["openai/outputTemplate"])
 	}
 	ann, _ := tool["annotations"].(map[string]any)
 	if ann["readOnlyHint"] != true {

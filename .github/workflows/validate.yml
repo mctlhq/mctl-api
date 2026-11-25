@@ -49,10 +49,23 @@ jobs:
 
       - uses: azure/setup-helm@v5
 
+      - name: install Chrome for the MCP Apps host harness
+        run: |
+          set -euo pipefail
+          if ! command -v google-chrome >/dev/null 2>&1; then
+            curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+            sudo apt-get update
+            sudo apt-get install -y /tmp/chrome.deb
+          fi
+          command -v google-chrome
+
       - name: go build & test
         env:
           TEST_DB_URL: postgres://postgres:postgres@localhost:5432/mctl_api_test?sslmode=disable
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/mctl_api_test?sslmode=disable
+          # The stats view handshake test drives headless Chrome. Fail the job
+          # if the browser is missing instead of skipping the harness.
+          MCTL_REQUIRE_BROWSER: "1"
         run: |
           go build ./...
           # -p 1: internal/alerts and internal/api both run Postgres-backed
