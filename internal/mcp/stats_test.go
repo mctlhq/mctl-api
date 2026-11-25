@@ -51,6 +51,18 @@ func TestParseStatsQuantities(t *testing.T) {
 	if got := parseMemoryMiB("100K"); math.Abs(got-kilo) > 0.0001 {
 		t.Fatalf("100K = %v, want %v", got, kilo)
 	}
+	mega := 500 * 1000.0 * 1000 / 1024 / 1024
+	if got := parseMemoryMiB("500M"); math.Abs(got-mega) > 0.0001 {
+		t.Fatalf("500M = %v, want %v", got, mega)
+	}
+	giga := 1000.0 * 1000 * 1000 / 1024 / 1024
+	if got := parseMemoryMiB("1G"); math.Abs(got-giga) > 0.0001 {
+		t.Fatalf("1G = %v, want %v", got, giga)
+	}
+	tera := 1000.0 * 1000 * 1000 * 1000 / 1024 / 1024
+	if got := parseMemoryMiB("1T"); math.Abs(got-tera) > 0.0001 {
+		t.Fatalf("1T = %v, want %v", got, tera)
+	}
 	q := quotaFromMaps(
 		map[string]string{"limits.cpu": "500m", "limits.memory": "512Mi", "pods": "3"},
 		map[string]string{"limits.cpu": "2", "limits.memory": "1Gi", "pods": "10", "services": "5"},
