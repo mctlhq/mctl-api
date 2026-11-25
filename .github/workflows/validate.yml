@@ -26,21 +26,24 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: mctl_api_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     steps:
       - uses: actions/checkout@v7
+
+      - name: Start PostgreSQL 16 (max_connections=400)
+        run: |
+          docker run -d --name mctl-test-pg \
+            -p 5432:5432 \
+            -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_DB=mctl_api_test \
+            postgres:16 -c max_connections=400
+          for i in $(seq 1 30); do
+            if docker exec mctl-test-pg pg_isready -h 127.0.0.1 -p 5432 -U postgres -d mctl_api_test >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::PostgreSQL did not become ready in time"
+          exit 1
 
       - uses: actions/setup-go@v6
         with:
@@ -68,14 +71,11 @@ jobs:
           MCTL_REQUIRE_BROWSER: "1"
         run: |
           go build ./...
-          # -p 1: internal/alerts and internal/api both run Postgres-backed
-          # tests against the same TEST_DATABASE_URL and both issue unscoped
-          # DELETE FROM alerts/alert_evidence in setup/cleanup. Running test
-          # binaries for different packages in parallel (Go's default) would
-          # let one package's cleanup wipe rows another package's test is
-          # still asserting on. Forcing serial package execution avoids that
-          # cross-package race entirely, at the cost of some CI wall time.
-          go test -p 1 ./...
+          # Run packages in parallel (-p 2) while isolating each package binary
+          # into its own disposable Postgres database via cmd/pgtestexec so
+          # unscoped cleanup statements (e.g. DELETE FROM alerts) never collide.
+          go build -o "$RUNNER_TEMP/pgtestexec" ./cmd/pgtestexec
+          go test -p 2 -exec "$RUNNER_TEMP/pgtestexec" ./...
 
       - name: bridge PostgreSQL tests (fail-closed evidence)
         shell: bash
