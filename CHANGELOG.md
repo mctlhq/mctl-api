@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.178.0](https://github.com/mctlhq/mctl-api/compare/4.177.0...4.178.0) (2026-11-25)
+
+
+### Features
+
+* **mcp:** add a read-only statistics MCP App ([2d1c809](https://github.com/mctlhq/mctl-api/commit/2d1c809d1fc951e04c88b227af90d0818012af0e))
+* **mcp:** add a read-only statistics MCP App ([db5757f](https://github.com/mctlhq/mctl-api/commit/db5757fdff3738e99e278d0bb886c0433bec5622))
+
+
+### Bug Fixes
+
+* **mcp:** compile the stats dashboard against current main ([8308e83](https://github.com/mctlhq/mctl-api/commit/8308e831a11fcf39857ed484c811fb40e5c48a54))
+* **mcp:** keep stats gaps valid and scope multi-team reads ([39a0453](https://github.com/mctlhq/mctl-api/commit/39a0453572a5aa22a5c476653fdb59a9b71de9b8))
+* **mcp:** parse decimal memory quantities as floats ([e8f7898](https://github.com/mctlhq/mctl-api/commit/e8f7898e055b1b8f53631214a8c2122a7808a6ef))
+
 ## [4.177.0](https://github.com/mctlhq/mctl-api/compare/4.176.0...4.177.0) (2026-11-24)
 
 
