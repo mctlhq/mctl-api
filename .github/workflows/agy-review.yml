@@ -10,7 +10,7 @@ jobs:
   agy-review:
     # Pinned like claude-review: this job holds pull-requests: write, so a
     # mutable ref would run unreviewed changes to the reusable workflow.
-    uses: mctlhq/.github/.github/workflows/agy-review.yml@8e12ed0663a877e0430161228c521820aa7da036
+    uses: mctlhq/.github/.github/workflows/agy-review.yml@99c403aae0f19f0900fe1f12eb96bbd4ba43bc29
     permissions:
       contents: read
       pull-requests: write
