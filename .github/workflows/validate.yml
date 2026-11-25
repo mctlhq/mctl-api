@@ -37,7 +37,7 @@ jobs:
             -e POSTGRES_DB=mctl_api_test \
             postgres:16 -c max_connections=400
           for i in $(seq 1 30); do
-            if docker exec mctl-test-pg pg_isready -U postgres -d mctl_api_test >/dev/null 2>&1; then
+            if docker exec mctl-test-pg pg_isready -h 127.0.0.1 -p 5432 -U postgres -d mctl_api_test >/dev/null 2>&1; then
               exit 0
             fi
             sleep 1
