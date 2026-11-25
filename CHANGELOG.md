@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.178.1](https://github.com/mctlhq/mctl-api/compare/4.178.0...4.178.1) (2026-11-25)
+
+
+### Bug Fixes
+
+* **mcp:** finish the stats app handshake ([a5d018a](https://github.com/mctlhq/mctl-api/commit/a5d018a97c633970e8bb2f8133188ed99270894a))
+* **mcp:** finish the stats app handshake ([77dd77e](https://github.com/mctlhq/mctl-api/commit/77dd77e9792a2bcaed759f11dc6d8c29fd059472))
+
 ## [4.178.0](https://github.com/mctlhq/mctl-api/compare/4.177.0...4.178.0) (2026-11-25)
 
 
