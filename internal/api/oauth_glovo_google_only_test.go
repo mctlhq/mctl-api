@@ -281,10 +281,33 @@ func responseShape(rec *httptest.ResponseRecorder) string {
 			// Only the cookie's name and attributes: its value is random.
 			v = regexp.MustCompile(`=[^;]*`).ReplaceAllString(v, "=X")
 		}
+		if name == "X-Ratelimit-Reset" {
+			// Window end is wall-clock. Two sign-ins that straddle a minute
+			// boundary differ by 60s even when the guard left the response alone.
+			v = "X"
+		}
 		b.WriteString(name + ": " + blank(v) + "\n")
 	}
 	b.WriteString(blank(rec.Body.String()))
 	return b.String()
+}
+
+func TestResponseShapeIgnoresRateLimitWindow(t *testing.T) {
+	off := httptest.NewRecorder()
+	shadow := httptest.NewRecorder()
+	off.Header().Set("X-Ratelimit-Limit", "60")
+	shadow.Header().Set("X-Ratelimit-Limit", "60")
+	off.Header().Set("X-Ratelimit-Remaining", "58")
+	shadow.Header().Set("X-Ratelimit-Remaining", "58")
+	off.Header().Set("X-Ratelimit-Reset", "1795628040")
+	shadow.Header().Set("X-Ratelimit-Reset", "1795628100")
+	off.Header().Set("Location", "https://claude.ai/api/mcp/auth_callback?code=abc&state=client-state")
+	shadow.Header().Set("Location", "https://claude.ai/api/mcp/auth_callback?code=xyz&state=client-state")
+	off.WriteHeader(http.StatusFound)
+	shadow.WriteHeader(http.StatusFound)
+	if a, b := responseShape(off), responseShape(shadow); a != b {
+		t.Fatalf("clock-only rate-limit reset changed the shape\noff:\n%s\nshadow:\n%s", a, b)
+	}
 }
 
 // Every kind of sign-in on each Glovo resource writes exactly one shadow

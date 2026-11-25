@@ -41,7 +41,7 @@ import (
 // embedded and makes no network requests of its own; live numbers arrive as
 // the structuredContent of mctl_stats_dashboard.
 const (
-	statsAppURI         = "ui://mctl-stats/view-2.html"
+	statsAppURI         = "ui://mctl-stats/view-3.html"
 	statsAppMIME        = "text/html;profile=mcp-app"
 	statsCollectBudget  = 20 * time.Second
 	statsStatusCap      = 40
@@ -120,7 +120,7 @@ Read-only aggregate for the caller's own teams: tenants, services with ArgoCD sy
 
 Non-admins only receive their own teams. Pass team or namespace to narrow further; omit both (or pass "all") for every team the caller may see.
 
-The interactive console is the MCP App at ui://mctl-stats/view-2.html. structuredContent matches that view; the text is a short summary for clients without a UI.`),
+The interactive console is the MCP App at ui://mctl-stats/view-3.html. structuredContent matches that view; the text is a short summary for clients without a UI.`),
 		mcplib.WithString("team",
 			mcplib.Description("Optional team (tenant) filter. Omit or pass \"all\" for every team the caller may see."),
 		),
@@ -555,19 +555,24 @@ type apiService struct {
 }
 
 type apiIncident struct {
-	ID             string     `json:"id"`
-	Source         string     `json:"source"`
-	Type           string     `json:"type"`
-	Tenant         string     `json:"tenant"`
-	Service        string     `json:"service"`
-	Summary        string     `json:"summary"`
-	Severity       string     `json:"severity"`
-	Status         string     `json:"status"`
-	Analysis       string     `json:"analysis"`
-	Confidence     string     `json:"confidence"`
-	CreatedAt      time.Time  `json:"created_at"`
-	ResolvedAt     *time.Time `json:"resolved_at"`
-	AcknowledgedBy string     `json:"acknowledged_by"`
+	ID         string     `json:"id"`
+	Source     string     `json:"source"`
+	Type       string     `json:"type"`
+	Tenant     string     `json:"tenant"`
+	Service    string     `json:"service"`
+	Summary    string     `json:"summary"`
+	Severity   string     `json:"severity"`
+	Status     string     `json:"status"`
+	Analysis   string     `json:"analysis"`
+	Confidence string     `json:"confidence"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+	ResolvedAt *time.Time `json:"resolved_at"`
+	// ResolvedBy is the principal that closed the incident (alerts.Alert),
+	// for example "service:mctl-agent" or "github:mashkovd". AcknowledgedBy
+	// is who acknowledged it, and is not the closer.
+	ResolvedBy     string `json:"resolved_by"`
+	AcknowledgedBy string `json:"acknowledged_by"`
 }
 
 type apiResources struct {
@@ -1367,27 +1372,35 @@ func summarizeResolved(items []apiIncident, loc *time.Location) statsResolved {
 		incMap(rs.ByType, item.Type)
 		incMap(rs.BySource, item.Source)
 		incMap(rs.ByTenant, item.Tenant)
-		resolver := item.AcknowledgedBy
-		if resolver == "" {
-			resolver = "—"
+		// by_resolver counts the closer. Recent rows keep resolved_by and
+		// acknowledged_by separately so the view can prefer resolved_by and
+		// fall back only when it is empty. The tally uses "—" when neither is set.
+		resolvedBy := strings.TrimSpace(item.ResolvedBy)
+		ackBy := strings.TrimSpace(item.AcknowledgedBy)
+		who := incidentCloser(item)
+		if who == "" {
+			who = "—"
 		}
-		incMap(rs.ByResolver, resolver)
-		if !item.CreatedAt.IsZero() {
-			daily[item.CreatedAt.In(loc).Format("2006-01-02")]++
+		incMap(rs.ByResolver, who)
+		// Closed-per-day follows the resolution instant, not created_at.
+		if closed := incidentClosedAt(item); !closed.IsZero() {
+			daily[closed.In(loc).Format("2006-01-02")]++
 		}
 		if len(rs.Recent) < 15 {
 			rs.Recent = append(rs.Recent, statsRecent{
-				ID:          item.ID,
-				Tenant:      item.Tenant,
-				Service:     item.Service,
-				Severity:    item.Severity,
-				Status:      item.Status,
-				Type:        item.Type,
-				Source:      item.Source,
-				Summary:     item.Summary,
-				CreatedCET:  formatStatsTime(item.CreatedAt, loc),
-				ResolvedCET: formatStatsTime(derefTime(item.ResolvedAt), loc),
-				ResolvedBy:  resolver,
+				ID:             item.ID,
+				Tenant:         item.Tenant,
+				Service:        item.Service,
+				Severity:       item.Severity,
+				Status:         item.Status,
+				Type:           item.Type,
+				Source:         item.Source,
+				Summary:        item.Summary,
+				CreatedCET:     formatStatsTime(item.CreatedAt, loc),
+				ResolvedCET:    formatStatsTime(derefTime(item.ResolvedAt), loc),
+				ResolvedAt:     copyTimePtr(item.ResolvedAt),
+				ResolvedBy:     resolvedBy,
+				AcknowledgedBy: ackBy,
 			})
 		}
 	}
@@ -1400,6 +1413,43 @@ func summarizeResolved(items []apiIncident, loc *time.Location) statsResolved {
 		rs.Daily = append(rs.Daily, []any{day, daily[day]})
 	}
 	return rs
+}
+
+// incidentCloser is who moved the incident to resolved. The incidents API
+// stores that on resolved_by (alerts.Alert.ResolvedBy). acknowledged_by is
+// the acknowledgement, used only when resolved_by is empty.
+func incidentCloser(item *apiIncident) string {
+	if item == nil {
+		return ""
+	}
+	if who := strings.TrimSpace(item.ResolvedBy); who != "" {
+		return who
+	}
+	return strings.TrimSpace(item.AcknowledgedBy)
+}
+
+// incidentClosedAt is the instant a resolved incident counts toward the
+// closed-per-day chart. resolved_at is that instant; older rows that never
+// recorded it fall back to updated_at, then created_at.
+func incidentClosedAt(item *apiIncident) time.Time {
+	if item == nil {
+		return time.Time{}
+	}
+	if item.ResolvedAt != nil && !item.ResolvedAt.IsZero() {
+		return *item.ResolvedAt
+	}
+	if !item.UpdatedAt.IsZero() {
+		return item.UpdatedAt
+	}
+	return item.CreatedAt
+}
+
+func copyTimePtr(t *time.Time) *time.Time {
+	if t == nil || t.IsZero() {
+		return nil
+	}
+	copied := t.UTC()
+	return &copied
 }
 
 func applyLiveNotes(svcs []statsService, active []statsIncident, asOf string) {
@@ -1703,17 +1753,19 @@ type statsResolved struct {
 }
 
 type statsRecent struct {
-	ID          string `json:"id"`
-	Tenant      string `json:"tenant"`
-	Service     string `json:"service"`
-	Severity    string `json:"severity"`
-	Status      string `json:"status"`
-	Type        string `json:"type"`
-	Source      string `json:"source"`
-	Summary     string `json:"summary"`
-	CreatedCET  string `json:"created_cet"`
-	ResolvedCET string `json:"resolved_cet"`
-	ResolvedBy  string `json:"resolved_by"`
+	ID             string     `json:"id"`
+	Tenant         string     `json:"tenant"`
+	Service        string     `json:"service"`
+	Severity       string     `json:"severity"`
+	Status         string     `json:"status"`
+	Type           string     `json:"type"`
+	Source         string     `json:"source"`
+	Summary        string     `json:"summary"`
+	CreatedCET     string     `json:"created_cet"`
+	ResolvedCET    string     `json:"resolved_cet"`
+	ResolvedAt     *time.Time `json:"resolved_at,omitempty"`
+	ResolvedBy     string     `json:"resolved_by"`
+	AcknowledgedBy string     `json:"acknowledged_by,omitempty"`
 }
 
 type statsUsage struct {

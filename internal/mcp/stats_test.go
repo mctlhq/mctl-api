@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -105,6 +106,109 @@ func TestNormalizeStatsFilterAndNamespace(t *testing.T) {
 	}
 }
 
+func TestAPIIncidentKeepsResolutionFields(t *testing.T) {
+	raw := []byte(`{"id":"r","status":"resolved","resolved_by":" service:mctl-agent ","acknowledged_by":"github:mashkovd","created_at":"2026-11-23T22:00:00Z","updated_at":"2026-11-21T10:00:00Z","resolved_at":"2026-11-23T23:30:00Z"}`)
+	var item apiIncident
+	if err := json.Unmarshal(raw, &item); err != nil {
+		t.Fatal(err)
+	}
+	if item.ResolvedBy != " service:mctl-agent " || item.AcknowledgedBy != "github:mashkovd" || item.UpdatedAt.IsZero() || item.ResolvedAt == nil {
+		t.Fatalf("resolution fields dropped: %+v", item)
+	}
+}
+
+func TestSummarizeResolvedUsesCloserAndResolutionDay(t *testing.T) {
+	loc := statsLocation()
+	createdPrev := time.Date(2026, 11, 23, 22, 0, 0, 0, time.UTC)   // 23 Nov 23:00 CET
+	resolvedNext := time.Date(2026, 11, 23, 23, 30, 0, 0, time.UTC) // 24 Nov 00:30 CET
+	updatedDay := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)    // 21 Nov 11:00 CET
+	createdOnly := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)   // 20 Nov 13:00 CET
+	items := []apiIncident{
+		{
+			ID: "prefer", Status: "resolved", Tenant: "labs",
+			ResolvedBy: "service:mctl-agent", AcknowledgedBy: "github:mashkovd",
+			CreatedAt: createdPrev, UpdatedAt: updatedDay, ResolvedAt: &resolvedNext,
+		},
+		{
+			ID: "blank-resolved-by", Status: "resolved", Tenant: "labs",
+			ResolvedBy: "  ", AcknowledgedBy: "github:mashkovd",
+			CreatedAt: createdOnly, ResolvedAt: &resolvedNext,
+		},
+		{
+			ID: "fallback-updated", Status: "resolved", Tenant: "labs",
+			CreatedAt: createdPrev, UpdatedAt: updatedDay,
+		},
+		{
+			ID: "fallback-created", Status: "resolved", Tenant: "labs",
+			CreatedAt: createdOnly,
+		},
+		{
+			ID: "open", Status: "open", Tenant: "labs",
+			ResolvedBy: "service:mctl-agent", CreatedAt: createdPrev, ResolvedAt: &resolvedNext,
+		},
+	}
+	rs := summarizeResolved(items, loc)
+	if rs.Count != 4 {
+		t.Fatalf("count = %d", rs.Count)
+	}
+	if rs.ByResolver["service:mctl-agent"] != 1 || rs.ByResolver["github:mashkovd"] != 1 || rs.ByResolver["—"] != 2 {
+		t.Fatalf("resolvers = %+v", rs.ByResolver)
+	}
+	days := dailyCounts(t, rs.Daily)
+	// prefer and blank-resolved-by share the resolution day. The created day
+	// of prefer (23 Nov) must not be a bucket of its own.
+	if days["2026-11-24"] != 2 || days["2026-11-21"] != 1 || days["2026-11-20"] != 1 || days["2026-11-23"] != 0 {
+		t.Fatalf("closed-per-day = %+v", days)
+	}
+	byID := map[string]statsRecent{}
+	for _, row := range rs.Recent {
+		byID[row.ID] = row
+	}
+	prefer := byID["prefer"]
+	if prefer.ResolvedBy != "service:mctl-agent" || prefer.AcknowledgedBy != "github:mashkovd" || prefer.ResolvedAt == nil || !prefer.ResolvedAt.Equal(resolvedNext) {
+		t.Fatalf("prefer = %+v", prefer)
+	}
+	blank := byID["blank-resolved-by"]
+	if blank.ResolvedBy != "" || blank.AcknowledgedBy != "github:mashkovd" {
+		t.Fatalf("blank resolved_by = %+v", blank)
+	}
+	if byID["fallback-updated"].ResolvedAt != nil || byID["fallback-created"].ResolvedAt != nil {
+		t.Fatal("absent resolved_at was invented")
+	}
+	if _, ok := byID["open"]; ok {
+		t.Fatal("open incident landed in the closed list")
+	}
+}
+
+func dailyCounts(t *testing.T, daily [][]any) map[string]int {
+	t.Helper()
+	out := map[string]int{}
+	for _, pair := range daily {
+		if len(pair) != 2 {
+			t.Fatalf("daily pair = %#v", pair)
+		}
+		day, ok := pair[0].(string)
+		if !ok {
+			t.Fatalf("day = %#v", pair[0])
+		}
+		switch n := pair[1].(type) {
+		case int:
+			out[day] = n
+		case float64:
+			out[day] = int(n)
+		case json.Number:
+			v, err := n.Int64()
+			if err != nil {
+				t.Fatalf("count = %#v", pair[1])
+			}
+			out[day] = int(v)
+		default:
+			t.Fatalf("count = %#v (%T)", pair[1], pair[1])
+		}
+	}
+	return out
+}
+
 func TestStatsViewHasNoNetworkAndSpeaksTheBridge(t *testing.T) {
 	for _, banned := range []string{"fetch(", "XMLHttpRequest", "WebSocket", "EventSource", "http://", "https://", "new Image"} {
 		if strings.Contains(statsViewHTML, banned) {
@@ -123,12 +227,16 @@ func TestStatsViewHasNoNetworkAndSpeaksTheBridge(t *testing.T) {
 		"connect-src 'none'",
 		"text/html;profile=mcp-app",
 		statsAppURI,
+		"i.resolved_by || i.acknowledged_by",
 		"fmtGiB",
 		"day-labels",
 	} {
 		if !strings.Contains(statsViewHTML, need) {
 			t.Errorf("embedded view missing %q", need)
 		}
+	}
+	if strings.Contains(statsViewHTML, "ui://mctl-stats/view-2.html") {
+		t.Error("stale stats view URI is still embedded")
 	}
 	if strings.Contains(statsViewHTML, "2025-06-18") {
 		t.Error("view must not advertise the MCP core protocol date as the Apps protocol version")
@@ -218,6 +326,10 @@ func TestStatsResourceAndToolRegistration(t *testing.T) {
 	if rawMeta["openai/outputTemplate"] != statsAppURI {
 		t.Errorf("openai/outputTemplate = %v", rawMeta["openai/outputTemplate"])
 	}
+	desc, _ := tool["description"].(string)
+	if !strings.Contains(desc, statsAppURI) {
+		t.Errorf("description missing %s", statsAppURI)
+	}
 	ann, _ := tool["annotations"].(map[string]any)
 	if ann["readOnlyHint"] != true {
 		t.Errorf("readOnlyHint = %v", ann["readOnlyHint"])
@@ -288,8 +400,34 @@ func TestStatsDashboard_AdminAggregatesScopedData(t *testing.T) {
 	if !noted {
 		t.Fatalf("missing live argo note: %+v", d.Incidents.Active)
 	}
-	if d.Incidents.ResolvedSummary.Count != 3 || d.Incidents.ResolvedSummary.BySeverity["warning"] != 2 || d.Incidents.ResolvedSummary.BySeverity["critical"] != 1 {
-		t.Fatalf("resolved = %+v", d.Incidents.ResolvedSummary)
+	rs := d.Incidents.ResolvedSummary
+	if rs.Count != 3 || rs.BySeverity["warning"] != 2 || rs.BySeverity["critical"] != 1 {
+		t.Fatalf("resolved = %+v", rs)
+	}
+	if rs.ByResolver["service:mctl-agent"] != 1 || rs.ByResolver["github:mashkovd"] != 1 || rs.ByResolver["—"] != 1 || rs.ByResolver["github:not-the-closer"] != 0 {
+		t.Fatalf("resolvers = %+v", rs.ByResolver)
+	}
+	if len(rs.Recent) != 3 {
+		t.Fatalf("recent = %+v", rs.Recent)
+	}
+	if rs.Recent[0].ID != "r1" || rs.Recent[0].ResolvedBy != "service:mctl-agent" || rs.Recent[0].AcknowledgedBy != "github:not-the-closer" {
+		t.Fatalf("r1 closer = %+v", rs.Recent[0])
+	}
+	wantResolved := time.Date(2026, 11, 23, 23, 30, 0, 0, time.UTC)
+	if rs.Recent[0].ResolvedAt == nil || !rs.Recent[0].ResolvedAt.Equal(wantResolved) {
+		t.Fatalf("r1 resolved_at = %v", rs.Recent[0].ResolvedAt)
+	}
+	if rs.Recent[1].ID != "r2" || rs.Recent[1].ResolvedBy != "" || rs.Recent[1].AcknowledgedBy != "github:mashkovd" {
+		t.Fatalf("r2 closer = %+v", rs.Recent[1])
+	}
+	if rs.Recent[2].ResolvedAt != nil || rs.Recent[2].ResolvedBy != "" {
+		t.Fatalf("r3 resolution = %+v", rs.Recent[2])
+	}
+	// r1 was created on 23 Nov CET and closed after midnight CET on the 24th.
+	// r3 has no resolved_at, so the chart uses updated_at (21 Nov), not created_at (20 Nov).
+	days := dailyCounts(t, rs.Daily)
+	if days["2026-11-24"] != 1 || days["2026-11-22"] != 1 || days["2026-11-21"] != 1 || days["2026-11-23"] != 0 || days["2026-11-20"] != 0 {
+		t.Fatalf("closed-per-day = %+v", days)
 	}
 	if !d.Usage.Available || math.Abs(d.Usage.Totals.CalculatedCost-2) > 0.001 || d.Usage.Totals.Invocations != 3 || d.Usage.Totals.Success != 2 || d.Usage.Totals.Error != 1 {
 		t.Fatalf("usage = %+v", d.Usage.Totals)
@@ -670,9 +808,12 @@ func (f *statsFake) writeIncidents(w http.ResponseWriter, status string) {
 		map[string]any{"id": "inc-resolved-in-active", "tenant": "labs", "service": "web", "severity": "warning", "status": "resolved", "summary": "should drop", "created_at": "2026-11-24T09:00:00Z"},
 	}
 	resolved := []any{
-		map[string]any{"id": "r1", "tenant": "labs", "service": "web", "severity": "warning", "status": "resolved", "type": "generic", "source": "alertmanager", "summary": "one", "acknowledged_by": "service:mctl-agent", "created_at": "2026-11-24T12:00:00Z", "resolved_at": "2026-11-24T13:00:00Z"},
-		map[string]any{"id": "r2", "tenant": "labs", "service": "web", "severity": "critical", "status": "resolved", "type": "pod_crashloop", "source": "polling", "summary": "two", "acknowledged_by": "github:mashkovd", "created_at": "2026-11-23T12:00:00Z", "resolved_at": "2026-11-23T13:00:00Z"},
-		map[string]any{"id": "r3", "tenant": "karabu", "service": "draw", "severity": "warning", "status": "resolved", "type": "generic", "source": "alertmanager", "summary": "three", "created_at": "2026-11-22T12:00:00Z", "resolved_at": "2026-11-22T13:00:00Z"},
+		// Created 23 Nov 23:00 CET, closed 24 Nov 00:30 CET. acknowledged_by is not the closer.
+		map[string]any{"id": "r1", "tenant": "labs", "service": "web", "severity": "warning", "status": "resolved", "type": "generic", "source": "alertmanager", "summary": "one", "resolved_by": "service:mctl-agent", "acknowledged_by": "github:not-the-closer", "created_at": "2026-11-23T22:00:00Z", "resolved_at": "2026-11-23T23:30:00Z"},
+		// No resolved_by: the closer falls back to acknowledged_by. Same calendar day either way.
+		map[string]any{"id": "r2", "tenant": "labs", "service": "web", "severity": "critical", "status": "resolved", "type": "pod_crashloop", "source": "polling", "summary": "two", "acknowledged_by": "github:mashkovd", "created_at": "2026-11-22T12:00:00Z", "resolved_at": "2026-11-22T13:00:00Z"},
+		// No resolved_at: the chart uses updated_at (21 Nov CET), not created_at (20 Nov CET).
+		map[string]any{"id": "r3", "tenant": "karabu", "service": "draw", "severity": "warning", "status": "resolved", "type": "generic", "source": "alertmanager", "summary": "three", "created_at": "2026-11-20T12:00:00Z", "updated_at": "2026-11-21T10:00:00Z"},
 		map[string]any{"id": "r4", "tenant": "admins", "service": "secret-svc", "severity": "warning", "status": "resolved", "summary": "foreign", "created_at": "2026-11-22T12:00:00Z"},
 	}
 	items := active
