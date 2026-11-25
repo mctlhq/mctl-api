@@ -95,6 +95,10 @@ func TestStatsViewHostHarness(t *testing.T) {
 			},
 		})
 		waitViewText(t, ctx, "hdr-user", "mashkovd")
+		closers := viewText(t, ctx, "resolved-incidents-table")
+		if !strings.Contains(closers, "service:mctl-agent") || !strings.Contains(closers, "github:mashkovd") || strings.Contains(closers, "github:not-the-closer") {
+			t.Fatalf("resolver column = %q", closers)
+		}
 		if input := viewJS(t, ctx, `return document.getElementById("view").contentWindow.__mctlApps.lastToolInput.team || ""`); input != "labs" {
 			t.Fatalf("tool-input = %q", input)
 		}
@@ -498,7 +502,18 @@ func statsBrowserSnapshot(user string) map[string]any {
 				"count": 8, "daily": daily,
 				"by_severity": map[string]any{}, "by_type": map[string]any{},
 				"by_source": map[string]any{}, "by_tenant": map[string]any{},
-				"recent": []any{},
+				"recent": []any{
+					map[string]any{
+						"tenant": "labs", "service": "web", "severity": "warning", "type": "generic",
+						"summary": "closed by agent", "created_cet": "2026-11-24 13:00 CET",
+						"resolved_by": "service:mctl-agent", "acknowledged_by": "github:not-the-closer",
+					},
+					map[string]any{
+						"tenant": "labs", "service": "web", "severity": "critical", "type": "pod_crashloop",
+						"summary": "closed before resolved_by", "created_cet": "2026-11-23 13:00 CET",
+						"acknowledged_by": "github:mashkovd",
+					},
+				},
 			},
 		},
 		"usage":      map[string]any{"available": false, "totals": map[string]any{}},
