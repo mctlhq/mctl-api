@@ -162,7 +162,7 @@ func TestStatsDashboard_AdminAggregatesScopedData(t *testing.T) {
 
 	res := callStats(t, srv.URL, nil)
 	d := decodeDash(t, res)
-	text := toolResultText(res)
+	text := toolResultText(t, res)
 	if d.Meta.APIBase != "" {
 		t.Errorf("loopback api base leaked: %q", d.Meta.APIBase)
 	}
@@ -321,8 +321,8 @@ func TestStatsDashboard_NonAdminIsScopedAndSkipsAdminReads(t *testing.T) {
 	fake.assertGETOnly(t)
 
 	denied := callStats(t, srv.URL, map[string]any{"team": "karabu"})
-	if !denied.IsError || !strings.Contains(toolResultText(denied), "access denied") {
-		t.Fatalf("denied = error:%v text:%s", denied.IsError, toolResultText(denied))
+	if !denied.IsError || !strings.Contains(toolResultText(t, denied), "access denied") {
+		t.Fatalf("denied = error:%v text:%s", denied.IsError, toolResultText(t, denied))
 	}
 }
 
@@ -332,12 +332,12 @@ func TestStatsDashboard_FilterErrors(t *testing.T) {
 	defer srv.Close()
 
 	mismatch := callStats(t, srv.URL, map[string]any{"team": "labs", "namespace": "karabu"})
-	if !mismatch.IsError || !strings.Contains(toolResultText(mismatch), "does not match") {
-		t.Fatalf("mismatch = %s", toolResultText(mismatch))
+	if !mismatch.IsError || !strings.Contains(toolResultText(t, mismatch), "does not match") {
+		t.Fatalf("mismatch = %s", toolResultText(t, mismatch))
 	}
 	missing := callStats(t, srv.URL, map[string]any{"team": "missing"})
-	if !missing.IsError || !strings.Contains(toolResultText(missing), "tenant not found") {
-		t.Fatalf("missing = %s", toolResultText(missing))
+	if !missing.IsError || !strings.Contains(toolResultText(t, missing), "tenant not found") {
+		t.Fatalf("missing = %s", toolResultText(t, missing))
 	}
 }
 
@@ -631,7 +631,7 @@ func callStats(t *testing.T, apiURL string, args map[string]any) *mcplib.CallToo
 func decodeDash(t *testing.T, res *mcplib.CallToolResult) statsDashboard {
 	t.Helper()
 	if res == nil || res.IsError {
-		t.Fatalf("error result: %s", toolResultText(res))
+		t.Fatalf("error result: %s", toolResultText(t, res))
 	}
 	raw, err := json.Marshal(res.StructuredContent)
 	if err != nil {
@@ -642,18 +642,6 @@ func decodeDash(t *testing.T, res *mcplib.CallToolResult) statsDashboard {
 		t.Fatal(err)
 	}
 	return d
-}
-
-func toolResultText(res *mcplib.CallToolResult) string {
-	if res == nil {
-		return ""
-	}
-	for _, c := range res.Content {
-		if text, ok := c.(mcplib.TextContent); ok {
-			return text.Text
-		}
-	}
-	return ""
 }
 
 func findTenant(d statsDashboard, name string) statsTenant {
