@@ -318,6 +318,7 @@ func (s *Server) NewMCPServer() *server.MCPServer {
 	srv.AddTool(s.toolListSignupRequests())
 	srv.AddTool(s.toolDecideSignupRequest())
 	srv.AddTool(s.toolSignupCapacity())
+	srv.AddTool(s.toolStatsDashboard())
 
 	// Read tools (safe, always available).
 	srv.AddTool(s.toolListTenants())

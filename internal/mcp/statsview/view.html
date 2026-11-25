@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none';">
+<title>Консоль статистики платформы MCTL</title>
+<style>
+  :root {
+    --bg: #080c14;
+    --bg-elev: #0f1623;
+    --bg-card: #131c2e;
+    --bg-hover: #19243b;
+    --border: #1e293b;
+    --border-strong: #334155;
+    --text: #e2e8f0;
+    --text-muted: #94a3b8;
+    --text-dim: #64748b;
+    --accent: #38bdf8;
+    --accent-soft: rgba(56, 189, 248, 0.14);
+    --green: #10b981;
+    --green-soft: rgba(16, 185, 129, 0.14);
+    --amber: #f59e0b;
+    --amber-soft: rgba(245, 158, 11, 0.14);
+    --red: #f43f5e;
+    --red-soft: rgba(244, 63, 94, 0.14);
+    --violet: #a78bfa;
+    --violet-soft: rgba(167, 139, 250, 0.14);
+    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 13px; line-height: 1.45; }
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .header {
+    position: sticky; top: 0; z-index: 20;
+    background: rgba(8, 12, 20, 0.92); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border); padding: 12px 20px;
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .logo {
+    width: 30px; height: 30px; border-radius: 8px;
+    background: linear-gradient(135deg, #0ea5e9, #6366f1);
+    display: grid; place-items: center; font-weight: 700; font-family: var(--mono); color: #fff; font-size: 13px;
+  }
+  .title-block h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+  .title-block .sub { font-size: 11px; color: var(--text-muted); display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 500; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-muted);
+  }
+  .pill.ok { color: var(--green); border-color: rgba(16,185,129,0.3); background: var(--green-soft); }
+  .pill.warn { color: var(--amber); border-color: rgba(245,158,11,0.3); background: var(--amber-soft); }
+  .pill.bad { color: var(--red); border-color: rgba(244,63,94,0.3); background: var(--red-soft); }
+  .pill.info { color: var(--accent); border-color: rgba(56,189,248,0.3); background: var(--accent-soft); }
+  .pill.violet { color: var(--violet); border-color: rgba(167,139,250,0.3); background: var(--violet-soft); }
+  select, input[type="text"], button {
+    background: var(--bg-card); color: var(--text); border: 1px solid var(--border-strong);
+    border-radius: 7px; padding: 6px 10px; font-size: 12px; font-family: inherit;
+  }
+  button { cursor: pointer; transition: background 0.15s; }
+  button:hover { background: var(--bg-hover); }
+  button.primary { background: rgba(56,189,248,0.16); border-color: rgba(56,189,248,0.45); color: #7dd3fc; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 20px; border-bottom: 1px solid var(--border); background: var(--bg-elev); }
+  .tab { padding: 6px 12px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: var(--text-muted); font-size: 12px; font-weight: 500; }
+  .tab:hover { color: var(--text); background: var(--bg-card); }
+  .tab.active { color: #fff; background: var(--bg-card); border-color: var(--border-strong); box-shadow: inset 0 -2px 0 var(--accent); }
+  .main { max-width: 1440px; margin: 0 auto; padding: 18px 20px 40px; }
+  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 18px; }
+  .kpi { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .kpi-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .kpi-val { font-size: 24px; font-weight: 700; margin: 6px 0 4px; font-family: var(--mono); letter-spacing: -0.02em; }
+  .kpi-sub { font-size: 11px; color: var(--text-dim); }
+  .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 14px; margin-bottom: 16px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; margin-bottom: 16px; }
+  .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 15px 16px; margin-bottom: 14px; }
+  .card-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 12px; }
+  .card-title { font-size: 13px; font-weight: 600; color: #f8fafc; margin: 0; }
+  .card-note { font-size: 11px; color: var(--text-dim); }
+  .banner { border: 1px solid rgba(245, 158, 11, 0.35); background: rgba(245, 158, 11, 0.08); border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 12px; color: #fde68a; }
+  .banner.info { border-color: rgba(56,189,248,0.35); background: rgba(56,189,248,0.08); color: #bae6fd; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--text-muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; background: rgba(15,22,35,0.6); }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+  .num { text-align: right; font-family: var(--mono); white-space: nowrap; }
+  .table-wrap { overflow-x: auto; }
+  .bar-row { display: grid; grid-template-columns: 155px 1fr 105px; align-items: center; gap: 10px; margin-bottom: 8px; font-size: 12px; }
+  .bar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+  .bar-track { height: 8px; border-radius: 999px; background: #0a0f1a; overflow: hidden; border: 1px solid var(--border); }
+  .bar-fill { height: 100%; border-radius: 999px; }
+  .bar-val { text-align: right; font-family: var(--mono); color: var(--text-muted); font-size: 11px; }
+  .qbar { height: 6px; width: 100%; min-width: 70px; background: #0a0f1a; border-radius: 999px; overflow: hidden; margin-top: 4px; }
+  .qbar > span { display: block; height: 100%; border-radius: 999px; }
+  .empty-box { padding: 14px; border: 1px dashed var(--border-strong); border-radius: 8px; color: var(--text-dim); font-size: 12px; text-align: center; }
+  .hidden { display: none; }
+  .bridge-log { font-family: var(--mono); font-size: 11px; background: #060910; border: 1px solid var(--border); border-radius: 8px; padding: 10px; max-height: 170px; overflow-y: auto; color: #94a3b8; }
+  @media (max-width: 640px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } .bar-row { grid-template-columns: 110px 1fr 80px; } }
+</style>
+<script>
+window.__mctlQueue = [];
+window.addEventListener("message", function (ev) {
+  if (typeof window.__mctlOnMessage === "function") window.__mctlOnMessage(ev);
+  else window.__mctlQueue.push(ev);
+});
+</script>
+</head>
+<body>
+<script id="mctl-snapshot" type="application/json">{"meta":{"uri":"ui://mctl-stats/view.html","mimeType":"text/html;profile=mcp-app","apiBase":"","user":"","admin":false,"teams":[],"namespaces":[],"dataAsOf":"встроенный пустой снимок","dataAsOfIso":"","live":false},"tenants":[],"services":[],"incidents":{"available":false,"active":[],"resolvedSummary":{"count":0,"by_severity":{},"by_type":{},"by_source":{},"by_tenant":{},"by_resolver":{},"daily":[],"recent":[]}},"usage":{"available":false,"totals":{"invocations":0,"success":0,"error":0,"interrupted":0,"calculated_cost":0,"provider_reported_cost":null,"invoice_reconciled_cost":null,"input_tokens":0,"output_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"web_search_requests":0},"byAgent":[],"byModel":[],"byStage":[],"byProvider":[],"byRepo":[]},"agents":{"available":false,"registry":[],"profiles":[],"releases":[],"executions":{"count":0,"by_agent":{},"by_repo":{},"by_phase":{},"oldest_cet":"","newest_cet":""},"ownership":{"count":0,"truncated":false,"as_of_cet":"","by_status":{"terminal":0,"released":0,"stuck":0},"stuck":[]},"skillsCount":0,"recentRuns":{"total":0,"succeeded":0,"failed":0}},"epics":[],"readyItems":[],"platform":{"operations":{"count":0,"by_risk":{},"by_scope":{}},"commerce":{"available":false},"domains":[],"syncWindows":{"available":false,"apps":null,"platform":null,"default":null},"signups":[],"events":{},"dataGaps":["Нет связи с MCP Apps host: показан пустой встроенный снимок. Кнопка «Обновить» запрашивает живые данные через клиент."]}}</script>
+<header class="header">
+  <div class="brand">
+    <div class="logo">MC</div>
+    <div class="title-block">
+      <h1>Консоль статистики платформы MCTL</h1>
+      <div class="sub">
+        <span class="mono">ui://mctl-stats/view.html</span><span>·</span>
+        <span id="hdr-user" class="mono"></span><span>·</span>
+        <span id="hdr-asof"></span>
+      </div>
+    </div>
+  </div>
+  <div class="controls">
+    <label for="team-filter" style="font-size:11px;color:var(--text-muted)">Команда:</label>
+    <select id="team-filter"></select>
+    <button id="btn-bridge-refresh" class="primary" title="Повторно вызвать mctl_stats_dashboard через MCP Apps host">↻ Обновить</button>
+  </div>
+</header>
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-tab="overview">Сводка</button>
+  <button class="tab" data-tab="services">Сервисы и квоты</button>
+  <button class="tab" data-tab="incidents">Инциденты</button>
+  <button class="tab" data-tab="usage">Модели и расходы</button>
+  <button class="tab" data-tab="agents">Агенты и DevLoop</button>
+  <button class="tab" data-tab="roadmap">Дорожная карта и каталоги</button>
+</nav>
+<main class="main">
+  <div id="kpi-row" class="kpi-grid"></div>
+  <section id="tab-overview" class="tab-panel">
+    <div id="overview-alert"></div>
+    <div class="grid-2">
+      <div class="card"><div class="card-head"><h2 class="card-title">Сервисы по командам и базам данных</h2><span class="card-note" id="note-services"></span></div><div id="chart-services-team"></div></div>
+      <div class="card"><div class="card-head"><h2 class="card-title">Закрытые инциденты по дням</h2><span class="card-note" id="note-incidents"></span></div><div id="chart-incidents-daily"></div></div>
+    </div>
+    <div class="grid-2">
+      <div class="card"><div class="card-head"><h2 class="card-title">Расчётная стоимость по моделям</h2><span class="card-note" id="note-cost"></span></div><div id="chart-cost-models"></div></div>
+      <div class="card"><div class="card-head"><h2 class="card-title">Прогресс эпиков дорожной карты</h2><span class="card-note" id="note-epics"></span></div><div id="chart-epics-overview"></div></div>
+    </div>
+    <div class="card"><div class="card-head"><h2 class="card-title">Использование квот по тенантам</h2><span class="card-note">CPU limits, RAM limits и Pods</span></div><div class="table-wrap" id="overview-quotas-table"></div></div>
+  </section>
+  <section id="tab-services" class="tab-panel hidden">
+    <div class="card"><div class="card-head"><h2 class="card-title">Тенанты и квоты Kubernetes</h2><span class="card-note">used / allocated</span></div><div class="table-wrap" id="tenants-table"></div></div>
+    <div class="card">
+      <div class="card-head"><h2 class="card-title">Каталог сервисов (<span id="svc-count-label">0</span>)</h2>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <input id="svc-search" type="text" placeholder="Поиск по имени, хосту, тегу...">
+          <select id="svc-db-filter"><option value="all">Все (БД: любые)</option><option value="yes">Только с БД</option><option value="no">Без БД</option></select>
+        </div>
+      </div>
+      <div class="table-wrap" id="services-table"></div>
+    </div>
+    <div class="grid-3">
+      <div class="card"><div class="card-head"><h2 class="card-title">Кастомные домены</h2><span class="card-note">GET /api/v1/domains</span></div><div id="domains-box"></div></div>
+      <div class="card"><div class="card-head"><h2 class="card-title">Ephemeral Previews</h2><span class="card-note">GET /api/v1/previews</span></div><div id="previews-box"></div></div>
+      <div class="card"><div class="card-head"><h2 class="card-title">Окна синхронизации ArgoCD</h2><span class="card-note">apps / platform / default</span></div><div id="sync-windows-box"></div></div>
+    </div>
+  </section>
+  <section id="tab-incidents" class="tab-panel hidden">
+    <div class="card"><div class="card-head"><h2 class="card-title">Активные инциденты (<span id="active-count-label">0</span>)</h2><span class="card-note">GET /api/v1/incidents</span></div><div class="table-wrap" id="active-incidents-table"></div></div>
+    <div class="grid-3">
+      <div class="card"><div class="card-head"><h2 class="card-title">Закрытые: по типу</h2></div><div id="inc-by-type"></div></div>
+      <div class="card"><div class="card-head"><h2 class="card-title">Закрытые: по источнику и severity</h2></div><div id="inc-by-source"></div></div>
+      <div class="card"><div class="card-head"><h2 class="card-title">Закрытые: по тенантам</h2></div><div id="inc-by-tenant"></div></div>
+    </div>
+    <div class="card"><div class="card-head"><h2 class="card-title">Последние закрытые инциденты</h2><span class="card-note" id="resolved-note"></span></div><div class="table-wrap" id="resolved-incidents-table"></div></div>
+  </section>
+  <section id="tab-usage" class="tab-panel hidden">
+    <div id="usage-banner"></div>
+    <div class="grid-2">
+      <div class="card"><div class="card-head"><h2 class="card-title">По агентам</h2></div><div class="table-wrap" id="usage-agents-table"></div></div>
+      <div class="card"><div class="card-head"><h2 class="card-title">По стадиям DevLoop и провайдерам</h2></div><div id="usage-stages-providers"></div></div>
+    </div>
+    <div class="grid-2">
+      <div class="card"><div class="card-head"><h2 class="card-title">По моделям</h2></div><div class="table-wrap" id="usage-models-table"></div></div>
+      <div class="card"><div class="card-head"><h2 class="card-title">По репозиториям</h2></div><div class="table-wrap" id="usage-repos-table"></div></div>
+    </div>
+  </section>
+  <section id="tab-agents" class="tab-panel hidden">
+    <div id="agents-banner"></div>
+    <div class="grid-2">
+      <div class="card"><div class="card-head"><h2 class="card-title">Исполнения агентов</h2><span class="card-note" id="execs-note"></span></div><div id="agent-execs-summary"></div></div>
+      <div class="card"><div class="card-head"><h2 class="card-title">Lifecycle ownership</h2><span class="card-note" id="own-note"></span></div><div id="ownership-summary"></div></div>
+    </div>
+    <div class="card"><div class="card-head"><h2 class="card-title">Зависшие и мёртвые владения</h2><span class="card-note" id="stuck-note"></span></div><div class="table-wrap" id="stuck-table"></div></div>
+    <div class="card"><div class="card-head"><h2 class="card-title">Реестр агентов, профили и релизы</h2></div><div class="table-wrap" id="agents-registry-table"></div></div>
+  </section>
+  <section id="tab-roadmap" class="tab-panel hidden">
+    <div class="card"><div class="card-head"><h2 class="card-title">Эпики дорожной карты</h2><span class="card-note" id="epics-note"></span></div><div class="table-wrap" id="epics-table"></div></div>
+    <div class="card"><div class="card-head"><h2 class="card-title">Готовые work items</h2></div><div class="table-wrap" id="ready-items-table"></div></div>
+    <div class="grid-2">
+      <div class="card"><div class="card-head"><h2 class="card-title">Каталоги платформы</h2></div><div id="commerce-box"></div></div>
+      <div class="card"><div class="card-head"><h2 class="card-title">Пробелы данных и журнал моста</h2></div><div id="gaps-box"></div><div style="margin-top:10px;font-size:11px;color:var(--text-muted);margin-bottom:4px;">Журнал MCP Apps:</div><div id="bridge-log" class="bridge-log"></div></div>
+    </div>
+  </section>
+</main>
+<script>
+(function () {
+  let DATA = JSON.parse(document.getElementById("mctl-snapshot").textContent);
+  let selectedTeam = "all";
+  const fmtInt = (n) => Number(n || 0).toLocaleString("ru-RU");
+  const fmtUsd = (n) => "$" + Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const fmtTokens = (n) => {
+    n = Number(n || 0);
+    if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
+    if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+    return String(n);
+  };
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const arr = (v) => Array.isArray(v) ? v : [];
+  const obj = (v) => (v && typeof v === "object" && !Array.isArray(v)) ? v : {};
+  const num = (v) => Number(v) || 0;
+  const inTeam = (team) => selectedTeam === "all" || team === selectedTeam;
+  const visibleTenants = () => arr(DATA.tenants).filter((t) => inTeam(t.name));
+  const visibleServices = () => arr(DATA.services).filter((s) => inTeam(s.team));
+
+  const teamSelect = document.getElementById("team-filter");
+  function rebuildTeams() {
+    const prev = selectedTeam;
+    teamSelect.innerHTML = "";
+    const all = document.createElement("option");
+    all.value = "all";
+    all.textContent = "Все команды (" + arr(DATA.tenants).length + ")";
+    teamSelect.appendChild(all);
+    arr(DATA.tenants).forEach((t) => {
+      const opt = document.createElement("option");
+      opt.value = t.name;
+      opt.textContent = t.name + (t.displayName && t.displayName !== t.name ? " (" + t.displayName + ")" : "");
+      teamSelect.appendChild(opt);
+    });
+    const prefer = (DATA.meta && DATA.meta.filterTeam) || prev;
+    if ([...teamSelect.options].some((o) => o.value === prefer)) {
+      teamSelect.value = prefer;
+      selectedTeam = prefer;
+    } else {
+      teamSelect.value = "all";
+      selectedTeam = "all";
+    }
+  }
+
+  document.getElementById("tabs").addEventListener("click", (e) => {
+    const btn = e.target.closest(".tab");
+    if (!btn) return;
+    document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    document.querySelectorAll(".tab-panel").forEach((p) => p.classList.add("hidden"));
+    document.getElementById("tab-" + btn.dataset.tab).classList.remove("hidden");
+  });
+  teamSelect.addEventListener("change", () => { selectedTeam = teamSelect.value; renderAll(); });
+  document.getElementById("svc-search").addEventListener("input", renderServicesTab);
+  document.getElementById("svc-db-filter").addEventListener("change", renderServicesTab);
+
+  function pill(text, kind) {
+    return `<span class="pill ${kind || ""}">${esc(text)}</span>`;
+  }
+  function syncPill(status) {
+    const s = status || "Unknown";
+    const kind = s === "Synced" ? "ok" : s === "OutOfSync" ? "warn" : s === "Unknown" ? "" : "bad";
+    return pill(s, kind);
+  }
+  function healthPill(health) {
+    if (!health) return `<span style="color:var(--text-dim)">—</span>`;
+    const kind = health === "Healthy" ? "ok" : health === "Progressing" ? "warn" : health === "Degraded" || health === "Missing" ? "bad" : "info";
+    return pill(health, kind);
+  }
+  function barList(items, colorFn) {
+    if (!items.length) return `<div class="empty-box">Нет данных.</div>`;
+    const max = Math.max(1, ...items.map((i) => num(i.value)));
+    return items.map((i, idx) => {
+      const pct = Math.round((num(i.value) / max) * 100);
+      const col = colorFn ? colorFn(i, idx) : "#38bdf8";
+      return `<div class="bar-row"><div class="bar-label" title="${esc(i.label)}">${esc(i.label)}</div><div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${col}"></div></div><div class="bar-val">${esc(i.display)}</div></div>`;
+    }).join("");
+  }
+  function pairs(map, limit) {
+    return Object.entries(obj(map))
+      .map(([k, v]) => ({ label: k, value: num(v), display: fmtInt(v) }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, limit || 12);
+  }
+  function quotaPct(used, alloc) {
+    const a = num(alloc);
+    if (!a) return 0;
+    return Math.max(0, Math.round((num(used) / a) * 100));
+  }
+  function qColor(p) { return p >= 80 ? "#f43f5e" : p >= 50 ? "#f59e0b" : "#10b981"; }
+
+  function renderHeader() {
+    const meta = obj(DATA.meta);
+    const who = meta.user ? meta.user + (meta.admin ? " · администратор" : "") : "не авторизован";
+    document.getElementById("hdr-user").textContent = who;
+    document.getElementById("hdr-asof").textContent = meta.live ? ("Срез: " + (meta.dataAsOf || "")) : "Встроенный снимок, не live";
+  }
+
+  function renderKPIs() {
+    const svcs = visibleServices();
+    const synced = svcs.filter((s) => s.syncStatus === "Synced").length;
+    const dbCount = svcs.filter((s) => s.hasDatabase).length;
+    const tens = visibleTenants();
+    const sumQ = (key) => tens.reduce((a, t) => a + num((t.quota || {})[key]), 0);
+    const podsU = sumQ("pods_u"), podsA = sumQ("pods_a");
+    const cpuU = sumQ("cpu_lim_u"), cpuA = sumQ("cpu_lim_a");
+    const memU = sumQ("mem_lim_u"), memA = sumQ("mem_lim_a");
+    const inc = obj(DATA.incidents);
+    const active = arr(inc.active).filter((i) => inTeam(i.tenant));
+    const resolvedN = num(obj(inc.resolvedSummary).count);
+    const usage = obj(DATA.usage);
+    const totals = obj(usage.totals);
+    const agents = obj(DATA.agents);
+    const ex = obj(agents.executions);
+    const own = obj(agents.ownership);
+    const epics = arr(DATA.epics);
+    const done = epics.reduce((a, e) => a + num(e.complete), 0);
+    const totalEp = epics.reduce((a, e) => a + num(e.total), 0);
+    const ready = epics.reduce((a, e) => a + num(e.ready), 0);
+    const tokens = num(totals.input_tokens) + num(totals.output_tokens) + num(totals.cache_read_tokens) + num(totals.cache_write_tokens);
+    const incVal = inc.available === false ? "—" : fmtInt(active.length);
+    const incSub = inc.available === false ? "недоступно" : (fmtInt(resolvedN) + " закрыто в выборке");
+    const costVal = usage.available ? fmtUsd(totals.calculated_cost) : "—";
+    const costSub = usage.available ? (fmtInt(totals.invocations) + " вызовов · " + fmtTokens(tokens) + " токенов") : "недоступно";
+    const agVal = agents.available ? (fmtInt(ex.count) + " / " + fmtInt(num(obj(own.by_status).stuck))) : "—";
+    const agSub = agents.available ? ("исполнений · зависших ownership") : "недоступно";
+    const roadVal = epics.length ? (fmtInt(done) + " / " + fmtInt(totalEp)) : "—";
+    const roadSub = epics.length ? (epics.length + " эпиков · " + fmtInt(ready) + " готово") : "нет в API";
+    const cards = [
+      { label: "Сервисы в каталоге", val: fmtInt(svcs.length), sub: synced + " Synced · " + dbCount + " с БД" },
+      { label: "Поды / CPU limits", val: fmtInt(podsU) + " / " + fmtInt(podsA), sub: "CPU " + cpuU.toFixed(2) + "/" + cpuA.toFixed(1) + " · RAM " + (memU / 1024).toFixed(2) + "/" + (memA / 1024).toFixed(1) + " GiB" },
+      { label: "Активные инциденты", val: incVal, sub: incSub },
+      { label: "Модели (оценка)", val: costVal, sub: costSub },
+      { label: "Агенты / зависшие", val: agVal, sub: agSub },
+      { label: "Дорожная карта", val: roadVal, sub: roadSub }
+    ];
+    document.getElementById("kpi-row").innerHTML = cards.map((c) => `<div class="kpi"><div class="kpi-label">${esc(c.label)}</div><div class="kpi-val">${esc(c.val)}</div><div class="kpi-sub">${esc(c.sub)}</div></div>`).join("");
+  }
+
+  function renderOverview() {
+    const meta = obj(DATA.meta);
+    const active = arr(obj(DATA.incidents).active).filter((i) => inTeam(i.tenant));
+    const stuck = arr(obj(obj(DATA.agents).ownership).stuck);
+    const bits = [];
+    if (!meta.live) bits.push("Показан встроенный пустой снимок. Откройте панель из инструмента или нажмите «Обновить».");
+    if (meta.filterTeam) bits.push("Серверный фильтр команды: " + meta.filterTeam + ". «Все команды» показывает только уже загруженный срез; чтобы расширить его, выберите «Все команды» и нажмите «Обновить».");
+    if (meta.filterNamespace) bits.push("Серверный фильтр namespace: " + meta.filterNamespace + ".");
+    if (active.length) bits.push("Активных инцидентов: " + active.length + " (" + active.slice(0, 3).map((i) => (i.tenant || "") + "/" + (i.service || "")).join(", ") + ").");
+    if (stuck.length) bits.push("Требуют внимания DevLoop: " + stuck.length + " (" + stuck.slice(0, 3).map((s) => s.entity_id).join(", ") + ").");
+    const klass = (!meta.live || active.length || stuck.length) ? "banner" : "banner info";
+    const text = bits.length ? bits.join(" ") : "Активных инцидентов и зависших DevLoop в этом срезе нет.";
+    document.getElementById("overview-alert").innerHTML = `<div class="${klass}">${esc(text)}</div>`;
+
+    const counts = {};
+    visibleTenants().forEach((t) => { counts[t.name] = { total: 0, db: 0 }; });
+    visibleServices().forEach((s) => {
+      if (!counts[s.team]) counts[s.team] = { total: 0, db: 0 };
+      counts[s.team].total += 1;
+      if (s.hasDatabase) counts[s.team].db += 1;
+    });
+    const svcItems = Object.entries(counts).sort((a, b) => b[1].total - a[1].total).map(([k, v]) => ({ label: k, value: v.total, display: v.total + " (" + v.db + " БД)" }));
+    document.getElementById("note-services").textContent = visibleServices().length + " в срезе";
+    document.getElementById("chart-services-team").innerHTML = barList(svcItems, (i) => i.label === selectedTeam ? "#f59e0b" : "#38bdf8");
+
+    const daily = arr(obj(obj(DATA.incidents).resolvedSummary).daily);
+    document.getElementById("note-incidents").textContent = daily.length ? (daily.length + " дней с событиями") : "нет выборки";
+    document.getElementById("chart-incidents-daily").innerHTML = renderDaily(daily);
+
+    const usage = obj(DATA.usage);
+    const models = usage.available ? arr(usage.byModel).slice(0, 6) : [];
+    document.getElementById("note-cost").textContent = usage.available ? (fmtUsd(obj(usage.totals).calculated_cost) + " · каталог calculated_cost") : "недоступно";
+    document.getElementById("chart-cost-models").innerHTML = usage.available
+      ? barList(models.map((m) => ({ label: m.key, value: num(m.cost), display: fmtUsd(m.cost) + " (" + fmtInt(m.count) + ")" })), (_, i) => ["#a78bfa", "#818cf8", "#38bdf8", "#0ea5e9", "#10b981", "#64748b"][i % 6])
+      : `<div class="empty-box">Журнал моделей недоступен для этой учётной записи.</div>`;
+
+    const epics = arr(DATA.epics);
+    document.getElementById("note-epics").textContent = epics.length ? (epics.length + " эпиков") : "API не отдаёт дорожную карту";
+    document.getElementById("chart-epics-overview").innerHTML = epics.length
+      ? barList(epics.map((e) => {
+          const pct = num(e.total) ? Math.round((num(e.complete) / num(e.total)) * 100) : 0;
+          return { label: e.name, value: pct, display: num(e.complete) + "/" + num(e.total) + " (" + pct + "%)" };
+        }), () => "#10b981")
+      : `<div class="empty-box">Эпики и готовые work items этим сервером не публикуются.</div>`;
+    renderQuotasTable("overview-quotas-table");
+  }
+
+  function renderDaily(daily) {
+    if (!daily.length) return `<div class="empty-box">В выборке нет закрытых инцидентов.</div>`;
+    const maxD = Math.max(1, ...daily.map((d) => num(d[1])));
+    const w = 520, h = 155, padL = 28, padB = 24, padT = 10, padR = 10;
+    const bw = (w - padL - padR) / daily.length;
+    let svg = `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto;display:block">`;
+    [0, Math.ceil(maxD / 2), maxD].forEach((tick) => {
+      const y = h - padB - (tick / maxD) * (h - padB - padT);
+      svg += `<line x1="${padL}" y1="${y}" x2="${w - padR}" y2="${y}" stroke="#1e293b" stroke-dasharray="2,2"/>`;
+      svg += `<text x="${padL - 5}" y="${y + 4}" text-anchor="end" fill="#64748b" font-size="10" font-family="monospace">${tick}</text>`;
+    });
+    daily.forEach((pair, idx) => {
+      const day = String(pair[0] || "");
+      const cnt = num(pair[1]);
+      const bh = (cnt / maxD) * (h - padB - padT);
+      const x = padL + idx * bw + 3;
+      const y = h - padB - bh;
+      const col = cnt >= 10 ? "#f43f5e" : "#38bdf8";
+      svg += `<rect x="${x}" y="${y}" width="${Math.max(6, bw - 6)}" height="${Math.max(bh, 0)}" rx="3" fill="${col}"><title>${esc(day)}: ${cnt}</title></rect>`;
+      if (idx === 0 || idx === daily.length - 1 || idx % 4 === 0) {
+        svg += `<text x="${x + (bw - 6) / 2}" y="${h - 7}" text-anchor="middle" fill="#64748b" font-size="9" font-family="monospace">${esc(day.slice(5))}</text>`;
+      }
+    });
+    svg += `</svg>`;
+    return svg;
+  }
+
+  function renderQuotasTable(targetId) {
+    const tens = visibleTenants();
+    if (!tens.length) {
+      document.getElementById(targetId).innerHTML = `<div class="empty-box">Нет тенантов в этом срезе.</div>`;
+      return;
+    }
+    const rows = tens.map((t) => {
+      const q = obj(t.quota);
+      const cpu = quotaPct(q.cpu_lim_u, q.cpu_lim_a);
+      const mem = quotaPct(q.mem_lim_u, q.mem_lim_a);
+      const pod = quotaPct(q.pods_u, q.pods_a);
+      const eg = obj(t.egress);
+      return `<tr>
+        <td><strong>${esc(t.name)}</strong><div style="font-size:11px;color:var(--text-dim)">${esc(t.roles || "")}</div></td>
+        <td><span class="mono">${num(q.cpu_lim_u)} / ${num(q.cpu_lim_a)}</span> <span style="color:var(--text-dim)">(${cpu}%)</span><div class="qbar"><span style="width:${Math.min(cpu, 100)}%;background:${qColor(cpu)}"></span></div></td>
+        <td><span class="mono">${num(q.mem_lim_u)} / ${num(q.mem_lim_a)} Mi</span> <span style="color:var(--text-dim)">(${mem}%)</span><div class="qbar"><span style="width:${Math.min(mem, 100)}%;background:${qColor(mem)}"></span></div></td>
+        <td><span class="mono">${num(q.pods_u)} / ${num(q.pods_a)}</span> <span style="color:var(--text-dim)">(${pod}%)</span><div class="qbar"><span style="width:${Math.min(pod, 100)}%;background:${qColor(pod)}"></span></div></td>
+        <td class="num">${num(q.svc_u)} / ${num(q.svc_a)}</td>
+        <td>${eg.internet ? '<span class="pill warn">Internet</span>' : '<span class="pill ok">Restricted</span>'}</td>
+      </tr>`;
+    }).join("");
+    document.getElementById(targetId).innerHTML = `<table><thead><tr><th>Тенант</th><th>CPU limits</th><th>RAM limits</th><th>Pods</th><th class="num">Services</th><th>Egress</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+
+  function renderServicesTab() {
+    renderQuotasTable("tenants-table");
+    const q = document.getElementById("svc-search").value.trim().toLowerCase();
+    const dbf = document.getElementById("svc-db-filter").value;
+    const filtered = visibleServices().filter((s) => {
+      if (dbf === "yes" && !s.hasDatabase) return false;
+      if (dbf === "no" && s.hasDatabase) return false;
+      const hosts = arr(s.hosts).join(" ");
+      if (q && !(s.team + " " + s.name + " " + (s.imageTag || "") + " " + hosts).toLowerCase().includes(q)) return false;
+      return true;
+    });
+    document.getElementById("svc-count-label").textContent = filtered.length;
+    document.getElementById("services-table").innerHTML = filtered.length ? `<table><thead><tr><th>Команда</th><th>Сервис</th><th>Image tag</th><th>Sync</th><th>Health</th><th>БД</th><th>Хосты</th></tr></thead><tbody>${filtered.map((s) => `<tr><td>${pill(s.team)}</td><td><strong>${esc(s.name)}</strong><div class="mono" style="font-size:11px;color:var(--text-dim)">${esc(s.argoApp || "")}</div></td><td class="mono">${esc(s.imageTag || "—")}</td><td>${syncPill(s.syncStatus)}</td><td>${healthPill(s.health)}</td><td>${s.hasDatabase ? pill("PostgreSQL", "info") : '<span style="color:var(--text-dim)">—</span>'}</td><td class="mono" style="font-size:11px">${arr(s.hosts).length ? esc(arr(s.hosts).join(", ")) : '<span style="color:var(--text-dim)">internal</span>'}</td></tr>`).join("")}</tbody></table>` : `<div class="empty-box">Нет сервисов по выбранным фильтрам.</div>`;
+
+    const domains = arr(obj(DATA.platform).domains).filter((d) => inTeam(d.team));
+    document.getElementById("domains-box").innerHTML = domains.length ? domains.map((d) => `<div style="font-size:12px;margin-bottom:8px"><div><strong>${esc(d.domain)}</strong> ${pill(d.status || "—", d.status === "active" ? "ok" : "warn")}</div><div class="mono" style="font-size:11px;color:var(--text-muted);margin-top:4px">${esc(d.team)}/${esc(d.service)} → ${esc(d.cnameTarget || "")}</div><div style="font-size:11px;color:var(--text-dim);margin-top:2px">${d.verifiedCet ? "Проверен: " + esc(d.verifiedCet) : "Ещё не подтверждён"}</div></div>`).join("") : `<div class="empty-box">Нет кастомных доменов.</div>`;
+
+    const tens = visibleTenants();
+    let previewSum = 0, previewUnknown = 0;
+    tens.forEach((t) => { if (t.previews == null) previewUnknown++; else previewSum += num(t.previews); });
+    document.getElementById("previews-box").innerHTML = `<div style="font-size:12px"><div>Активных превью: <strong class="mono">${fmtInt(previewSum)}</strong></div><div style="font-size:11px;color:var(--text-muted);margin-top:4px">${previewUnknown ? "Не удалось прочитать превью у " + previewUnknown + " команд." : "Сумма по командам этого среза."}</div></div>`;
+
+    const sw = obj(obj(DATA.platform).syncWindows);
+    document.getElementById("sync-windows-box").innerHTML = sw.available
+      ? `<div style="font-size:12px">apps ${esc(sw.apps)} · platform ${esc(sw.platform)} · default ${esc(sw.default)}</div>`
+      : `<div class="empty-box">API не публикует sync windows. Ноль здесь не измерен.</div>`;
+  }
+
+  function renderIncidentsTab() {
+    const inc = obj(DATA.incidents);
+    const act = arr(inc.active).filter((i) => inTeam(i.tenant));
+    document.getElementById("active-count-label").textContent = inc.available === false ? "—" : String(act.length);
+    document.getElementById("active-incidents-table").innerHTML = inc.available === false
+      ? `<div class="empty-box">Список инцидентов недоступен.</div>`
+      : (act.length ? `<table><thead><tr><th>ID / время</th><th>Тенант / сервис</th><th>Severity</th><th>Статус</th><th>Сводка</th></tr></thead><tbody>${act.map((i) => `<tr><td class="mono" style="font-size:11px">${esc(String(i.id || "").slice(0, 8))}<br>${esc(i.created_cet || "")}</td><td><strong>${esc(i.tenant)}</strong> / ${esc(i.service)}</td><td>${pill(i.severity || "—", i.severity === "critical" ? "bad" : "warn")}</td><td>${pill(i.status || "—", "info")}</td><td><div>${esc(i.summary)}</div>${i.analysis ? `<div style="font-size:11px;color:var(--text-muted);margin-top:3px">${esc(i.analysis)}</div>` : ""}${i.liveArgoNote ? `<div style="font-size:11px;color:var(--green);margin-top:3px">${esc(i.liveArgoNote)}</div>` : ""}</td></tr>`).join("")}</tbody></table>` : `<div class="empty-box">Активных инцидентов нет.</div>`);
+
+    const rs = obj(inc.resolvedSummary);
+    document.getElementById("inc-by-type").innerHTML = barList(pairs(rs.by_type), () => "#38bdf8");
+    const srcItems = [
+      ...pairs(rs.by_source).map((i) => ({ ...i, label: "source: " + i.label })),
+      ...pairs(rs.by_severity).map((i) => ({ ...i, label: "sev: " + i.label }))
+    ];
+    document.getElementById("inc-by-source").innerHTML = barList(srcItems, (i) => i.label.indexOf("critical") >= 0 ? "#f43f5e" : "#a78bfa");
+    document.getElementById("inc-by-tenant").innerHTML = barList(pairs(rs.by_tenant, 8), () => "#10b981");
+
+    const rec = arr(rs.recent).filter((i) => inTeam(i.tenant));
+    document.getElementById("resolved-note").textContent = "в выборке " + fmtInt(rs.count || 0);
+    document.getElementById("resolved-incidents-table").innerHTML = rec.length ? `<table><thead><tr><th>Создан</th><th>Тенант</th><th>Сервис</th><th>Тип</th><th>Severity</th><th>Сводка</th><th>Закрыл</th></tr></thead><tbody>${rec.map((i) => `<tr><td class="mono" style="font-size:11px">${esc(i.created_cet || "")}</td><td>${pill(i.tenant)}</td><td class="mono" style="font-size:11px">${esc(i.service)}</td><td class="mono" style="font-size:11px">${esc(i.type)}</td><td>${pill(i.severity || "—", i.severity === "critical" ? "bad" : "warn")}</td><td>${esc(i.summary)}</td><td class="mono" style="font-size:11px">${esc(i.resolved_by || "—")}</td></tr>`).join("")}</tbody></table>` : `<div class="empty-box">В последних закрытых инцидентах записей для фильтра нет.</div>`;
+  }
+
+  function renderUsageTab() {
+    const usage = obj(DATA.usage);
+    const totals = obj(usage.totals);
+    const banner = document.getElementById("usage-banner");
+    if (!usage.available) {
+      banner.innerHTML = `<div class="banner info">Журнал расходов на модели для этой учётной записи недоступен. Запрос не тратит бюджет модели: инструмент только читает уже записанные итоги, и только администратор платформы их видит.</div>`;
+    } else {
+      const calls = num(totals.invocations);
+      const errPct = calls ? ((num(totals.error) / calls) * 100).toFixed(2) : "0.00";
+      banner.innerHTML = `<div class="banner info"><strong>calculated_cost:</strong> <span class="mono">${fmtUsd(totals.calculated_cost)}</span> по каталогу цен. provider_reported_cost: <span class="mono">${totals.provider_reported_cost == null ? "null" : fmtUsd(totals.provider_reported_cost)}</span>, invoice_reconciled_cost: <span class="mono">${totals.invoice_reconciled_cost == null ? "null" : fmtUsd(totals.invoice_reconciled_cost)}</span>. Успешных: <strong>${fmtInt(totals.success)}</strong>, ошибок: <strong>${fmtInt(totals.error)}</strong> (${errPct}%), прервано: <strong>${fmtInt(totals.interrupted)}</strong>.</div>`;
+    }
+    const agents = arr(usage.byAgent);
+    document.getElementById("usage-agents-table").innerHTML = agents.length ? `<table><thead><tr><th>Агент</th><th class="num">Вызовы</th><th class="num">Output</th><th class="num">Cache read</th><th class="num">Оценка USD</th></tr></thead><tbody>${agents.map((a) => `<tr><td><strong>${esc(a.key)}</strong></td><td class="num">${fmtInt(a.count)}</td><td class="num">${fmtTokens(a.output)}</td><td class="num">${fmtTokens(a.cache_read)}</td><td class="num"><strong>${fmtUsd(a.cost)}</strong></td></tr>`).join("")}</tbody></table>` : `<div class="empty-box">Нет разбивки по агентам.</div>`;
+    document.getElementById("usage-stages-providers").innerHTML = `<div style="margin-bottom:14px"><div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">ПО СТАДИЯМ</div>${barList(arr(usage.byStage).map((s) => ({ label: s.key, value: num(s.cost), display: fmtUsd(s.cost) + " (" + fmtInt(s.count) + ")" })), () => "#38bdf8")}</div><div><div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">ПО ПРОВАЙДЕРАМ</div>${barList(arr(usage.byProvider).map((p) => ({ label: p.key, value: num(p.count), display: fmtInt(p.count) + " (" + fmtUsd(p.cost) + ")" })), () => "#10b981")}</div>`;
+    const models = arr(usage.byModel);
+    document.getElementById("usage-models-table").innerHTML = models.length ? `<table><thead><tr><th>Модель</th><th class="num">Вызовы</th><th class="num">Input</th><th class="num">Output</th><th class="num">Оценка USD</th></tr></thead><tbody>${models.map((m) => `<tr><td class="mono" style="font-size:11px">${esc(m.key)}</td><td class="num">${fmtInt(m.count)}</td><td class="num">${fmtTokens(m.input)}</td><td class="num">${fmtTokens(m.output)}</td><td class="num">${fmtUsd(m.cost)}</td></tr>`).join("")}</tbody></table>` : `<div class="empty-box">Нет разбивки по моделям.</div>`;
+    const repos = arr(usage.byRepo);
+    document.getElementById("usage-repos-table").innerHTML = repos.length ? `<table><thead><tr><th>Репозиторий</th><th class="num">Вызовы</th><th class="num">Output</th><th class="num">Оценка USD</th></tr></thead><tbody>${repos.map((r) => `<tr><td class="mono" style="font-size:11px">${esc(r.key)}</td><td class="num">${fmtInt(r.count)}</td><td class="num">${fmtTokens(r.output)}</td><td class="num">${fmtUsd(r.cost)}</td></tr>`).join("")}</tbody></table>` : `<div class="empty-box">Нет разбивки по репозиториям.</div>`;
+  }
+
+  function renderAgentsTab() {
+    const agents = obj(DATA.agents);
+    const banner = document.getElementById("agents-banner");
+    banner.innerHTML = agents.available ? "" : `<div class="banner info">Реестр агентов, исполнения и DevLoop ownership доступны только администраторам платформы. Навыков, видимых вам: <strong>${fmtInt(agents.skillsCount)}</strong>.</div>`;
+    const ex = obj(agents.executions);
+    document.getElementById("execs-note").textContent = ex.oldest_cet || ex.newest_cet ? ((ex.oldest_cet || "—") + " — " + (ex.newest_cet || "—")) : "";
+    document.getElementById("agent-execs-summary").innerHTML = agents.available ? `${barList(pairs(ex.by_agent), () => "#38bdf8")}<div style="font-size:11px;color:var(--text-muted);margin:10px 0 6px">ПО РЕПОЗИТОРИЯМ</div>${barList(pairs(ex.by_repo), () => "#a78bfa")}<div style="font-size:11px;color:var(--text-muted);margin:10px 0 6px">ПО ФАЗАМ</div>${barList(pairs(ex.by_phase), () => "#10b981")}` : `<div class="empty-box">Нет данных об исполнениях.</div>`;
+    const own = obj(agents.ownership);
+    document.getElementById("own-note").textContent = own.as_of_cet ? ("срез " + own.as_of_cet + (own.truncated ? " · выборка обрезана" : "")) : "";
+    const statusItems = pairs(own.by_status).map((i) => ({ ...i, display: String(i.value) }));
+    document.getElementById("ownership-summary").innerHTML = agents.available ? barList(statusItems, (i) => (i.label === "stuck" || i.label === "dead" || i.label === "handoff-stalled") ? "#f43f5e" : i.label === "released" ? "#f59e0b" : "#10b981") + `<div style="font-size:11px;color:var(--text-muted);margin-top:10px">Последние запуски: <strong>${fmtInt(obj(agents.recentRuns).succeeded)} succeeded</strong>, <strong>${fmtInt(obj(agents.recentRuns).failed)} failed</strong> из ${fmtInt(obj(agents.recentRuns).total)}. Навыков платформы: <strong>${fmtInt(agents.skillsCount)}</strong>.</div>` : `<div class="empty-box">Ownership недоступен.</div>`;
+    const stuck = arr(own.stuck);
+    document.getElementById("stuck-note").textContent = stuck.length ? (stuck.length + " записей") : "нет";
+    document.getElementById("stuck-table").innerHTML = stuck.length ? `<table><thead><tr><th>Сущность</th><th>Фаза</th><th>Workflow / владелец</th><th>Proposal</th><th>Без прогресса</th><th>Last seen</th></tr></thead><tbody>${stuck.map((s) => `<tr><td class="mono">${esc(s.entity_id)}</td><td>${pill(s.phase || "—", "info")} ${pill(s.status || "", "bad")}</td><td class="mono" style="font-size:11px">${esc(s.workflow_id)}</td><td class="mono" style="font-size:11px">${esc(s.proposal_ref || "—")}</td><td>${pill((s.hours_since_progress ?? "—") + " ч", "bad")}</td><td class="mono" style="font-size:11px">${esc(s.last_seen_cet || "")}</td></tr>`).join("")}</tbody></table>` : `<div class="empty-box">Зависших владений нет.</div>`;
+
+    const profMap = {}, relMap = {};
+    arr(agents.profiles).forEach((p) => { profMap[p.name] = p; });
+    arr(agents.releases).forEach((r) => {
+      if (!relMap[r.agent] || r.environment === "shadow") relMap[r.agent] = r;
+    });
+    const regs = arr(agents.registry);
+    document.getElementById("agents-registry-table").innerHTML = regs.length ? `<table><thead><tr><th>Агент</th><th>Owner</th><th class="num">Версии</th><th>Релиз / профиль</th><th>Бюджет / timeout</th><th>Gates</th></tr></thead><tbody>${regs.map((a) => {
+      const rel = relMap[a.name], prof = rel ? profMap[rel.profileName] : null;
+      const versions = [a.v1 ? a.v1 + " v1" : "", a.v1alpha2 ? a.v1alpha2 + " v1α2" : ""].filter(Boolean).join(" · ") || "—";
+      const budget = prof && prof.budgetUsd != null ? "$" + prof.budgetUsd : "—";
+      const timeout = prof && prof.timeoutSeconds ? prof.timeoutSeconds + " с" : "—";
+      const gates = prof && arr(prof.approvalGates).length ? arr(prof.approvalGates).map((g) => pill(g, "warn")).join(" ") : '<span style="color:var(--text-dim)">—</span>';
+      return `<tr><td><strong>${esc(a.name)}</strong></td><td class="mono" style="font-size:11px">${esc(a.owner)}</td><td class="num">${esc(versions)}</td><td class="mono" style="font-size:11px">${rel ? esc(rel.environment) + " · " + esc(rel.profileName) + "@" + esc(rel.profileVersion) : '<span style="color:var(--text-dim)">нет</span>'}</td><td class="mono" style="font-size:11px">${esc(budget)} / ${esc(timeout)}</td><td>${gates}</td></tr>`;
+    }).join("")}</tbody></table>` : `<div class="empty-box">Реестр пуст или недоступен.</div>`;
+  }
+
+  function renderRoadmapTab() {
+    const epics = arr(DATA.epics);
+    const done = epics.reduce((a, e) => a + num(e.complete), 0);
+    const ready = epics.reduce((a, e) => a + num(e.ready), 0);
+    const blocked = epics.reduce((a, e) => a + num(e.blocked), 0);
+    document.getElementById("epics-note").textContent = epics.length ? ("завершено " + done + " · готово " + ready + " · блок " + blocked) : "не публикуется";
+    document.getElementById("epics-table").innerHTML = epics.length ? `<table><thead><tr><th>Эпик</th><th>Прогресс</th><th class="num">Complete</th><th class="num">Ready</th><th class="num">Blocked</th><th class="num">Unknown</th><th class="num">Drift</th></tr></thead><tbody>${epics.map((e) => {
+      const pct = num(e.total) ? Math.round((num(e.complete) / num(e.total)) * 100) : 0;
+      return `<tr><td><strong>${esc(e.name)}</strong><div style="font-size:11px;color:var(--text-dim)">${esc(e.title || "")}</div></td><td style="min-width:120px"><span class="mono">${pct}%</span><div class="qbar"><span style="width:${pct}%;background:#10b981"></span></div></td><td class="num">${num(e.complete)}</td><td class="num">${num(e.ready)}</td><td class="num">${num(e.blocked)}</td><td class="num">${num(e.unknown)}</td><td class="num">${pill(String(num(e.drift)), "warn")}</td></tr>`;
+    }).join("")}</tbody></table>` : `<div class="empty-box">Дорожная карта в API этого сервера отсутствует.</div>`;
+    const readyItems = arr(DATA.readyItems);
+    document.getElementById("ready-items-table").innerHTML = readyItems.length ? `<table><thead><tr><th>Эпик</th><th>Work item</th><th>Issue</th><th>Фаза</th><th>Приоритет</th></tr></thead><tbody>${readyItems.map((w) => `<tr><td class="mono" style="font-size:11px">${esc(w.epic)}</td><td><strong>${esc(w.id)}</strong></td><td class="mono" style="font-size:11px">${esc(w.repo)}</td><td>${pill(w.phase || "—", "info")}</td><td>${w.required ? pill("required", "warn") : pill("optional")}</td></tr>`).join("")}</tbody></table>` : `<div class="empty-box">Готовых work items нет.</div>`;
+
+    const platform = obj(DATA.platform);
+    const ops = obj(platform.operations);
+    const cm = obj(platform.commerce);
+    const risk = Object.entries(obj(ops.by_risk)).map(([k, v]) => k + ": " + v).join(", ") || "—";
+    const scope = Object.entries(obj(ops.by_scope)).map(([k, v]) => k + ": " + v).join(", ") || "—";
+    const commerce = cm.available
+      ? `<div style="font-size:12px;margin-bottom:8px">${esc(cm.tenant || "")} · ${esc(cm.period || "")} · ${esc(cm.fundsMode || "")}</div>`
+      : `<div class="empty-box">Agent Commerce этим API не публикуется.</div>`;
+    document.getElementById("commerce-box").innerHTML = commerce + `<div style="font-size:12px;margin-top:8px">Операции каталога: <strong>${fmtInt(ops.count)}</strong> <span style="color:var(--text-dim)">(${esc(risk)}; ${esc(scope)})</span>. Заявок: <strong>${fmtInt(arr(platform.signups).length)}</strong>.</div>`;
+    const gaps = arr(platform.dataGaps);
+    document.getElementById("gaps-box").innerHTML = gaps.length ? `<ul style="margin:0;padding-left:18px;font-size:12px;color:var(--text-muted)">${gaps.map((g) => `<li style="margin-bottom:4px">${esc(g)}</li>`).join("")}</ul>` : `<div class="empty-box">Пробелов нет.</div>`;
+  }
+
+  function renderAll() {
+    renderHeader();
+    renderKPIs();
+    renderOverview();
+    renderServicesTab();
+    renderIncidentsTab();
+    renderUsageTab();
+    renderAgentsTab();
+    renderRoadmapTab();
+  }
+
+  const logEl = document.getElementById("bridge-log");
+  function logBridge(msg) {
+    const line = document.createElement("div");
+    line.textContent = "[" + new Date().toLocaleTimeString("ru-RU") + "] " + msg;
+    logEl.prepend(line);
+  }
+
+  function extractStructured(msg) {
+    if (!msg || typeof msg !== "object") return null;
+    const params = obj(msg.params);
+    const result = obj(msg.result);
+    const nested = obj(params.result);
+    const fromResult = obj(result.result);
+    return params.structuredContent || nested.structuredContent || result.structuredContent || fromResult.structuredContent || null;
+  }
+  function applySnapshot(next) {
+    if (typeof next === "string") {
+      try { next = JSON.parse(next); } catch (e) { logBridge("structuredContent не разобран"); return; }
+    }
+    if (!next || typeof next !== "object" || Array.isArray(next)) return;
+    DATA = next;
+    rebuildTeams();
+    renderAll();
+    logBridge("Срез обновлён из tool result");
+  }
+  function onMessage(ev) {
+    const msg = ev && ev.data;
+    if (!msg || typeof msg !== "object" || msg.jsonrpc !== "2.0") return;
+    if (msg.method === "ui/initialize" && Object.prototype.hasOwnProperty.call(msg, "id")) {
+      postToHost({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: {
+          protocolVersion: "2025-06-18",
+          appInfo: { name: "mctl-stats-app", version: "1.0.0" },
+          appCapabilities: {}
+        }
+      });
+      logBridge("ответ на ui/initialize");
+      return;
+    }
+    const payload = extractStructured(msg);
+    if (payload && (msg.method === "ui/notifications/tool-result" || msg.result)) {
+      applySnapshot(payload);
+      return;
+    }
+    if (msg.method) logBridge("← " + msg.method);
+  }
+  let rpcId = 1;
+  function postToHost(payload) {
+    if (window.parent && window.parent !== window) {
+      window.parent.postMessage(payload, "*");
+      logBridge("→ " + (payload.method || ("ответ #" + payload.id)));
+    } else {
+      logBridge("автономный режим: нет окна MCP Apps host");
+    }
+  }
+  window.__mctlOnMessage = onMessage;
+  (window.__mctlQueue || []).splice(0).forEach(onMessage);
+  document.getElementById("btn-bridge-refresh").addEventListener("click", () => {
+    const args = {};
+    const meta = obj(DATA.meta);
+    if (selectedTeam && selectedTeam !== "all") args.team = selectedTeam;
+    // Keep a namespace filter the host opened with, unless the operator picked a different team.
+    if (meta.filterNamespace && (!args.team || args.team === meta.filterTeam)) args.namespace = meta.filterNamespace;
+    postToHost({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name: "mctl_stats_dashboard", arguments: args } });
+  });
+  postToHost({
+    jsonrpc: "2.0",
+    id: rpcId++,
+    method: "ui/initialize",
+    params: { appInfo: { name: "mctl-stats-app", version: "1.0.0" }, appCapabilities: {}, protocolVersion: "2025-06-18" }
+  });
+  rebuildTeams();
+  renderAll();
+  logBridge(obj(DATA.meta).live ? "Загружен live-снимок" : "Загружен встроенный снимок");
+})();
+</script>
+</body>
+</html>

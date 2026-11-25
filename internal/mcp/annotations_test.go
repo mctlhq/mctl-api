@@ -132,6 +132,7 @@ var recordedHints = map[string]hints{
 	"mctl_rollback_service":                  {readOnly: false, destructive: true, idempotent: false},
 	"mctl_scale_service":                     {readOnly: false, destructive: false, idempotent: true},
 	"mctl_set_agent_version_lifecycle":       {readOnly: false, destructive: true, idempotent: false},
+	"mctl_stats_dashboard":                   {readOnly: true, destructive: false, idempotent: false},
 	"mctl_sync_repos":                        {readOnly: false, destructive: false, idempotent: true},
 	"mctl_trigger_agents_run":                {readOnly: false, destructive: false, idempotent: false},
 	"mctl_trigger_approve":                   {readOnly: false, destructive: true, idempotent: true},
@@ -283,7 +284,7 @@ func TestReadOnlyToolsAreTheRecordedSet(t *testing.T) {
 		"mctl_list_tenants", "mctl_list_work_item_execution_requests", "mctl_list_work_item_executions", "mctl_list_work_item_intents",
 		"mctl_list_work_item_snapshots", "mctl_list_workflows", "mctl_plan_epic_wave",
 		"mctl_read_platform_skill",
-		"mctl_get_agent_preflight", "mctl_resolve_agent", "mctl_whoami",
+		"mctl_get_agent_preflight", "mctl_resolve_agent", "mctl_stats_dashboard", "mctl_whoami",
 	}
 	var got []string
 	for name, h := range recordedHints {

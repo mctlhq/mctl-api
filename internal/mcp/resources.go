@@ -79,4 +79,8 @@ func (s *Server) registerResources() {
 			},
 		}, nil
 	})
+
+	// MCP App: live statistics console. The HTML is embedded; the iframe
+	// does not call the network. Live numbers arrive as a tool result.
+	s.registerStatsApp()
 }
