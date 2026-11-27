@@ -45,8 +45,21 @@ jobs:
       # run every linter here. Keep the version equal to validate.yml's.
       - name: Install golangci-lint
         run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
+      # The analysis of internal/api peaked at 15.5 GB on a 16 GB runner and
+      # the runner was shut down. Collect garbage earlier and one package at a
+      # time (slower, same rules), with swap as headroom.
+      - name: Add swap
+        run: |
+          sudo fallocate -l 16G /gosec-swap
+          sudo chmod 600 /gosec-swap
+          sudo mkswap /gosec-swap
+          sudo swapon /gosec-swap
+          free -h
       - name: gosec
-        run: /usr/bin/time -v golangci-lint run --enable-only gosec --timeout 25m ./...
+        env:
+          GOGC: "30"
+          GOMEMLIMIT: 12GiB
+        run: /usr/bin/time -v golangci-lint run --enable-only gosec --concurrency 2 --timeout 25m ./...
 
   trivy:
     runs-on: ubuntu-latest
