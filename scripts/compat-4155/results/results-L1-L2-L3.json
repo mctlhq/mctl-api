@@ -1,0 +1,87 @@
+[
+ {
+  "id": "L1",
+  "title": "legacy create/claim/fulfil via 1.117.0 dispatcher, 4.155.0",
+  "verdict": "PASS",
+  "evidence": {
+   "items": [
+    {
+     "work_item": "wi_63f2b31f-3946-4b39-a911-0438b70f3ccb",
+     "create_status": 201,
+     "final_state": "fulfilled",
+     "execution_id": "we_2fed5518-d969-401e-a33c-91698ea4ccf4",
+     "claimed_by": "service:mctl-agent"
+    }
+   ],
+   "fulfil_calls": [
+    {
+     "method": "POST",
+     "path": "/api/v1/execution-requests/xr_1e323f3596ed4ed5a379052cf4abdc55/fulfil",
+     "status": 201,
+     "replica": "127.0.0.1:18301",
+     "req": "{\"claim_token\": \"xc_7b94d7d9c91a4a2a8d1654a4f366eb23\", \"engine\": \"temporal\", \"engine_ref\": \"dev-loop-mctlhq-mctl-web-133563#xr_1e323f3596ed4ed5a379052cf4abdc55\"}",
+     "resp": "{\"execution\":{\"id\":\"we_2fed5518-d969-401e-a33c-91698ea4ccf4\",\"work_item_id\":\"wi_63f2b31f-3946-4b39-a911-0438b70f3ccb\",\"engine\":\"temporal\",\"engine_ref\":\"dev-loop-mctlhq-mctl-web-133563#xr_1e323f3596ed4ed5a379052cf4abdc55\",\"attempt\":1,\"phase\":\"Running\",\"started_"
+    }
+   ],
+   "edge_5xx": 0
+  },
+  "notes": "request created by the driver as a person (surface), claimed+delivered+fulfilled by the worker image"
+ },
+ {
+  "id": "L2",
+  "title": "reject: item without a runnable GitHub issue target",
+  "verdict": "PASS",
+  "evidence": {
+   "create_status": 201,
+   "request": {
+    "state": "rejected",
+    "reject_reason": null,
+    "reason": "no_runnable_target",
+    "closed_at": "2026-11-11T02:19:25.314431Z"
+   },
+   "reject_calls": [
+    {
+     "method": "POST",
+     "path": "/api/v1/execution-requests/xr_61cb528047eb41f38d5621425eb0788b/reject",
+     "status": 200,
+     "replica": "127.0.0.1:18301",
+     "req": "{\"claim_token\": \"xc_4cc592d268bc490ca9a517b0fb33c5e6\", \"reason\": \"no_runnable_target\"}",
+     "resp": "{\"execution_request\":{\"id\":\"xr_61cb528047eb41f38d5621425eb0788b\",\"work_item_id\":\"wi_ea68507b-e06a-44c2-9c4f-242b2658785f\",\"kind\":\"start\",\"expected_state_version\":1,\"surface\":\"test\",\"requested_by\":\"oidc:dev-user\",\"idempotency_key\":\"L2-63562\",\"state\":\"rejected\","
+    }
+   ]
+  },
+  "notes": ""
+ },
+ {
+  "id": "L3",
+  "title": "409 execution_active stores nothing (queue-while-active switch unset)",
+  "verdict": "PASS",
+  "evidence": {
+   "4.155.0": {
+    "status": 409,
+    "code": "execution_active",
+    "requests_before_after": [
+     "0",
+     "0"
+    ],
+    "events_before_after": [
+     "2",
+     "2"
+    ]
+   },
+   "4.154.0": {
+    "status": 409,
+    "code": "execution_active",
+    "requests_before_after": [
+     "0",
+     "0"
+    ],
+    "events_before_after": [
+     "2",
+     "2"
+    ]
+   }
+  },
+  "notes": "driver-side request on an item with an open execution; worker never sees the request, so this is an API-only check"
+ }
+]
