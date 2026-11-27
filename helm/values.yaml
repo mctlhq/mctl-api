@@ -332,6 +332,18 @@ deployApprovalUISecret: ""
 # nothing.
 releaseApprovalUISecret: ""
 
+# Optional: Secret holding GLOVO_ACCESS_SELF_UI_CLIENT_ID and
+# GLOVO_ACCESS_SELF_UI_CLIENT_SECRET, the confidential ZITADEL client of the
+# Glovo access page for the person asking (/glovo/access,
+# mctlhq/mctl-glovo#82). In production the zitadel-iac Job writes both into
+# the same Secret as MCTL_OIDC_PROVIDERS. Optional refs, so absent keys leave
+# the page off (logged) rather than failing the pod. The page also needs
+# GLOVO_ACCESS_SELF_UI_ENABLED="true", SELF_URL, the Glovo consent routes with
+# the access store, and /glovo in ingress.extraPaths. Do not add the two keys
+# to `env` as empty defaults: an explicit empty entry would beat the Secret.
+# Empty by default: renders nothing.
+glovoAccessSelfUISecret: ""
+
 # Extension slots for a co-located sidecar (mctlhq/mctl-gitops#2742: a
 # credential-isolated reader of a Vault path the main pod must not see). All
 # four are empty by default and an empty value renders nothing, so the

@@ -112,6 +112,12 @@ type Options struct {
 	// only place a release grant is decided. Mounted only when complete and
 	// ReleaseGrants is enabled.
 	ReleaseApproval *ReleaseApprovalPageOptions
+	// GlovoAccessSelf is the Glovo access page for the person asking
+	// (mctl-glovo#82): consent and access request in a browser, behind a
+	// Google sign-in of its own ZITADEL client. Nil or incomplete, outside
+	// principal mode, or without the access store: the routes are not
+	// mounted.
+	GlovoAccessSelf *GlovoAccessSelfPageOptions
 	// DeployRecords keeps one record per applied plan (mctl-api#1047). Nil
 	// refuses every apply before its grant is spent, and answers
 	// GET /deploy/deployments/{id} with 503.
@@ -489,6 +495,9 @@ type Handlers struct {
 	// glovoAccessApproval is the Glovo access decision page; nil when not
 	// mounted.
 	glovoAccessApproval *glovoAccessDecider
+	// glovoAccessSelf is the Glovo access page for the person asking; nil
+	// when not configured (routes unmounted).
+	glovoAccessSelf *glovoAccessSelf
 	// releaseWindowApproval is the release window approval page; nil when not mounted.
 	releaseWindowApproval *windowDecider
 }
@@ -518,6 +527,11 @@ func NewRouter(opts Options) http.Handler {
 	// needs the access store.
 	if opts.ReleaseApproval.enabled() && opts.GlovoConsent.accessMounted() {
 		h.glovoAccessApproval = newGlovoAccessDecider(opts.ReleaseApproval)
+	}
+	// The self page has its own client and needs the access store and
+	// principal mode: it acts on the principal the sign-in resolves to.
+	if opts.GlovoAccessSelf.enabled() && opts.GlovoConsent.accessMounted() && opts.TenantAuthzMode == TenantAuthzPrincipal {
+		h.glovoAccessSelf = newGlovoAccessSelf(opts.GlovoAccessSelf)
 	}
 	// The window page shares the release page's configuration (client,
 	// deciders, required amr) and needs the window routes as well.
@@ -642,6 +656,15 @@ func NewRouter(opts Options) http.Handler {
 			r.Post(glovoAccessConfirmPath, h.handleGlovoAccessConfirm)
 			r.Get(glovoAccessLinkPath, h.handleGlovoAccessLink)
 			r.Get(glovoAccessPagePrefix+"{principal_id}", h.handleGlovoAccessPage)
+		}
+		// Glovo access page for the person asking (mctl-glovo#82): dark
+		// unless configured. Own client, callback path, cookie and flow
+		// kinds. The decision page lives under /glovo/access-approvals/.
+		if h.glovoAccessSelf != nil {
+			r.Get(glovoAccessSelfPath, h.handleGlovoAccessSelfPage)
+			r.Post(glovoAccessSelfStartPath, h.handleGlovoAccessSelfStart)
+			r.Get(glovoAccessSelfCallbackPath, h.handleGlovoAccessSelfCallback)
+			r.Post(glovoAccessSelfConfirmPath, h.handleGlovoAccessSelfConfirm)
 		}
 		// Release window approval page (sync-window write path, S2): dark
 		// unless configured. Own callback path, cookie and flow kinds.

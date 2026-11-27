@@ -1159,6 +1159,76 @@ func TestDeploymentReleaseApprovalUISecretSkipsEmptyEnvEntry(t *testing.T) {
 	}
 }
 
+// --- glovoAccessSelfUISecret (the /glovo/access page client) ---------------
+
+func TestDeploymentDefaultRendersNoGlovoAccessSelfUIEnv(t *testing.T) {
+	d, out := renderDeployment(t)
+	c := mainContainer(t, d)
+	for _, name := range []string{"GLOVO_ACCESS_SELF_UI_ENABLED", "GLOVO_ACCESS_SELF_UI_CLIENT_ID", "GLOVO_ACCESS_SELF_UI_CLIENT_SECRET"} {
+		if _, ok := findEnv(c, name); ok {
+			t.Errorf("default render should not set %s", name)
+		}
+	}
+	// Not even as an empty entry: that would beat the Secret's value.
+	if bytes.Contains(out, []byte("GLOVO_ACCESS_SELF_UI")) {
+		t.Error("default render should not mention the page's variables at all")
+	}
+}
+
+func TestDeploymentEmptyGlovoAccessSelfUISecretRendersUnchanged(t *testing.T) {
+	_, defaultOut := renderDeployment(t)
+	_, emptyOut := renderDeployment(t, "--set", "glovoAccessSelfUISecret=")
+	if !bytes.Equal(defaultOut, emptyOut) {
+		t.Error("empty glovoAccessSelfUISecret should render byte-identical output to the default")
+	}
+}
+
+func TestDeploymentRendersGlovoAccessSelfUISecretRefs(t *testing.T) {
+	d, _ := renderDeployment(t, "--set", "glovoAccessSelfUISecret=mctl-api-oidc-zitadel")
+	c := mainContainer(t, d)
+	for _, name := range []string{"GLOVO_ACCESS_SELF_UI_CLIENT_ID", "GLOVO_ACCESS_SELF_UI_CLIENT_SECRET"} {
+		if n := countEnv(c, name); n != 1 {
+			t.Fatalf("expected exactly one %s entry, got %d", name, n)
+		}
+		e, _ := findEnv(c, name)
+		if e.Value != "" || e.ValueFrom == nil || e.ValueFrom.SecretKeyRef == nil {
+			t.Fatalf("%s must come from a secretKeyRef only: %+v", name, e)
+		}
+		ref := e.ValueFrom.SecretKeyRef
+		if ref.Name != "mctl-api-oidc-zitadel" || ref.Key != name || !ref.Optional {
+			t.Errorf("%s secretKeyRef = %+v", name, ref)
+		}
+	}
+}
+
+func TestDeploymentGlovoAccessSelfUISecretConflictsWithEnv(t *testing.T) {
+	helmPath := requireHelm(t)
+	for _, key := range []string{"GLOVO_ACCESS_SELF_UI_CLIENT_ID", "GLOVO_ACCESS_SELF_UI_CLIENT_SECRET"} {
+		// #nosec G204 -- see renderDeployment.
+		cmd := exec.Command(helmPath, "template", "mctl-api", ".", "--show-only", "templates/deployment.yaml",
+			"--set", "glovoAccessSelfUISecret=mctl-api-oidc-zitadel",
+			"--set", "env."+key+"=x")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected the render to fail when %s is set both in env and through the slot", key)
+		}
+		if !strings.Contains(string(out), "glovoAccessSelfUISecret") {
+			t.Errorf("failure should name glovoAccessSelfUISecret, got: %s", out)
+		}
+	}
+}
+
+func TestDeploymentGlovoAccessSelfUISecretSkipsEmptyEnvEntry(t *testing.T) {
+	// An empty literal passes the conflict check but would render a second
+	// entry with the same name, which server-side apply refuses.
+	d, _ := renderDeployment(t, "--set", "glovoAccessSelfUISecret=mctl-api-oidc-zitadel",
+		"--set-string", "env.GLOVO_ACCESS_SELF_UI_CLIENT_ID=")
+	c := mainContainer(t, d)
+	if n := countEnv(c, "GLOVO_ACCESS_SELF_UI_CLIENT_ID"); n != 1 {
+		t.Fatalf("expected exactly one GLOVO_ACCESS_SELF_UI_CLIENT_ID entry, got %d", n)
+	}
+}
+
 func TestIngressExtraPathsRoutesReleaseApprovals(t *testing.T) {
 	in, _ := renderIngress(t, "--set", "ingress.extraPaths[0]=/release")
 	api := rulePaths(ruleByHost(t, in, "api.mctl.ai"))
