@@ -1532,6 +1532,10 @@ func main() {
 	// RELEASE_APPROVAL_UI_ENABLED is true and everything it reads is up.
 	releaseApprovalPage := releaseApprovalOptions(cfg, releaseApprovalUIEnvFromOS(), principalResolver, principalAuthz,
 		oauthFlowStore(oauthServer), workItemsStore != nil, releaseGrants != nil)
+	// Glovo access page for the person asking (mctl-glovo#82): dark unless
+	// GLOVO_ACCESS_SELF_UI_ENABLED is true and everything it reads is up.
+	glovoAccessSelfPage := glovoAccessSelfOptions(cfg, glovoAccessSelfUIEnvFromOS(), principalResolver, oauthFlowStore(oauthServer),
+		glovoConsentRoutes != nil && glovoConsentRoutes.Enabled && glovoConsentRoutes.Store != nil && glovoConsentRoutes.Access != nil)
 	// Glovo access notifications (mctl-glovo#82 stage C): dark unless
 	// GLOVO_ACCESS_NOTIFY_ENABLED is true and everything the owner card
 	// needs is up; the requester's emails need GLOVO_ACCESS_EMAIL_ENABLED on
@@ -1581,6 +1585,7 @@ func main() {
 		ReleaseGrants:                  releaseGrants,
 		ReleaseWindows:                 releaseWindows,
 		ReleaseApproval:                releaseApprovalPage,
+		GlovoAccessSelf:                glovoAccessSelfPage,
 		OAuthUpstream:                  cfg.oauthUpstreamMode(),
 		GlovoGoogleOnly:                cfg.glovoGoogleOnlyMode(),
 		OAuthZitadel:                   oauthZitadelOptions(cfg, principalStore, oauthServer),

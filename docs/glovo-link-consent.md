@@ -111,6 +111,77 @@ tool request made while access is revoked is refused and leaves the grant as it
 is; the first refresh made in that window destroys the grant and its token
 family, and re-approving access does not revive them, so the person links again.
 
+## The access page for the person asking
+
+The human routes above need a bearer token. `/glovo/access` is the same four
+operations in a browser, for a new Google customer who has no token yet.
+
+| Route | What it does |
+|---|---|
+| `GET /glovo/access` | static: the four steps, the consent version, a link to `https://glovo.mctl.ai/link` and a sign-in button. Reads nothing, sets no cookie |
+| `POST /glovo/access/start` | sends the browser to ZITADEL for a fresh sign-in (`prompt=login`, `max_age=0`, PKCE S256, nonce) through the customers organization's Google IdP |
+| `GET /glovo/access/callback` | verifies the sign-in, resolves the principal and shows its consent and access with the actions that apply |
+| `POST /glovo/access/confirm` | one `action`: `consent`, `request`, `withdraw_request` or `withdraw_consent` |
+
+**Who may use it.** Only a customers-organization identity whose ID token
+carries the identity hook's Google proof (`mctl:org=customers`,
+`mctl:idp=google`, a well-formed `mctl:google_sub`). Staff, a user of another
+organization, a GitHub-proven customer, an unproven one, one the hook refused
+and a token that names no organization all get the same 403, which does not
+say which check failed. No second factor is asked: the page changes the
+person's own records only, and the owner still approves on the decision page
+with one.
+
+**Whose records.** The principal is resolved from the verified sign-in and
+from nothing else: no path, form field or query parameter names a principal.
+It is resolved again on every action, so a principal disabled, conflicted or
+re-keyed after the sign-in acts on nothing.
+
+**What it shows.** Consent recorded or not, and access as `not requested`,
+pending with its expiry, `approved`, `rejected` or `revoked`. A request the
+person withdrew reads as `not requested`, as on the bearer route. A read that
+fails is a 503 and never a page saying "not recorded" or "not requested". The
+page offers only the actions that apply, and a hand-made form is held to the
+same rule: `request` needs an active consent and no pending or approved
+access. The bearer `PUT /api/v1/glovo/access-request` does not check consent;
+the page is stricter so the owner is asked about someone who has already
+agreed to the text.
+
+**How long.** There is no session. The sign-in yields a one-time challenge
+and CSRF token bound to the `__Host-mctl_glovo_access_self` cookie, held in
+the shared flow store. Each action spends its challenge and the answer
+carries a new one, so the next action needs no new sign-in, but only until
+ten minutes after the sign-in started: an action never extends that.
+
+**What is recorded.** The same store calls, `mctl_glovo_link_consent_events_total`
+labels and audit operations as the bearer routes (`glovo.link_consent.record`,
+`glovo.link_consent.revoke`, `glovo.access_request.open`,
+`glovo.access_request.withdraw`), with the principal id as the audit actor and
+`surface=glovo-access-self-page` in the parameters. The page adds the routes
+`access_self_signin` and `access_self_action` to the counter for its own
+refusals, and the outcomes `consent_required` and `rate_limited` to
+`access_request`. Opening a request is limited to three an hour per
+principal, counted in the process (per pod), like the other per-principal
+limiters here: every new request queues an owner card.
+
+**What it never holds.** The person's display name, login and email are not
+read into a page, a flow entry, a log line or an audit row. The page shows a
+masked principal id (`prn_***` and the last four characters). No body it
+renders contains an email-shaped string, which the edge would rewrite; a test
+holds every rendered page to that.
+
+**Turning it on.** The page has a ZITADEL web client of its own
+(authorization code, client secret), with the redirect URI
+`<SELF_URL>/glovo/access/callback`. Its client id must be in
+`ZITADEL_HOOK_CLAIM_CLIENT_IDS`, or its ID tokens carry no `mctl:*` claims
+and every sign-in is refused. The chart slot `glovoAccessSelfUISecret` names
+the Secret holding the two client variables; `/glovo` must be in
+`ingress.extraPaths`. With the switch on and anything missing (principal
+mode, the flow store, the customers organization and its Google IdP,
+`SELF_URL`, the client, the consent routes with the access store) the page
+stays unmounted, every path is 404 and one boot-log error names what is
+missing.
+
 ## Notifications and the decide link (stage C)
 
 Dark unless `GLOVO_ACCESS_NOTIFY_ENABLED=true` (below). With the switch off
@@ -310,6 +381,8 @@ The code default stays closed.
 | `GLOVO_ACCESS_REQUIRED` | Default `false`: slots are active consents, capacity accounting as above. `true` (mctl-glovo#82) makes approved access requests hold the slots (`Record` stops capping consents) AND makes the `glovo:c2` grant source require `access = approved`, read live at every check, in the OAuth personal-grant paths (code, exchange, refresh, consent page) and in the Glovo scope resolver: revoking access ends the next request, a failed access read or an unknown status is a refusal or 503, never a grant. If the store has no access side the personal grants are not wired at all. Existing consent holders keep working because the one-shot backfill approves every active consent when the flag first flips; a consent recorded afterwards needs an approved access. Anything but `""`, `false` or `true` is a boot-log error and consent stays off. The access routes (`/api/v1/glovo/access-request`) and the `access` field of the service read work either way. Enabling it needs the decision page (above) first, or nobody new gets in |
 | `GLOVO_ACCESS_NOTIFY_ENABLED` | Default `false`: no owner card, no email, no outbox row, no decide token. `true` turns on the owner card and the decide link of "Notifications and the decide link" above, if its dependencies are there; otherwise one boot-log error and it stays off. Anything but `""`, `false` or `true` is a boot-log error and stays off |
 | `GLOVO_ACCESS_EMAIL_ENABLED` | Default `false`: no approved, rejected or lapsed email, and the requester's address is never read. `true` adds the emails; it needs `GLOVO_ACCESS_NOTIFY_ENABLED=true`, the customers organization and `ZITADEL_HOOK_USERNAME_DOMAIN`. A bad value or a missing dependency is a boot-log error and leaves the emails off without touching the card |
+| `GLOVO_ACCESS_SELF_UI_ENABLED` | Default off: every `/glovo/access` path is 404. Exactly `true` mounts the access page for the person asking, if everything it needs is there; otherwise one boot-log error ("glovo access self page disabled") and it stays off |
+| `GLOVO_ACCESS_SELF_UI_CLIENT_ID`, `GLOVO_ACCESS_SELF_UI_CLIENT_SECRET` | the page's own ZITADEL web client (chart slot `glovoAccessSelfUISecret`); both or the page stays off |
 | `GLOVO_CONSENT_DB_URL` | the store's database, else `AUDIT_DB_URL` |
 
 ## What mctl-glovo needs next

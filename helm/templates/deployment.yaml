@@ -75,9 +75,13 @@ spec:
             {{- if and .Values.releaseApprovalUISecret (or .Values.env.RELEASE_APPROVAL_UI_CLIENT_ID .Values.env.RELEASE_APPROVAL_UI_CLIENT_SECRET) }}
             {{- fail "set RELEASE_APPROVAL_UI_CLIENT_ID and RELEASE_APPROVAL_UI_CLIENT_SECRET either in env or through releaseApprovalUISecret, not both" }}
             {{- end }}
+            {{- if and .Values.glovoAccessSelfUISecret (or .Values.env.GLOVO_ACCESS_SELF_UI_CLIENT_ID .Values.env.GLOVO_ACCESS_SELF_UI_CLIENT_SECRET) }}
+            {{- fail "set GLOVO_ACCESS_SELF_UI_CLIENT_ID and GLOVO_ACCESS_SELF_UI_CLIENT_SECRET either in env or through glovoAccessSelfUISecret, not both" }}
+            {{- end }}
             {{- range $key, $value := .Values.env }}
             {{- /* oidcProvidersSecret, zitadelLinkSecret, oauthZitadelSecret, devLoopDecideSecret,
-                   glovoBasketUISecret, deployApprovalUISecret and releaseApprovalUISecret
+                   glovoBasketUISecret, deployApprovalUISecret, releaseApprovalUISecret
+                   and glovoAccessSelfUISecret
                    supply these below; a literal entry (even an empty one)
                    would otherwise render a second entry with the same name,
                    which server-side apply refuses. */}}
@@ -87,7 +91,8 @@ spec:
                            (and $.Values.devLoopDecideSecret (or (eq $key "DEVLOOP_DECIDE_CLIENT_ID") (eq $key "DEVLOOP_DECIDE_CLIENT_SECRET")))
                            (and $.Values.glovoBasketUISecret (or (eq $key "GLOVO_BASKET_UI_CLIENT_ID") (eq $key "GLOVO_BASKET_UI_CLIENT_SECRET")))
                            (and $.Values.deployApprovalUISecret (or (eq $key "DEPLOY_APPROVAL_UI_CLIENT_ID") (eq $key "DEPLOY_APPROVAL_UI_CLIENT_SECRET")))
-                           (and $.Values.releaseApprovalUISecret (or (eq $key "RELEASE_APPROVAL_UI_CLIENT_ID") (eq $key "RELEASE_APPROVAL_UI_CLIENT_SECRET")))) }}
+                           (and $.Values.releaseApprovalUISecret (or (eq $key "RELEASE_APPROVAL_UI_CLIENT_ID") (eq $key "RELEASE_APPROVAL_UI_CLIENT_SECRET")))
+                           (and $.Values.glovoAccessSelfUISecret (or (eq $key "GLOVO_ACCESS_SELF_UI_CLIENT_ID") (eq $key "GLOVO_ACCESS_SELF_UI_CLIENT_SECRET")))) }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
@@ -334,6 +339,27 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.releaseApprovalUISecret }}
                   key: RELEASE_APPROVAL_UI_CLIENT_SECRET
+                  optional: true
+            {{- end }}
+            {{- if .Values.glovoAccessSelfUISecret }}
+            # The confidential ZITADEL client of the Glovo access page for the
+            # person asking (/glovo/access, mctlhq/mctl-glovo#82), written by
+            # the zitadel-iac Job. Optional refs: with
+            # GLOVO_ACCESS_SELF_UI_ENABLED unset the page stays off; with it
+            # "true" and a key missing, cmd/api still starts, leaves the page
+            # unmounted and logs "glovo access self page disabled" at Error
+            # level (cmd/api/glovo_access_self_ui_options.go).
+            - name: GLOVO_ACCESS_SELF_UI_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.glovoAccessSelfUISecret }}
+                  key: GLOVO_ACCESS_SELF_UI_CLIENT_ID
+                  optional: true
+            - name: GLOVO_ACCESS_SELF_UI_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.glovoAccessSelfUISecret }}
+                  key: GLOVO_ACCESS_SELF_UI_CLIENT_SECRET
                   optional: true
             {{- end }}
             {{- if .Values.usagePricingConfigMap }}
