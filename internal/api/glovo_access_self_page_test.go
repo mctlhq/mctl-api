@@ -399,7 +399,7 @@ func selfEvents() map[[2]string]float64 {
 func selfEventDelta(before map[[2]string]float64, actionsOnly bool) map[[2]string]float64 {
 	out := map[[2]string]float64{}
 	for l, v := range selfEvents() {
-		if d := v - before[l]; d != 0 && !(actionsOnly && strings.HasPrefix(l[0], "access_self_")) {
+		if d := v - before[l]; d != 0 && (!actionsOnly || !strings.HasPrefix(l[0], "access_self_")) {
 			out[l] = d
 		}
 	}

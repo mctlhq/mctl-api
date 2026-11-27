@@ -592,6 +592,7 @@ func (h *Handlers) handleGlovoAccessSelfCallback(w http.ResponseWriter, r *http.
 	}
 	prov, err := p.oidcProvider(r.Context())
 	if err != nil {
+		slog.Warn("glovo access page: ZITADEL discovery failed", "issuer", p.opts.Issuer, "error", err)
 		p.failed(w, http.StatusBadGateway, "The sign-in service is not reachable right now.")
 		return
 	}

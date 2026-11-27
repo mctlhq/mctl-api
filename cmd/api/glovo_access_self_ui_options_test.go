@@ -89,7 +89,7 @@ func TestGlovoAccessSelfOptionsGating(t *testing.T) {
 
 // The switch is on for the exact value "true" and nothing else.
 func TestGlovoAccessSelfUIEnvSwitch(t *testing.T) {
-	for v, want := range map[string]bool{"true": true, "": false, "TRUE": false, "1": false, "yes": false, "true ": false} {
+	for v, want := range map[string]bool{"true": true, "": false, "TRUE": false, "1": false, "yes": false, "true" + " ": false} {
 		t.Setenv("GLOVO_ACCESS_SELF_UI_ENABLED", v)
 		t.Setenv("GLOVO_ACCESS_SELF_UI_CLIENT_ID", "id")
 		t.Setenv("GLOVO_ACCESS_SELF_UI_CLIENT_SECRET", "secret")
