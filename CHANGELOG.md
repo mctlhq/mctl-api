@@ -1,5 +1,17 @@
 # Changelog
 
+## [4.180.0](https://github.com/mctlhq/mctl-api/compare/4.179.0...4.180.0) (2026-11-27)
+
+
+### Features
+
+* **api:** add the self-service Glovo access page ([fa05577](https://github.com/mctlhq/mctl-api/commit/fa05577f87ebcda7ac130035d963df3faf419271))
+
+
+### Bug Fixes
+
+* **api:** satisfy lint and log the callback discovery failure ([f5ffcc0](https://github.com/mctlhq/mctl-api/commit/f5ffcc018707093793eb52784c3b0992d71841e9))
+
 ## [4.179.0](https://github.com/mctlhq/mctl-api/compare/4.178.2...4.179.0) (2026-11-27)
 
 
