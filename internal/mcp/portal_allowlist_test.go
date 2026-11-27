@@ -116,6 +116,7 @@ var mutatingOnPortal = map[string]string{
 	"mctl_grant_repo_access":                "repository authorization for a tenant",
 	"mctl_promote_agent":                    "which agent version tenants resolve to",
 	"mctl_propose_release_window":           "asks for an Argo CD deny sync window and, once the owner approved it on an MFA page, opens a gitops pull request and queues it for merge",
+	"mctl_propose_window_removal":           "asks for the removal of an Argo CD deny sync window and, once the owner approved it on an MFA page, opens a gitops pull request deleting it and queues it for merge",
 	"mctl_provision_database":               "creates persistent state and wires credentials",
 	"mctl_publish_agent_version":            "makes an agent version runnable",
 	"mctl_publish_platform_skill":           "offers a skill to every tenant",
