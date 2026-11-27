@@ -70,14 +70,15 @@ func (h *Handlers) checkWindowConfigured(win workitems.ReleaseWindow) (code stri
 		return unavailable()
 	}
 	matches := 0
-	for _, c := range configured.Windows {
-		if isWindowToRemove(c, win) {
+	for i := range configured.Windows {
+		if isWindowToRemove(&configured.Windows[i], win) {
 			matches++
 		}
 	}
 	if matches != 1 {
 		return codeReleaseWindowNotAssigned, http.StatusUnprocessableEntity,
-			fmt.Sprintf("project %s holds %d deny windows with exactly these applications, this schedule and this duration; exactly one is required",
+			fmt.Sprintf("project %s holds %d deny windows with exactly these applications, this schedule and this duration and no other setting "+
+				"(namespaces, clusters, time zone, description, manualSync, andOperator); exactly one is required",
 				win.Project, matches)
 	}
 	return "", 0, ""
@@ -85,7 +86,7 @@ func (h *Handlers) checkWindowConfigured(win workitems.ReleaseWindow) (code stri
 
 // isWindowToRemove reports whether a configured window is the one win names. A
 // window carrying anything a release window cannot express is a different one.
-func isWindowToRemove(c argocd.SyncWindow, win workitems.ReleaseWindow) bool {
+func isWindowToRemove(c *argocd.SyncWindow, win workitems.ReleaseWindow) bool {
 	return c.Kind == "deny" && c.Schedule == win.Schedule && c.Duration == win.Duration &&
 		slices.Equal(c.Applications, win.Applications) &&
 		len(c.Namespaces) == 0 && len(c.Clusters) == 0 &&

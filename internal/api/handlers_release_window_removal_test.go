@@ -195,7 +195,7 @@ func TestRequestReleaseWindowRemovalShapeIsCheckedBeforeAnyRead(t *testing.T) {
 		t.Fatalf("status %d %s", w.Code, w.Body)
 	}
 	if f.head.calls != 0 || len(f.argo.calls)+len(f.argo.projectCalls) != 0 {
-		t.Fatalf("a malformed request read GitHub %d times and Argo %v", f.head.calls, f.argo.calls)
+		t.Fatalf("a malformed request read GitHub %d times, Argo apps %v and projects %v", f.head.calls, f.argo.calls, f.argo.projectCalls)
 	}
 }
 
