@@ -38,15 +38,23 @@ func (f *fakeWindowHead) Head(context.Context) (string, error) {
 type windowArgo struct {
 	fakeArgoCD
 	known map[string]bool // "<project>/<app>"
-	// assigned is what Argo reports as assigned to "<project>/<app>"; a removal
-	// request checks that a window like its own is there.
-	assigned map[string][]argocd.AppSyncWindow
-	err      error
-	calls    []string
+	// windows is what Argo reports as configured in a project (spec.syncWindows).
+	windows      map[string][]argocd.SyncWindow
+	projectNil   bool
+	projectCalls []string
+	err          error
+	calls        []string
 }
 
-func (a *windowArgo) GetProjectSyncWindows(string) (*argocd.ProjectSyncWindows, error) {
-	return nil, errors.New("not used")
+func (a *windowArgo) GetProjectSyncWindows(project string) (*argocd.ProjectSyncWindows, error) {
+	a.projectCalls = append(a.projectCalls, project)
+	if a.err != nil {
+		return nil, a.err
+	}
+	if a.projectNil {
+		return nil, nil
+	}
+	return &argocd.ProjectSyncWindows{Project: project, Windows: a.windows[project]}, nil
 }
 
 func (a *windowArgo) GetAppSyncWindows(project, app string) (*argocd.AppSyncWindows, error) {
@@ -57,7 +65,7 @@ func (a *windowArgo) GetAppSyncWindows(project, app string) (*argocd.AppSyncWind
 	if !a.known[project+"/"+app] {
 		return nil, argocd.ErrNotFound
 	}
-	return &argocd.AppSyncWindows{Application: app, CanSync: true, AssignedWindows: a.assigned[project+"/"+app]}, nil
+	return &argocd.AppSyncWindows{Application: app, CanSync: true}, nil
 }
 
 // recordingDispatcher records what would have been dispatched. delay holds

@@ -28,11 +28,14 @@ func goodRemovalBody() map[string]any {
 	return map[string]any{"project": "apps", "applications": []string{"labs-portfolio"}, "schedule": "0 3 * * 0", "duration": "1h"}
 }
 
-// withPortfolioWindow has Argo report the window that goodRemovalBody names.
+func portfolioWindow() argocd.SyncWindow {
+	return argocd.SyncWindow{Kind: "deny", Schedule: "0 3 * * 0", Duration: "1h", Applications: []string{"labs-portfolio"}}
+}
+
+// withPortfolioWindow has Argo report the window that goodRemovalBody names as
+// configured in project apps.
 func (f *windowFixture) withPortfolioWindow() *windowFixture {
-	f.argo.assigned = map[string][]argocd.AppSyncWindow{
-		"apps/labs-portfolio": {{Kind: "deny", Schedule: "0 3 * * 0", Duration: "1h"}},
-	}
+	f.argo.windows = map[string][]argocd.SyncWindow{"apps": {portfolioWindow()}}
 	return f
 }
 
@@ -110,13 +113,47 @@ func TestRequestReleaseWindowRemovalRefusals(t *testing.T) {
 		{"glob application", adminUser, with("applications", []string{"labs-*"}), http.StatusBadRequest, "release_window_invalid_input", nil},
 		{"no applications", adminUser, with("applications", []string{}), http.StatusBadRequest, "release_window_invalid_input", nil},
 		{"bad duration", adminUser, with("duration", "2d"), http.StatusBadRequest, "release_window_invalid_input", nil},
-		{"a schedule Argo does not hold", adminUser, with("schedule", "0 4 * * 0"), http.StatusUnprocessableEntity, "release_window_not_assigned", nil},
-		{"a duration Argo does not hold", adminUser, with("duration", "2h"), http.StatusUnprocessableEntity, "release_window_not_assigned", nil},
-		{"no window assigned at all", adminUser, goodRemovalBody(), http.StatusUnprocessableEntity, "release_window_not_assigned",
-			func(f *windowFixture) { f.argo.assigned = nil }},
-		{"an allow window is not a deny window", adminUser, goodRemovalBody(), http.StatusUnprocessableEntity, "release_window_not_assigned",
+		{"a schedule Argo does not hold", adminUser, with("schedule", "0 4 * * 0"), http.StatusUnprocessableEntity, "release_window_not_assigned",
+			nil},
+		{"a duration Argo does not hold", adminUser, with("duration", "2h"), http.StatusUnprocessableEntity, "release_window_not_assigned",
+			nil},
+		{"no window configured at all", adminUser, goodRemovalBody(), http.StatusUnprocessableEntity, "release_window_not_assigned",
+			func(f *windowFixture) { f.argo.windows = nil }},
+		{"the window is in another project", adminUser, goodRemovalBody(), http.StatusUnprocessableEntity, "release_window_not_assigned",
 			func(f *windowFixture) {
-				f.argo.assigned["apps/labs-portfolio"][0].Kind = "allow"
+				f.argo.windows = map[string][]argocd.SyncWindow{"platform": {portfolioWindow()}}
+			}},
+		{"an allow window is not a deny window", adminUser, goodRemovalBody(), http.StatusUnprocessableEntity, "release_window_not_assigned",
+			func(f *windowFixture) { w := &f.argo.windows["apps"][0]; w.Kind = "allow" }},
+		{"the window covers one more application", adminUser, goodRemovalBody(), http.StatusUnprocessableEntity, "release_window_not_assigned",
+			func(f *windowFixture) {
+				w := &f.argo.windows["apps"][0]
+				w.Applications = []string{"labs-mctl-web", "labs-portfolio"}
+			}},
+		{"the request names one more application", adminUser, with("applications", []string{"labs-mctl-web", "labs-portfolio"}), http.StatusUnprocessableEntity, "release_window_not_assigned",
+			nil},
+		{"the window names another application", adminUser, goodRemovalBody(), http.StatusUnprocessableEntity, "release_window_not_assigned",
+			func(f *windowFixture) { w := &f.argo.windows["apps"][0]; w.Applications = []string{"labs-mctl-web"} }},
+		{"the window lists the applications in another order", adminUser, with("applications", []string{"labs-mctl-web", "labs-portfolio"}), http.StatusUnprocessableEntity, "release_window_not_assigned",
+			func(f *windowFixture) {
+				w := &f.argo.windows["apps"][0]
+				w.Applications = []string{"labs-portfolio", "labs-mctl-web"}
+			}},
+		{"a window also bound to namespaces", adminUser, goodRemovalBody(), http.StatusUnprocessableEntity, "release_window_not_assigned",
+			func(f *windowFixture) { w := &f.argo.windows["apps"][0]; w.Namespaces = []string{"labs"} }},
+		{"a window also bound to clusters", adminUser, goodRemovalBody(), http.StatusUnprocessableEntity, "release_window_not_assigned",
+			func(f *windowFixture) { w := &f.argo.windows["apps"][0]; w.Clusters = []string{"in-cluster"} }},
+		{"a window with a time zone", adminUser, goodRemovalBody(), http.StatusUnprocessableEntity, "release_window_not_assigned",
+			func(f *windowFixture) { w := &f.argo.windows["apps"][0]; w.TimeZone = "Europe/Belgrade" }},
+		{"a window with a description", adminUser, goodRemovalBody(), http.StatusUnprocessableEntity, "release_window_not_assigned",
+			func(f *windowFixture) { w := &f.argo.windows["apps"][0]; w.Description = "freeze" }},
+		{"a window allowing manual sync", adminUser, goodRemovalBody(), http.StatusUnprocessableEntity, "release_window_not_assigned",
+			func(f *windowFixture) { w := &f.argo.windows["apps"][0]; w.ManualSync = true }},
+		{"a window with the and operator", adminUser, goodRemovalBody(), http.StatusUnprocessableEntity, "release_window_not_assigned",
+			func(f *windowFixture) { w := &f.argo.windows["apps"][0]; w.AndOperator = true }},
+		{"the window is configured twice", adminUser, goodRemovalBody(), http.StatusUnprocessableEntity, "release_window_not_assigned",
+			func(f *windowFixture) {
+				f.argo.windows["apps"] = []argocd.SyncWindow{portfolioWindow(), portfolioWindow()}
 			}},
 		{"github unreadable", adminUser, goodRemovalBody(), http.StatusServiceUnavailable, "release_window_unavailable",
 			func(f *windowFixture) { f.head.err = errors.New("github down") }},
@@ -124,6 +161,10 @@ func TestRequestReleaseWindowRemovalRefusals(t *testing.T) {
 			func(f *windowFixture) { f.argo.err = errors.New("argo down") }},
 		{"argo refuses the read", adminUser, goodRemovalBody(), http.StatusServiceUnavailable, "release_window_unavailable",
 			func(f *windowFixture) { f.argo.err = argocd.ErrForbidden }},
+		{"argo does not know the project", adminUser, goodRemovalBody(), http.StatusServiceUnavailable, "release_window_unavailable",
+			func(f *windowFixture) { f.argo.err = argocd.ErrNotFound }},
+		{"argo answers nothing", adminUser, goodRemovalBody(), http.StatusServiceUnavailable, "release_window_unavailable",
+			func(f *windowFixture) { f.argo.projectNil = true }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -153,7 +194,7 @@ func TestRequestReleaseWindowRemovalShapeIsCheckedBeforeAnyRead(t *testing.T) {
 	if w := postAsRaw(t, f.router, removalsRoute, b, adminUser); w.Code != http.StatusBadRequest {
 		t.Fatalf("status %d %s", w.Code, w.Body)
 	}
-	if f.head.calls != 0 || len(f.argo.calls) != 0 {
+	if f.head.calls != 0 || len(f.argo.calls)+len(f.argo.projectCalls) != 0 {
 		t.Fatalf("a malformed request read GitHub %d times and Argo %v", f.head.calls, f.argo.calls)
 	}
 }
@@ -183,11 +224,25 @@ func TestRequestReleaseWindowRemovalCreatesAndReplays(t *testing.T) {
 	}
 }
 
-// An Application Argo no longer knows (404) does not stop its window from being
-// lifted: the workflow checks the window against main.
+// A window of an Application Argo no longer knows can still be lifted: the
+// project is read, the Application is not.
 func TestRequestReleaseWindowRemovalOfADeletedApplicationIsAllowed(t *testing.T) {
-	f := newWindowFixture(t, true)
+	f := newWindowFixture(t, true).withPortfolioWindow()
 	delete(f.argo.known, "apps/labs-portfolio")
+	w := postAsRaw(t, f.router, removalsRoute, goodRemovalBody(), adminUser)
+	assertStatus(t, w, http.StatusCreated)
+	if len(f.argo.calls) != 0 {
+		t.Fatalf("a removal request read Applications: %v", f.argo.calls)
+	}
+}
+
+// The matching window is found among others, and a near twin beside it does not
+// make it ambiguous.
+func TestRequestReleaseWindowRemovalPicksTheNamedWindowAmongOthers(t *testing.T) {
+	f := newWindowFixture(t, true)
+	wider := portfolioWindow()
+	wider.Applications = []string{"labs-mctl-web", "labs-portfolio"}
+	f.argo.windows = map[string][]argocd.SyncWindow{"apps": {wider, portfolioWindow()}}
 	w := postAsRaw(t, f.router, removalsRoute, goodRemovalBody(), adminUser)
 	assertStatus(t, w, http.StatusCreated)
 }

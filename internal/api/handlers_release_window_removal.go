@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -32,14 +33,14 @@ import (
 // (applications sorted and unique).
 //
 // POST opens the pending request. The server reads the mctl-gitops main commit
-// itself and asks Argo CD whether each named Application has a deny window with
-// this schedule and duration assigned; "no such window" is refused before the
-// owner is asked. That is a pre-check, not the authority: the workflow
+// itself and reads the AppProject's configured windows (spec.syncWindows) from
+// Argo CD; unless exactly one of them is this window, with this Application list,
+// the request is refused before the owner is asked. That is a pre-check, not the
+// authority: Argo CD may lag main, and the workflow
 // (release-window-removal-pr.yml) requires the exact window to be held exactly
-// once by the project on main and refuses otherwise. An Application Argo CD no
-// longer knows (404, its documented absence signal) is not checked, so a window
-// of a deleted Application can still be lifted; an Argo that cannot be read is
-// unavailable, never "present".
+// once by the project on main and refuses otherwise. No Application is read, so
+// a window naming a deleted Application can still be lifted; a project that
+// cannot be read is unavailable, never "present" and never "absent".
 //
 // The execute call is the add one's: one claim, one dispatch (of
 // release-window-removal-pr.yml), one settle, and a dispatch GitHub did not
@@ -51,34 +52,44 @@ const (
 	codeReleaseWindowNotAssigned = "release_window_not_assigned"
 )
 
-// checkWindowAssigned asks Argo CD whether each Application has a deny window
-// with the schedule and duration of win assigned. Absent from the answer is a
-// refusal only when Argo answered; a 404 skips the Application and any other
-// failure is "unavailable".
-func (h *Handlers) checkWindowAssigned(win workitems.ReleaseWindow) (code string, status int, msg string) {
+// checkWindowConfigured asks Argo CD for the project's configured windows and
+// requires exactly one of them to be win: the same match the workflow makes on
+// main (kind deny, schedule, duration, the Applications in the same order, and
+// no other restriction).
+func (h *Handlers) checkWindowConfigured(win workitems.ReleaseWindow) (code string, status int, msg string) {
+	unavailable := func() (string, int, string) {
+		return codeReleaseWindowUnavailable, http.StatusServiceUnavailable, "the project's sync windows could not be read right now"
+	}
 	reader, ok := h.opts.ArgoCD.(ArgoSyncWindowsReader)
 	if h.opts.ArgoCD == nil || !ok {
-		return codeReleaseWindowUnavailable, http.StatusServiceUnavailable, "the Application inventory could not be read right now"
+		return unavailable()
 	}
-	for _, app := range win.Applications {
-		aw, err := reader.GetAppSyncWindows(win.Project, app)
-		switch {
-		case err == nil && aw != nil:
-			if !slices.ContainsFunc(aw.AssignedWindows, func(a argocd.AppSyncWindow) bool {
-				return a.Kind == "deny" && a.Schedule == win.Schedule && a.Duration == win.Duration
-			}) {
-				return codeReleaseWindowNotAssigned, http.StatusUnprocessableEntity,
-					"application " + app + " has no deny window with this schedule and duration assigned in project " + win.Project
-			}
-		case errors.Is(err, argocd.ErrNotFound):
-			// Argo's absence signal for the Application: the workflow still
-			// requires the window to be on main, exactly once.
-		default:
-			slog.Warn("release window removal: application check", "project", win.Project, "application", app, "error", err)
-			return codeReleaseWindowUnavailable, http.StatusServiceUnavailable, "the Application inventory could not be read right now"
+	configured, err := reader.GetProjectSyncWindows(win.Project)
+	if err != nil || configured == nil {
+		slog.Warn("release window removal: project windows", "project", win.Project, "error", err)
+		return unavailable()
+	}
+	matches := 0
+	for _, c := range configured.Windows {
+		if isWindowToRemove(c, win) {
+			matches++
 		}
 	}
+	if matches != 1 {
+		return codeReleaseWindowNotAssigned, http.StatusUnprocessableEntity,
+			fmt.Sprintf("project %s holds %d deny windows with exactly these applications, this schedule and this duration; exactly one is required",
+				win.Project, matches)
+	}
 	return "", 0, ""
+}
+
+// isWindowToRemove reports whether a configured window is the one win names. A
+// window carrying anything a release window cannot express is a different one.
+func isWindowToRemove(c argocd.SyncWindow, win workitems.ReleaseWindow) bool {
+	return c.Kind == "deny" && c.Schedule == win.Schedule && c.Duration == win.Duration &&
+		slices.Equal(c.Applications, win.Applications) &&
+		len(c.Namespaces) == 0 && len(c.Clusters) == 0 &&
+		c.TimeZone == "" && c.Description == "" && !c.ManualSync && !c.AndOperator
 }
 
 // RequestReleaseWindowRemoval answers POST /api/v1/release/window-removals.
@@ -129,7 +140,7 @@ func (h *Handlers) RequestReleaseWindowRemoval(w http.ResponseWriter, r *http.Re
 		return
 	}
 	win.BaseSHA = base
-	if code, status, msg := h.checkWindowAssigned(win); code != "" {
+	if code, status, msg := h.checkWindowConfigured(win); code != "" {
 		refuse(status, code, msg)
 		return
 	}
@@ -262,8 +273,8 @@ func (h *Handlers) ExecuteReleaseWindowRemoval(w http.ResponseWriter, r *http.Re
 	}
 
 	// What can be refused without side effects is refused before the claim.
-	// No Application check: an Application that has gone must not stop its
-	// window from being lifted, and the workflow checks the window on main.
+	// No Argo CD check here: an Argo CD that cannot be read must not stop an
+	// approved removal, and the workflow checks the window on main.
 	if h.opts.WorkflowDispatcher == nil {
 		refuse(http.StatusServiceUnavailable, codeReleaseWindowNoDispatch, "GitHub workflow dispatch is not configured on this server")
 		return
