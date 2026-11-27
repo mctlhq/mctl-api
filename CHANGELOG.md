@@ -1,5 +1,21 @@
 # Changelog
 
+## [4.181.0](https://github.com/mctlhq/mctl-api/compare/4.180.0...4.181.0) (2026-11-27)
+
+
+### Features
+
+* **agents:** issue-1203-security-glovo-rate-limit-post-glovo-acc ([9631079](https://github.com/mctlhq/mctl-api/commit/9631079a33c496de680c86ab866db516ff1d6bfd))
+* **agents:** issue-1203-security-glovo-rate-limit-post-glovo-acc ([961a84e](https://github.com/mctlhq/mctl-api/commit/961a84ef08fae7f3096dcc13bb58f67ca2370b1f))
+* **agents:** issue-1204-ci-lint-gosec-on-internal-api-takes-10-m ([d0a159d](https://github.com/mctlhq/mctl-api/commit/d0a159d02cb80c21f5b60b82ea78726f1a112131))
+
+
+### Bug Fixes
+
+* **ci:** install the linter without running it in the gosec job ([a2a8f09](https://github.com/mctlhq/mctl-api/commit/a2a8f095aa5fe8b3d18ff0449b5d3c2d66baf33c))
+* **ci:** keep the gosec job inside the runner memory ([7049852](https://github.com/mctlhq/mctl-api/commit/704985204914585711197288eb5eebfefc267978))
+* **ci:** never report an unfinished gosec timing run as clean ([5b6fa9d](https://github.com/mctlhq/mctl-api/commit/5b6fa9dc2312c5da1cb66e18b51e76f0f4255319))
+
 ## [4.180.0](https://github.com/mctlhq/mctl-api/compare/4.179.0...4.180.0) (2026-11-27)
 
 
