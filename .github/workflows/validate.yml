@@ -10,6 +10,7 @@ permissions:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -22,7 +23,8 @@ jobs:
         uses: golangci/golangci-lint-action@v8
         with:
           version: v2.11.4
-          args: --timeout 10m
+          # gosec runs as its own job in security.yml (it dominates runtime).
+          args: --timeout 10m --disable gosec
 
   test:
     runs-on: ubuntu-latest
