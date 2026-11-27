@@ -662,7 +662,9 @@ func NewRouter(opts Options) http.Handler {
 		// kinds. The decision page lives under /glovo/access-approvals/.
 		if h.glovoAccessSelf != nil {
 			r.Get(glovoAccessSelfPath, h.handleGlovoAccessSelfPage)
-			r.Post(glovoAccessSelfStartPath, h.handleGlovoAccessSelfStart)
+			// Dedicated per-address limit, per process. The other page start
+			// routes stay on the shared group bucket.
+			r.With(h.glovoAccessSelf.startLimit()).Post(glovoAccessSelfStartPath, h.handleGlovoAccessSelfStart)
 			r.Get(glovoAccessSelfCallbackPath, h.handleGlovoAccessSelfCallback)
 			r.Post(glovoAccessSelfConfirmPath, h.handleGlovoAccessSelfConfirm)
 		}
