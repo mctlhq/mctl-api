@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.179.0](https://github.com/mctlhq/mctl-api/compare/4.178.2...4.179.0) (2026-11-27)
+
+
+### Features
+
+* **mcp:** expose window removal on the shared portal ([7789cca](https://github.com/mctlhq/mctl-api/commit/7789cca5a663462d77792d97901c2eb80c6da739))
+* **mcp:** expose window removal on the shared portal ([c50e7a7](https://github.com/mctlhq/mctl-api/commit/c50e7a73f0656dc339dc6d1539257b25d6e34e26))
+
+
+### Bug Fixes
+
+* **release-window:** match removal pre-check on the project window ([0352f3a](https://github.com/mctlhq/mctl-api/commit/0352f3af9e67c10bbc75f0ba12b368dd9434d848))
+* **release-window:** match removal pre-check on the project window ([7a636ae](https://github.com/mctlhq/mctl-api/commit/7a636ae569554001100b6a1f3f9cb7a791317c01))
+* **release-window:** satisfy lint and clarify the removal refusal ([94e264e](https://github.com/mctlhq/mctl-api/commit/94e264e96471ca6e54306bb1ed56fa786479d066))
+
 ## [4.178.2](https://github.com/mctlhq/mctl-api/compare/4.178.1...4.178.2) (2026-11-25)
 
 
