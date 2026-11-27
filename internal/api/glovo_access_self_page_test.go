@@ -19,11 +19,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -195,6 +197,7 @@ type selfSetup struct {
 	routes   func(*GlovoConsentRoutes) *GlovoConsentRoutes
 	mode     TenantAuthzMode
 	nilOpts  bool
+	trusted  []*net.IPNet
 }
 
 func newSelfEnv(t *testing.T, s selfSetup) *selfEnv {
@@ -235,7 +238,7 @@ func newSelfEnv(t *testing.T, s selfSetup) *selfEnv {
 				http.Error(w, `{"error":"authentication required"}`, http.StatusUnauthorized)
 			})
 		},
-		GlovoConsent: g, AuditLog: e.audit, TenantAuthzMode: s.mode, GlovoAccessSelf: opts,
+		GlovoConsent: g, AuditLog: e.audit, TenantAuthzMode: s.mode, GlovoAccessSelf: opts, TrustedProxyCIDRs: s.trusted,
 		mcpHandler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
 	})
 	return e
@@ -1503,5 +1506,60 @@ func TestGlovoAccessSelfContentSecurityPolicy(t *testing.T) {
 		if rec.Header().Get("Cache-Control") != "no-store" || rec.Header().Get("X-Frame-Options") != "DENY" {
 			t.Errorf("headers = %v", rec.Header())
 		}
+	}
+}
+
+func (e *selfEnv) startFrom(remote, xff string) *httptest.ResponseRecorder {
+	e.t.Helper()
+	req := httptest.NewRequest("POST", glovoAccessSelfStartPath, strings.NewReader(""))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = remote
+	if xff != "" {
+		req.Header.Set("X-Forwarded-For", xff)
+	}
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestGlovoAccessSelfStartIsRateLimitedPerAddress(t *testing.T) {
+	e := newSelfEnv(t, selfSetup{})
+	for i := 0; i < glovoAccessSelfStartsPerMinute; i++ {
+		if rec := e.startFrom("203.0.113.7:1000", ""); rec.Code != http.StatusSeeOther {
+			t.Fatalf("start %d = %d", i, rec.Code)
+		}
+	}
+	rec := e.startFrom("203.0.113.7:1000", "")
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" ||
+		rec.Header().Get("Set-Cookie") != "" || rec.Header().Get("Location") != "" {
+		t.Fatalf("over limit = %d %v", rec.Code, rec.Header())
+	}
+	if n := len(e.flow.entries); n != glovoAccessSelfStartsPerMinute {
+		t.Fatalf("flow entries = %d", n)
+	}
+	if rec := e.startFrom("203.0.113.8:1000", ""); rec.Code != http.StatusSeeOther {
+		t.Fatalf("other address = %d", rec.Code)
+	}
+}
+
+func TestGlovoAccessSelfStartLimitBehindTrustedProxy(t *testing.T) {
+	_, cidr, _ := net.ParseCIDR("10.42.0.0/16")
+	e := newSelfEnv(t, selfSetup{trusted: []*net.IPNet{cidr}})
+	for i := 0; i < glovoAccessSelfStartsPerMinute; i++ {
+		if rec := e.startFrom("10.42.4.181:1000", "198.51.100.1"); rec.Code != http.StatusSeeOther {
+			t.Fatalf("A start %d = %d", i, rec.Code)
+		}
+	}
+	if rec := e.startFrom("10.42.4.181:1000", "198.51.100.1"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("A over limit = %d", rec.Code)
+	}
+	if rec := e.startFrom("10.42.4.181:1000", "198.51.100.2"); rec.Code != http.StatusSeeOther {
+		t.Fatalf("B = %d", rec.Code)
+	}
+	for i := 0; i < glovoAccessSelfStartsPerMinute; i++ {
+		e.startFrom("192.0.2.9:1000", "198.51.100."+strconv.Itoa(100+i))
+	}
+	if rec := e.startFrom("192.0.2.9:1000", "198.51.100.250"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("rotating XFF from untrusted peer = %d", rec.Code)
 	}
 }

@@ -141,6 +141,13 @@ const (
 	// card.
 	glovoAccessSelfRequestsPerHour = 3
 
+	// glovoAccessSelfStartsPerMinute bounds POST /glovo/access/start per
+	// client address. Every start writes one flow-store row without
+	// authentication. The count is per process, so with N replicas the
+	// ceiling is N x this value. The group limit of 60 per minute still
+	// applies in front of it.
+	glovoAccessSelfStartsPerMinute = 10
+
 	glovoAccessSelfActionConsent         = "consent"
 	glovoAccessSelfActionRequest         = "request"
 	glovoAccessSelfActionWithdrawRequest = "withdraw_request"
@@ -276,6 +283,17 @@ func (p *glovoAccessSelf) renderPage(w http.ResponseWriter, status int, title st
 }
 
 // failed ends a flow: the message, and the way back to the first page.
+// startLimit is the dedicated per-client-address limit on the start route. It
+// runs before the handler, so a refused request writes nothing.
+func (p *glovoAccessSelf) startLimit() func(http.Handler) http.Handler {
+	return httprate.Limit(glovoAccessSelfStartsPerMinute, time.Minute,
+		httprate.WithKeyFuncs(keyByTrustedIP),
+		httprate.WithResponseHeaders(httprate.ResponseHeaders{RetryAfter: "Retry-After"}),
+		httprate.WithLimitHandler(func(w http.ResponseWriter, _ *http.Request) {
+			p.failed(w, http.StatusTooManyRequests, "Too many sign-in attempts from your network. Wait a minute and try again; nothing was changed.")
+		}))
+}
+
 func (p *glovoAccessSelf) failed(w http.ResponseWriter, status int, msg string) {
 	start := p.opts.BaseURL + glovoAccessSelfPath
 	p.renderPage(w, status, "Glovo access", []string{msg, "To start over, open " + start},
